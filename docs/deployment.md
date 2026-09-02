@@ -4,7 +4,7 @@
 
 1. 将仓库推送到 GitHub 的 `main` 分支。
 2. 在 Render 选择 **New + → Blueprint**，连接该仓库并确认 `render.yaml`。
-3. 初次同步时填入 `WEB_ORIGIN`（Web 的最终 https URL）、`ZHIPU_API_KEY`，以及生产 S3 兼容对象存储变量。`S3_ENDPOINT` 必须是浏览器可访问的 HTTPS origin；该 bucket 不可公开。
+3. 初次同步时填入 `WEB_ORIGIN`、`PUBLIC_APP_URL`（Web 的最终 https URL）、`ZHIPU_API_KEY`、生产 S3 兼容对象存储变量，以及 `SMTP_HOST`/`SMTP_FROM`（需要认证时再填 `SMTP_USER`/`SMTP_PASSWORD`）。`S3_ENDPOINT` 必须是浏览器可访问的 HTTPS origin；该 bucket 不可公开。
 4. 等 Web 健康检查通过后，用 `SETUP_TOKEN` 仅一次创建 Owner，随后轮换或移除该变量。
 5. 在 Render 中配置数据库备份/PITR、告警和服务日志保留；执行一次独立恢复演练。
 

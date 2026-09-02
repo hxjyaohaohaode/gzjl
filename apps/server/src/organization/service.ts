@@ -6,6 +6,7 @@ import {
   memberRoles,
   organizations,
   orgMemberships,
+  sessions,
   orgUnits,
   userCredentials,
   users,
@@ -50,6 +51,24 @@ export class OrganizationService {
     if (!unit) throw new Error("Failed to create organization unit");
     await this.db.insert(auditLogs).values({ organizationId: actor.organizationId, actorMembershipId: actor.membershipId, action: "org_unit.created", entityType: "org_unit", entityId: unit.id, after: unit });
     return unit;
+  }
+
+  async setMemberStatus(actor: OrganizationActor, membershipId: string, status: "active" | "inactive") {
+    if (membershipId === actor.membershipId) throw new OrganizationConflictError("不能在当前会话中停用或恢复自己。");
+    return this.db.transaction(async (tx) => {
+      const [member] = await tx.select({ membership: orgMemberships, roleKind: accessRoles.kind }).from(orgMemberships).leftJoin(memberRoles, eq(memberRoles.membershipId, orgMemberships.id)).leftJoin(accessRoles, eq(accessRoles.id, memberRoles.roleId)).where(and(eq(orgMemberships.id, membershipId), eq(orgMemberships.organizationId, actor.organizationId))).for("update").limit(1);
+      if (!member) throw new OrganizationConflictError("成员不存在或不属于当前组织。");
+      if (member.roleKind === "owner") throw new OrganizationConflictError("Owner 不能在此处停用；请先完成所有权转移。");
+      if (member.membership.status === status) return member.membership;
+      const now = new Date();
+      const [updated] = await tx.update(orgMemberships).set({ status, leftAt: status === "inactive" ? now : null, updatedAt: now }).where(eq(orgMemberships.id, membershipId)).returning();
+      if (!updated) throw new OrganizationConflictError("成员状态更新失败。");
+      if (status === "inactive") {
+        await tx.update(sessions).set({ revokedAt: now, revokeReason: "membership_deactivated" }).where(and(eq(sessions.userId, member.membership.userId), isNull(sessions.revokedAt)));
+      }
+      await tx.insert(auditLogs).values({ organizationId: actor.organizationId, actorMembershipId: actor.membershipId, action: `member.${status === "inactive" ? "deactivated" : "reactivated"}`, entityType: "org_membership", entityId: membershipId, before: { status: member.membership.status }, after: { status } });
+      return updated;
+    });
   }
 
   async invite(actor: OrganizationActor, input: { displayName: string; email: string; positionTitle?: string | undefined; orgUnitId: string | null; roleId: string }) {
