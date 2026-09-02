@@ -15,6 +15,13 @@
       "when": 1788267430266,
       "tag": "0001_tidy_totp_factor",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1788267430267,
+      "tag": "0002_happy_import_permission",
+      "breakpoints": true
     }
   ]
 }

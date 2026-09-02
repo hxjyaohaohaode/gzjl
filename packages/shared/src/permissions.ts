@@ -17,6 +17,7 @@ export const permissions = [
   "analytics.view_team",
   "ai.team_analysis",
   "audit.view",
+  "import.scope",
   "export.scope",
 ] as const;
 
