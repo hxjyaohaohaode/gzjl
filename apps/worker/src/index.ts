@@ -49,7 +49,9 @@ function parseAiJson(content: string) {
 
 async function inAppNotificationEnabled(membershipId: string, category: string): Promise<boolean> {
   const [preference] = await database.db.select().from(notificationPreferences).where(and(eq(notificationPreferences.membershipId, membershipId), eq(notificationPreferences.category, category))).limit(1);
-  return preference?.inAppEnabled ?? true;
+  if (!preference) return true;
+  if (preference.mutedUntil && preference.mutedUntil > new Date()) return false;
+  return preference.inAppEnabled;
 }
 
 async function dispatchAiJobs(): Promise<void> {
