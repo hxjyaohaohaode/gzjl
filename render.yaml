@@ -1,0 +1,101 @@
+databases:
+  - name: workbench-postgres
+    databaseName: workbench
+    user: workbench
+    plan: 0.1c-256mb
+    region: singapore
+
+services:
+  - type: web
+    name: work-intelligence-workbench
+    runtime: node
+    plan: 0.5c-512mb
+    region: singapore
+    branch: main
+    autoDeployTrigger: checksPass
+    buildCommand: pnpm install --frozen-lockfile && pnpm build
+    preDeployCommand: pnpm db:migrate
+    startCommand: pnpm --filter @workbench/server start
+    healthCheckPath: /healthz
+    envVars:
+      - key: NODE_VERSION
+        value: 24.19.0
+      - key: PNPM_VERSION
+        value: 11.19.0
+      - key: NODE_ENV
+        value: production
+      - key: HOST
+        value: 0.0.0.0
+      - key: DATABASE_URL
+        fromDatabase:
+          name: workbench-postgres
+          property: connectionString
+      - key: DATABASE_SSL
+        value: "false"
+      - key: AI_ENABLED
+        value: "true"
+      - key: DATABASE_POOL_MAX
+        value: "10"
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: SETUP_TOKEN
+        generateValue: true
+      - key: WEB_ORIGIN
+        sync: false
+      - key: PUBLIC_APP_URL
+        sync: false
+      - key: S3_ENDPOINT
+        sync: false
+      - key: S3_REGION
+        value: auto
+      - key: S3_FORCE_PATH_STYLE
+        value: "false"
+      - key: S3_BUCKET
+        sync: false
+      - key: S3_ACCESS_KEY_ID
+        sync: false
+      - key: S3_SECRET_ACCESS_KEY
+        sync: false
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASSWORD
+        sync: false
+      - key: ZHIPU_API_KEY
+        sync: false
+      - key: ZHIPU_API_BASE_URL
+        value: https://open.bigmodel.cn/api/paas/v4
+      - key: ZHIPU_MODEL
+        value: glm-5.3-flash
+
+  - type: worker
+    name: work-intelligence-worker
+    runtime: node
+    plan: 0.5c-512mb
+    region: singapore
+    branch: main
+    autoDeployTrigger: checksPass
+    buildCommand: pnpm install --frozen-lockfile && pnpm build
+    startCommand: pnpm --filter @workbench/worker start
+    envVars:
+      - key: NODE_VERSION
+        value: 24.19.0
+      - key: PNPM_VERSION
+        value: 11.19.0
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        fromDatabase:
+          name: workbench-postgres
+          property: connectionString
+      - key: DATABASE_SSL
+        value: "false"
+      - key: DATABASE_POOL_MAX
+        value: "5"
+      - key: ZHIPU_API_KEY
+        sync: false
+      - key: ZHIPU_API_BASE_URL
+        value: https://open.bigmodel.cn/api/paas/v4
+      - key: ZHIPU_MODEL
+        value: glm-5.3-flash

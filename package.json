@@ -1,0 +1,37 @@
+{
+  "name": "work-intelligence-workbench",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.19.0",
+  "engines": {
+    "node": ">=24.0.0",
+    "pnpm": ">=11.0.0"
+  },
+  "scripts": {
+    "dev": "turbo dev --parallel",
+    "build": "turbo build",
+    "check": "pnpm lint && pnpm typecheck && pnpm test && pnpm build",
+    "lint": "turbo lint",
+    "typecheck": "turbo typecheck",
+    "test": "turbo test",
+    "test:watch": "turbo test:watch --parallel",
+    "test:e2e": "playwright test",
+    "db:generate": "pnpm --filter @workbench/db db:generate",
+    "db:migrate": "pnpm --filter @workbench/db db:migrate",
+    "db:seed": "pnpm --filter @workbench/db db:seed",
+    "db:studio": "pnpm --filter @workbench/db db:studio"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@playwright/test": "1.62.1",
+    "@types/node": "26.4.0",
+    "eslint": "10.9.1",
+    "eslint-plugin-react-hooks": "7.1.1",
+    "eslint-plugin-react-refresh": "0.5.5",
+    "turbo": "2.10.12",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.69.0",
+    "vitest": "4.1.11"
+  }
+}

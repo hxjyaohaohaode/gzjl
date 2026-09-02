@@ -1,0 +1,14 @@
+{
+  "name": "工作时间与工作智能管理平台",
+  "short_name": "工作台",
+  "description": "统一记录工作、项目、审批、薪资和工作洞察",
+  "lang": "zh-CN",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f6f7fb",
+  "theme_color": "#3468f5",
+  "orientation": "any"
+  ,"icons": [
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}

@@ -1,0 +1,126 @@
+import type { FastifyInstance, FastifyReply, preHandlerHookHandler } from "fastify";
+import { z } from "zod";
+
+import {
+  EvidenceForbiddenError,
+  EvidenceNotFoundError,
+  EvidenceValidationError,
+  type EvidenceService,
+} from "./service.js";
+
+const sessionParams = z.object({ sessionId: z.uuid() });
+const attachmentParams = z.object({ attachmentId: z.uuid() });
+const visibility = z.enum(["private", "management_only", "project_visible"]);
+const fileInput = z.object({
+  originalName: z.string().trim().min(1).max(255),
+  mimeType: z.string().trim().min(1).max(255),
+  sizeBytes: z.number().int().positive().max(100 * 1024 * 1024),
+  sha256: z
+    .string()
+    .regex(/^[a-f0-9]{64}$/i)
+    .transform((value) => value.toLowerCase()),
+  visibility: visibility.default("management_only"),
+  note: z.string().trim().max(2_000).optional(),
+});
+const referenceInput = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("url"),
+    externalUrl: z.url().max(2_048),
+    visibility: visibility.default("management_only"),
+    note: z.string().trim().max(2_000).optional(),
+  }),
+  z.object({
+    kind: z.literal("text"),
+    textContent: z.string().trim().min(1).max(20_000),
+    visibility: visibility.default("management_only"),
+    note: z.string().trim().max(2_000).optional(),
+  }),
+]);
+
+function mapEvidenceError(error: unknown, reply: FastifyReply) {
+  if (error instanceof EvidenceNotFoundError) {
+    return reply.code(404).send({ error: "evidence_not_found", message: error.message });
+  }
+  if (error instanceof EvidenceForbiddenError) {
+    return reply.code(403).send({ error: "forbidden", message: error.message });
+  }
+  if (error instanceof EvidenceValidationError) {
+    return reply.code(409).send({ error: "invalid_evidence", message: error.message });
+  }
+  throw error;
+}
+
+export async function registerEvidenceRoutes(
+  app: FastifyInstance,
+  service: EvidenceService,
+  authenticate: preHandlerHookHandler,
+) {
+  app.post(
+    "/api/work-sessions/:sessionId/attachments/upload-intent",
+    { preHandler: [app.csrfProtection, authenticate] },
+    async (request, reply) => {
+      try {
+        const { sessionId } = sessionParams.parse(request.params);
+        return reply.code(201).send(
+          await service.initiateFile(request.auth!, sessionId, fileInput.parse(request.body)),
+        );
+      } catch (error) {
+        return mapEvidenceError(error, reply);
+      }
+    },
+  );
+
+  app.post(
+    "/api/attachments/:attachmentId/complete",
+    { preHandler: [app.csrfProtection, authenticate] },
+    async (request, reply) => {
+      try {
+        const { attachmentId } = attachmentParams.parse(request.params);
+        return await service.completeFile(request.auth!, attachmentId);
+      } catch (error) {
+        return mapEvidenceError(error, reply);
+      }
+    },
+  );
+
+  app.post(
+    "/api/work-sessions/:sessionId/attachments/reference",
+    { preHandler: [app.csrfProtection, authenticate] },
+    async (request, reply) => {
+      try {
+        const { sessionId } = sessionParams.parse(request.params);
+        return reply.code(201).send(
+          await service.createReference(request.auth!, sessionId, referenceInput.parse(request.body)),
+        );
+      } catch (error) {
+        return mapEvidenceError(error, reply);
+      }
+    },
+  );
+
+  app.get(
+    "/api/work-sessions/:sessionId/attachments",
+    { preHandler: authenticate },
+    async (request, reply) => {
+      try {
+        const { sessionId } = sessionParams.parse(request.params);
+        return { items: await service.listForSession(request.auth!, sessionId) };
+      } catch (error) {
+        return mapEvidenceError(error, reply);
+      }
+    },
+  );
+
+  app.get(
+    "/api/attachments/:attachmentId/download",
+    { preHandler: authenticate },
+    async (request, reply) => {
+      try {
+        const { attachmentId } = attachmentParams.parse(request.params);
+        return await service.download(request.auth!, attachmentId);
+      } catch (error) {
+        return mapEvidenceError(error, reply);
+      }
+    },
+  );
+}

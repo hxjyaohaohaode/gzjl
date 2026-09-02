@@ -1,0 +1,16 @@
+node_modules/
+.pnpm-store/
+.turbo/
+dist/
+coverage/
+playwright-report/
+test-results/
+*.log
+.env
+.env.*
+!.env.example
+.DS_Store
+Thumbs.db
+apps/web/public/workbox-*.js
+# 原始灵感素材保留在工作区，不作为产品源码提交。
+优质前端部件组_前端优化灵感源之一/
