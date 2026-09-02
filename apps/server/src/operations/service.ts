@@ -115,10 +115,8 @@ export class OperationsService {
     await this.db.update(importJobs).set({ status: "importing", confirmedAt: new Date() }).where(eq(importJobs.id, job.id));
     let importedCount = 0;
     try {
-      for (const record of preview.records) {
-        await this.work.createManual(actor, record);
-        importedCount += 1;
-      }
+      const created = await this.work.createManualBatch(actor, preview.records);
+      importedCount = created.length;
       await this.db.update(importJobs).set({ status: "completed", completedAt: new Date(), validationSummary: { ...preview, records: undefined, importedCount } }).where(eq(importJobs.id, job.id));
       await this.db.insert(auditLogs).values({ organizationId: actor.organizationId, actorMembershipId: actor.membershipId, action: "import.work_sessions", entityType: "import", entityId: job.id, after: { importedCount, sourceHash: preview.hash } });
       return { importedCount };

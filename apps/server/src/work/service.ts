@@ -42,10 +42,45 @@ export interface WorkActor {
   membershipId: string;
 }
 
+/** The subset shared by the root Drizzle client and a transaction client. */
+type WorkExecutor = Pick<Database, "select" | "insert">;
+
 export class WorkSessionService {
   constructor(private readonly db: Database) {}
 
   async createManual(
+    actor: WorkActor,
+    input: CreateWorkSessionInput,
+    requestMeta: { requestId?: string; userAgent?: string } = {},
+  ) {
+    return this.db.transaction((tx) =>
+      this.createManualWithExecutor(tx, actor, input, requestMeta),
+    );
+  }
+
+  /**
+   * Creates an all-or-nothing import batch.  Each row is checked in insertion
+   * order, so a non-parallel row also conflicts with an earlier row in the
+   * same CSV.  Any failure rolls back every row, version and audit entry.
+   */
+  async createManualBatch(
+    actor: WorkActor,
+    inputs: CreateWorkSessionInput[],
+    requestMeta: { requestId?: string; userAgent?: string } = {},
+  ) {
+    return this.db.transaction(async (tx) => {
+      const created = [];
+      for (const input of inputs) {
+        created.push(
+          await this.createManualWithExecutor(tx, actor, input, requestMeta),
+        );
+      }
+      return created;
+    });
+  }
+
+  private async createManualWithExecutor(
+    db: WorkExecutor,
     actor: WorkActor,
     input: CreateWorkSessionInput,
     requestMeta: { requestId?: string; userAgent?: string } = {},
@@ -71,7 +106,7 @@ export class WorkSessionService {
       throw new WorkSessionValidationError("有效工时必须大于 0 秒。")
     }
 
-    const [expectation] = await this.db
+    const [expectation] = await db
       .select({ lookbackDays: workExpectationProfiles.manualEntryLookbackDays })
       .from(workExpectationProfiles)
       .where(
@@ -98,7 +133,7 @@ export class WorkSessionService {
     }
 
     if (input.primaryProjectNodeId) {
-      const [node] = await this.db
+      const [node] = await db
         .select({ id: projectNodes.id })
         .from(projectNodes)
         .innerJoin(projects, eq(projects.id, projectNodes.projectId))
@@ -114,7 +149,7 @@ export class WorkSessionService {
       if (!node) throw new WorkSessionValidationError("所选项目任务不存在或不可用。")
     }
 
-    const [overlap] = await this.db
+    const [overlap] = await db
       .select({ id: workSessions.id })
       .from(workSessions)
       .where(
@@ -129,8 +164,7 @@ export class WorkSessionService {
       .limit(1);
     if (overlap && !input.parallelWork) throw new WorkSessionConflictError();
 
-    return this.db.transaction(async (tx) => {
-      const [session] = await tx
+      const [session] = await db
         .insert(workSessions)
         .values({
           organizationId: actor.organizationId,
@@ -155,7 +189,7 @@ export class WorkSessionService {
       if (!session) throw new Error("Failed to create work session");
 
       if (breaks.length > 0) {
-        await tx.insert(workBreaks).values(
+        await db.insert(workBreaks).values(
           breaks.map((entry) => ({
             workSessionId: session.id,
             startAt: entry.startAt,
@@ -163,14 +197,14 @@ export class WorkSessionService {
           })),
         );
       }
-      await tx.insert(workSessionVersions).values({
+      await db.insert(workSessionVersions).values({
         workSessionId: session.id,
         version: 1,
         snapshot: session,
         changeReason: "created",
         changedBy: actor.membershipId,
       });
-      await tx.insert(auditLogs).values({
+      await db.insert(auditLogs).values({
         organizationId: actor.organizationId,
         actorMembershipId: actor.membershipId,
         action: "work_session.created",
@@ -180,8 +214,7 @@ export class WorkSessionService {
         requestId: requestMeta.requestId,
         userAgent: requestMeta.userAgent,
       });
-      return session;
-    });
+    return session;
   }
 
   async listOwn(actor: WorkActor, limit: number, before?: Date) {

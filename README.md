@@ -45,6 +45,9 @@ docs           架构、权限、薪资、分析、部署与运维文档
 完整环境变量见 [`.env.example`](./.env.example)。上线前请依次阅读：
 
 - [`docs/architecture.md`](./docs/architecture.md)：统一事实源、异步任务与离线边界。
+- [`docs/permissions.md`](./docs/permissions.md)：角色 grant、Scope 收敛和证据可见性。
+- [`docs/payroll.md`](./docs/payroll.md)：可复算工资、周期状态、结算与更正。
+- [`docs/analytics.md`](./docs/analytics.md)：真实聚合、AI 边界和可解释导出。
 - [`docs/security.md`](./docs/security.md)：认证、Scope 授权、附件与密钥处置。
 - [`docs/deployment.md`](./docs/deployment.md)：Render Blueprint 配置与首次初始化。
 - [`docs/operations.md`](./docs/operations.md)：健康检查、备份、恢复演练与事故恢复。

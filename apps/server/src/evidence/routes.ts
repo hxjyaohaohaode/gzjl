@@ -22,6 +22,12 @@ const fileInput = z.object({
   visibility: visibility.default("management_only"),
   note: z.string().trim().max(2_000).optional(),
 });
+const replacementInput = fileInput.extend({
+  reason: z.string().trim().min(1).max(1_000),
+});
+const deleteInput = z.object({
+  reason: z.string().trim().min(1).max(1_000),
+});
 const referenceInput = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("url"),
@@ -84,6 +90,21 @@ export async function registerEvidenceRoutes(
   );
 
   app.post(
+    "/api/attachments/:attachmentId/replacement-intent",
+    { preHandler: [app.csrfProtection, authenticate] },
+    async (request, reply) => {
+      try {
+        const { attachmentId } = attachmentParams.parse(request.params);
+        return reply.code(201).send(
+          await service.initiateReplacement(request.auth!, attachmentId, replacementInput.parse(request.body)),
+        );
+      } catch (error) {
+        return mapEvidenceError(error, reply);
+      }
+    },
+  );
+
+  app.post(
     "/api/work-sessions/:sessionId/attachments/reference",
     { preHandler: [app.csrfProtection, authenticate] },
     async (request, reply) => {
@@ -118,6 +139,32 @@ export async function registerEvidenceRoutes(
       try {
         const { attachmentId } = attachmentParams.parse(request.params);
         return await service.download(request.auth!, attachmentId);
+      } catch (error) {
+        return mapEvidenceError(error, reply);
+      }
+    },
+  );
+
+  app.get(
+    "/api/attachments/:attachmentId/versions",
+    { preHandler: authenticate },
+    async (request, reply) => {
+      try {
+        const { attachmentId } = attachmentParams.parse(request.params);
+        return { items: await service.listVersions(request.auth!, attachmentId) };
+      } catch (error) {
+        return mapEvidenceError(error, reply);
+      }
+    },
+  );
+
+  app.delete(
+    "/api/attachments/:attachmentId",
+    { preHandler: [app.csrfProtection, authenticate] },
+    async (request, reply) => {
+      try {
+        const { attachmentId } = attachmentParams.parse(request.params);
+        return await service.remove(request.auth!, attachmentId, deleteInput.parse(request.body).reason);
       } catch (error) {
         return mapEvidenceError(error, reply);
       }

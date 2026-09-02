@@ -11,6 +11,7 @@ import { and, eq, isNull } from "drizzle-orm";
 import type { Database } from "@workbench/db";
 import {
   attachmentLinks,
+  attachmentVersions,
   attachments,
   auditLogs,
   workSessionProjectLinks,
@@ -23,11 +24,34 @@ import type { ServerConfig } from "../config.js";
 
 const allowedMimeTypes = new Set([
   "application/pdf",
+  "application/json",
+  "application/xml",
+  "application/zip",
+  "application/gzip",
+  "application/x-7z-compressed",
+  "application/x-rar-compressed",
+  "application/vnd.rar",
+  "application/vnd.ms-excel",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
   "image/jpeg",
   "image/png",
   "image/webp",
+  "image/gif",
+  "audio/mpeg",
+  "audio/ogg",
+  "audio/wav",
+  "video/mp4",
+  "video/quicktime",
+  "video/webm",
   "text/plain",
   "text/csv",
+  "text/css",
+  "text/html",
+  "text/javascript",
+  "text/markdown",
+  "text/xml",
 ]);
 
 export type EvidenceVisibility = "private" | "management_only" | "project_visible";
@@ -116,10 +140,16 @@ class ObjectStore {
     }
   }
 
-  async createDownloadUrl(objectKey: string): Promise<string> {
+  async createDownloadUrl(objectKey: string, originalName: string | null): Promise<string> {
     return getSignedUrl(
       this.client,
-      new GetObjectCommand({ Bucket: this.config.bucket, Key: objectKey }),
+      new GetObjectCommand({
+        Bucket: this.config.bucket,
+        Key: objectKey,
+        // Evidence is always an attachment; never let a browser execute or
+        // render an uploaded file in the application origin.
+        ResponseContentDisposition: `attachment; filename="${safeName(originalName ?? "evidence")}"`,
+      }),
       { expiresIn: 5 * 60 },
     );
   }
@@ -231,7 +261,7 @@ export class EvidenceService {
       throw new EvidenceForbiddenError("只能为自己的工时记录上传证据。");
     }
     if (!allowedMimeTypes.has(input.mimeType)) {
-      throw new EvidenceValidationError("仅支持 PDF、图片、纯文本和 CSV 文件。");
+      throw new EvidenceValidationError("不支持该文件类型。可上传文档、图片、音视频、表格、压缩包和文本/代码证据。");
     }
     if (input.sizeBytes > this.config.ATTACHMENT_MAX_BYTES) {
       throw new EvidenceValidationError(
@@ -288,6 +318,67 @@ export class EvidenceService {
         input.sha256,
       )),
     };
+  }
+
+  async initiateReplacement(
+    actor: AuthContext,
+    attachmentId: string,
+    input: {
+      originalName: string;
+      mimeType: string;
+      sizeBytes: number;
+      sha256: string;
+      note?: string | undefined;
+      reason: string;
+    },
+  ) {
+    if (!this.store) throw new EvidenceValidationError("对象存储尚未配置，暂时不能替换文件证据。");
+    if (!allowedMimeTypes.has(input.mimeType)) {
+      throw new EvidenceValidationError("不支持该文件类型。可上传文档、图片、音视频、表格、压缩包和文本/代码证据。");
+    }
+    if (input.sizeBytes > this.config.ATTACHMENT_MAX_BYTES) {
+      throw new EvidenceValidationError(`文件不能超过 ${Math.floor(this.config.ATTACHMENT_MAX_BYTES / 1024 / 1024)} MB。`);
+    }
+    const row = await this.linkedAttachment(actor, attachmentId);
+    if (row.attachment.kind !== "file") throw new EvidenceValidationError("只有文件证据可以替换；链接和文本请新增一条证据。");
+    if (row.attachment.uploadedBy !== actor.membershipId && !this.canManage(actor)) throw new EvidenceForbiddenError();
+    const objectKey = `${actor.organizationId}/${actor.membershipId}/${randomUUID()}/${safeName(input.originalName)}`;
+    const attachment = await this.db.transaction(async (tx) => {
+      await tx.insert(attachmentVersions).values({
+        attachmentId: row.attachment.id,
+        version: row.attachment.version,
+        snapshot: row.attachment,
+        objectKey: row.attachment.objectKey,
+        sha256: row.attachment.sha256,
+        replacedBy: actor.membershipId,
+        reason: input.reason,
+      });
+      const [updated] = await tx.update(attachments).set({
+        status: "pending_upload",
+        originalName: input.originalName,
+        objectKey,
+        mimeType: input.mimeType,
+        sizeBytes: input.sizeBytes,
+        sha256: input.sha256,
+        note: input.note ?? row.attachment.note,
+        uploadedBy: actor.membershipId,
+        version: row.attachment.version + 1,
+        updatedAt: new Date(),
+      }).where(and(eq(attachments.id, attachmentId), eq(attachments.version, row.attachment.version))).returning();
+      if (!updated) throw new EvidenceValidationError("证据刚刚被其他操作更新，请刷新后重试。");
+      await tx.insert(auditLogs).values({
+        organizationId: actor.organizationId,
+        actorMembershipId: actor.membershipId,
+        action: "evidence.replacement_initiated",
+        entityType: "attachment",
+        entityId: attachmentId,
+        before: { version: row.attachment.version, sha256: row.attachment.sha256, objectKey: row.attachment.objectKey },
+        after: { version: updated.version, sha256: input.sha256, sizeBytes: input.sizeBytes, reason: input.reason },
+      });
+      return updated;
+    });
+    if (!attachment) throw new EvidenceValidationError("无法创建证据替换任务。");
+    return { attachment, ...(await this.store.createUploadUrl(objectKey, input.mimeType, input.sizeBytes, input.sha256)) };
   }
 
   private async linkedAttachment(actor: AuthContext, attachmentId: string) {
@@ -457,10 +548,45 @@ export class EvidenceService {
       throw new EvidenceValidationError("该证据没有可下载文件。");
     }
     return {
-      url: await this.store.createDownloadUrl(row.attachment.objectKey),
+      url: await this.store.createDownloadUrl(row.attachment.objectKey, row.attachment.originalName),
       expiresInSeconds: 5 * 60,
       sha256: row.attachment.sha256,
       originalName: row.attachment.originalName,
     };
+  }
+
+  async listVersions(actor: AuthContext, attachmentId: string) {
+    const row = await this.linkedAttachment(actor, attachmentId);
+    await this.assertVisible(actor, row.attachment, row.link.entityId);
+    return this.db.select({
+      version: attachmentVersions.version,
+      sha256: attachmentVersions.sha256,
+      reason: attachmentVersions.reason,
+      replacedBy: attachmentVersions.replacedBy,
+      createdAt: attachmentVersions.createdAt,
+    }).from(attachmentVersions).where(eq(attachmentVersions.attachmentId, attachmentId)).orderBy(attachmentVersions.version);
+  }
+
+  async remove(actor: AuthContext, attachmentId: string, reason: string) {
+    const row = await this.linkedAttachment(actor, attachmentId);
+    if (row.attachment.uploadedBy !== actor.membershipId && !this.canManage(actor)) throw new EvidenceForbiddenError();
+    await this.db.transaction(async (tx) => {
+      const [removed] = await tx.update(attachments).set({
+        status: "deleted",
+        deletedAt: new Date(),
+        updatedAt: new Date(),
+      }).where(and(eq(attachments.id, attachmentId), isNull(attachments.deletedAt))).returning();
+      if (!removed) throw new EvidenceNotFoundError();
+      await tx.insert(auditLogs).values({
+        organizationId: actor.organizationId,
+        actorMembershipId: actor.membershipId,
+        action: "evidence.deleted",
+        entityType: "attachment",
+        entityId: attachmentId,
+        before: { version: row.attachment.version, sha256: row.attachment.sha256 },
+        reason,
+      });
+    });
+    return { deleted: true };
   }
 }
