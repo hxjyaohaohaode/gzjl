@@ -7,6 +7,8 @@ async function mockAuthenticatedWorkspace(page: Page): Promise<void> {
   await page.route("**/api/me", (route) => authenticated ? route.fulfill({ json: { user: { id: "00000000-0000-4000-8000-000000000001", membershipId: "00000000-0000-4000-8000-000000000002", organizationId: "00000000-0000-4000-8000-000000000003", displayName: "林知夏" }, permissions: [{ permission: "work.view_own", scopeKind: "self", scopeId: "00000000-0000-4000-8000-000000000002" }, { permission: "payroll.view_own", scopeKind: "self", scopeId: "00000000-0000-4000-8000-000000000002" }] } }) : route.fulfill({ status: 401, json: { error: "unauthorized" } }));
   await page.route("**/api/work-sessions?**", (route) => route.fulfill({ json: { items: [], nextCursor: null } }));
   await page.route("**/api/timer", (route) => route.fulfill({ json: { timer: null } }));
+  await page.route("**/api/notifications", (route) => route.fulfill({ json: { items: [] } }));
+  await page.route("**/api/approvals?**", (route) => route.fulfill({ json: { items: [] } }));
   await page.route("**/api/analytics/summary?**", (route) => route.fulfill({ json: { totals: { sessionCount: 2, totalSeconds: 19_800, approvedSeconds: 14_400, pendingSeconds: 5_400 }, byDay: [{ date: "2026-09-01", seconds: 7_200 }, { date: "2026-09-02", seconds: 12_600 }], byMember: [], byProject: [{ projectId: "00000000-0000-4000-8000-000000000004", projectName: "工作台正式版", seconds: 19_800 }] } }));
   await page.route("**/api/projects/*/tree", (route) => route.fulfill({ json: { project: { id: "00000000-0000-4000-8000-000000000004", key: "WIP", name: "工作台正式版", version: 3 }, branches: [{ id: "00000000-0000-4000-8000-000000000005", name: "主线", isDefault: true }], nodes: [{ id: "00000000-0000-4000-8000-000000000006", branchId: "00000000-0000-4000-8000-000000000005", parentId: null, type: "phase", title: "工作台正式版", status: "in_progress", progress: "40", version: 2, sortOrder: 0 }, { id: "00000000-0000-4000-8000-000000000007", branchId: "00000000-0000-4000-8000-000000000005", parentId: "00000000-0000-4000-8000-000000000006", type: "task", title: "实现项目画布", status: "in_progress", progress: "65", version: 1, sortOrder: 0 }], edges: [{ id: "00000000-0000-4000-8000-000000000008", sourceNodeId: "00000000-0000-4000-8000-000000000006", targetNodeId: "00000000-0000-4000-8000-000000000007", type: "depends_on", label: "包含" }] } }));
 }
@@ -35,6 +37,20 @@ test("password reset requests a generic email delivery without exposing a token"
   await page.getByRole("button", { name: "发送重置链接" }).click();
   await expect(page.getByRole("status")).toHaveText("若该邮箱对应有效账号，重置链接将发送至邮箱。");
   await expect(page.locator("text=/[A-Za-z0-9_-]{32,}/")).toHaveCount(0);
+});
+
+test("notification panel shows real unread items and marks them read", async ({ page }) => {
+  await mockAuthenticatedWorkspace(page);
+  const notification = { id: "00000000-0000-4000-8000-000000000041", title: "待审核提醒", body: "有一条工时等待处理", severity: "warning", actionUrl: "/approvals", readAt: null, createdAt: "2026-09-02T01:00:00.000Z" };
+  await page.route("**/api/notifications", (route) => route.fulfill({ json: { items: [notification] } }));
+  await page.route("**/api/notifications/00000000-0000-4000-8000-000000000041/read", (route) => route.fulfill({ json: { notification: { ...notification, readAt: "2026-09-02T02:00:00.000Z" } } }));
+  await page.goto("/login");
+  await page.getByLabel("邮箱或手机号").fill("owner@example.test");
+  await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+  await page.getByRole("button", { name: /通知，1 条未读/ }).click();
+  await expect(page.getByText("待审核提醒")).toBeVisible();
+  await page.getByText("待审核提醒").click();
 });
 
 test("mobile navigation exposes the five primary destinations", async ({ page }, testInfo) => {
