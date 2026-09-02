@@ -10,6 +10,7 @@ import {
   aiReports,
   aiReportSources,
   notifications,
+  notificationPreferences,
   outboxEvents,
   payPeriods,
   reminderRules,
@@ -44,6 +45,11 @@ const aiOutputSchema = z.object({
 function parseAiJson(content: string) {
   const cleaned = content.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
   return aiOutputSchema.parse(JSON.parse(cleaned));
+}
+
+async function inAppNotificationEnabled(membershipId: string, category: string): Promise<boolean> {
+  const [preference] = await database.db.select().from(notificationPreferences).where(and(eq(notificationPreferences.membershipId, membershipId), eq(notificationPreferences.category, category))).limit(1);
+  return preference?.inAppEnabled ?? true;
 }
 
 async function dispatchAiJobs(): Promise<void> {
@@ -93,14 +99,14 @@ async function processAiJob(jobId: string): Promise<void> {
         await tx.insert(aiReportSources).values(sourceSummary.sources.map((source) => ({ aiReportId: report.id, entityType: source.entityType, entityId: source.entityId, entityVersion: source.entityVersion, label: source.label }))).onConflictDoNothing();
       }
       await tx.update(aiJobs).set({ status: "completed", completedAt: new Date(), errorSummary: null }).where(eq(aiJobs.id, job.id));
-      await tx.insert(notifications).values({ organizationId: job.organizationId, recipientMembershipId: job.requestedBy, category: "ai_report_ready", severity: "info", title: "AI 工作洞察已生成", body: output.title, actionUrl: report ? `/ai?report=${report.id}` : "/ai", dedupeKey: `ai-report:${job.id}` }).onConflictDoNothing();
+      if (await inAppNotificationEnabled(job.requestedBy, "ai_report_ready")) await tx.insert(notifications).values({ organizationId: job.organizationId, recipientMembershipId: job.requestedBy, category: "ai_report_ready", severity: "info", title: "AI 工作洞察已生成", body: output.title, actionUrl: report ? `/ai?report=${report.id}` : "/ai", dedupeKey: `ai-report:${job.id}` }).onConflictDoNothing();
     });
   } catch (error) {
     const finalFailure = attempt >= job.maxAttempts;
     const errorSummary = error instanceof Error ? error.message.slice(0, 2_000) : "Unknown AI error";
     await database.db.update(aiJobs).set({ status: finalFailure ? "failed" : "queued", errorSummary, completedAt: finalFailure ? new Date() : null }).where(eq(aiJobs.id, job.id));
     if (finalFailure) {
-      await database.db.insert(notifications).values({ organizationId: job.organizationId, recipientMembershipId: job.requestedBy, category: "ai_report_failed", severity: "warning", title: "AI 报告生成失败", body: "事实数据未受影响，可以稍后重试生成报告。", actionUrl: "/ai", dedupeKey: `ai-report-failed:${job.id}` }).onConflictDoNothing();
+      if (await inAppNotificationEnabled(job.requestedBy, "ai_report_failed")) await database.db.insert(notifications).values({ organizationId: job.organizationId, recipientMembershipId: job.requestedBy, category: "ai_report_failed", severity: "warning", title: "AI 报告生成失败", body: "事实数据未受影响，可以稍后重试生成报告。", actionUrl: "/ai", dedupeKey: `ai-report-failed:${job.id}` }).onConflictDoNothing();
     }
     throw error;
   }
@@ -115,7 +121,7 @@ async function evaluateReminders(): Promise<void> {
       const threshold = typeof conditions.thresholdSeconds === "number" ? conditions.thresholdSeconds : 36_000;
       const timers = await database.db.select().from(timerStates).where(and(eq(timerStates.organizationId, rule.organizationId), eq(timerStates.status, "running"), lt(timerStates.startedAt, new Date(now.getTime() - threshold * 1_000))));
       for (const timer of timers) {
-        await database.db.insert(notifications).values({ organizationId: rule.organizationId, recipientMembershipId: timer.membershipId, reminderRuleId: rule.id, category: rule.category, severity: rule.severity, title: "计时器已运行较长时间", body: "请确认计时器仍在记录真实工作，或及时暂停、休息、结束。", actionUrl: "/work", dedupeKey: `long-timer:${timer.id}:${Math.floor(now.getTime() / (rule.cooldownSeconds * 1_000))}`, validUntil: new Date(now.getTime() + rule.cooldownSeconds * 1_000) }).onConflictDoNothing();
+        if (await inAppNotificationEnabled(timer.membershipId, rule.category)) await database.db.insert(notifications).values({ organizationId: rule.organizationId, recipientMembershipId: timer.membershipId, reminderRuleId: rule.id, category: rule.category, severity: rule.severity, title: "计时器已运行较长时间", body: "请确认计时器仍在记录真实工作，或及时暂停、休息、结束。", actionUrl: "/work", dedupeKey: `long-timer:${timer.id}:${Math.floor(now.getTime() / (rule.cooldownSeconds * 1_000))}`, validUntil: new Date(now.getTime() + rule.cooldownSeconds * 1_000) }).onConflictDoNothing();
       }
     }
     if (rule.category === "payroll_cutoff_pending") {
@@ -124,7 +130,7 @@ async function evaluateReminders(): Promise<void> {
       for (const period of periods) {
         const pending = await database.db.select({ membershipId: workSessions.membershipId }).from(workSessions).where(and(eq(workSessions.organizationId, rule.organizationId), eq(workSessions.approvalStatus, "pending_review"), lt(workSessions.startAt, period.endsAt), gt(workSessions.endAt, period.startsAt)));
         for (const item of pending) {
-          await database.db.insert(notifications).values({ organizationId: rule.organizationId, recipientMembershipId: item.membershipId, reminderRuleId: rule.id, category: rule.category, severity: rule.severity, title: "结算截止前仍有待审工时", body: `${period.name} 即将截止，请联系审核人处理。`, actionUrl: "/work", dedupeKey: `payroll-cutoff:${period.id}:${item.membershipId}` }).onConflictDoNothing();
+          if (await inAppNotificationEnabled(item.membershipId, rule.category)) await database.db.insert(notifications).values({ organizationId: rule.organizationId, recipientMembershipId: item.membershipId, reminderRuleId: rule.id, category: rule.category, severity: rule.severity, title: "结算截止前仍有待审工时", body: `${period.name} 即将截止，请联系审核人处理。`, actionUrl: "/work", dedupeKey: `payroll-cutoff:${period.id}:${item.membershipId}` }).onConflictDoNothing();
         }
       }
     }
