@@ -151,6 +151,22 @@ test("calendar offers day week month views and versioned draft rescheduling", as
   await page.getByRole("button", { name: "前一天" }).click();
 });
 
+test("calendar period navigation changes the active date anchor", async ({ page }) => {
+  await mockAuthenticatedWorkspace(page);
+  await page.goto("/login");
+  await page.getByLabel("邮箱或手机号").fill("owner@example.test");
+  await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+  await page.goto("/calendar");
+  await page.getByRole("button", { name: "月", exact: true }).click();
+  const period = page.getByText(/^当前周期：/);
+  const before = await period.textContent();
+  await page.getByRole("button", { name: "上一周期" }).click();
+  await expect(period).not.toHaveText(before ?? "");
+  await page.getByRole("button", { name: "今天" }).click();
+  await expect(period).toHaveText(before ?? "");
+});
+
 test("analytics uses accessible, server-backed responsive chart containers", async ({ page }) => {
   await mockAuthenticatedWorkspace(page);
   await page.goto("/login");
