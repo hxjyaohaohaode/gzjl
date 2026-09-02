@@ -7,43 +7,76 @@ interface QueuedRequest {
   queuedAt: string;
 }
 
-const STORAGE_KEY = "workbench.offline.timer-events.v1";
+const DATABASE_NAME = "workbench-offline-v1";
+const STORE_NAME = "timer-events";
+const MAX_QUEUED_EVENTS = 500;
+let databasePromise: Promise<IDBDatabase> | undefined;
 
-function readQueue(): QueuedRequest[] {
-  try {
-    const value = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "[]") as unknown;
-    return Array.isArray(value) ? (value as QueuedRequest[]) : [];
-  } catch {
-    return [];
-  }
+function database(): Promise<IDBDatabase> {
+  if (databasePromise) return databasePromise;
+  databasePromise = new Promise((resolve, reject) => {
+    const request = indexedDB.open(DATABASE_NAME, 1);
+    request.onerror = () => reject(request.error ?? new Error("无法打开离线队列。"));
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(STORE_NAME)) {
+        db.createObjectStore(STORE_NAME, { keyPath: "id" }).createIndex("queuedAt", "queuedAt");
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+  });
+  return databasePromise;
 }
 
-function writeQueue(queue: QueuedRequest[]): void {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(queue.slice(-500)));
-  window.dispatchEvent(new CustomEvent("workbench:offline-queue", { detail: queue.length }));
+function transaction<T>(mode: IDBTransactionMode, action: (store: IDBObjectStore) => IDBRequest<T>): Promise<T> {
+  return database().then((db) => new Promise<T>((resolve, reject) => {
+    const request = action(db.transaction(STORE_NAME, mode).objectStore(STORE_NAME));
+    request.onerror = () => reject(request.error ?? new Error("离线队列操作失败。"));
+    request.onsuccess = () => resolve(request.result);
+  }));
 }
 
-export function queuedTimerEventCount(): number {
-  return readQueue().length;
+async function readQueue(): Promise<QueuedRequest[]> {
+  const items = await transaction("readonly", (store) => store.getAll());
+  return (items as QueuedRequest[]).sort((a, b) => a.queuedAt.localeCompare(b.queuedAt));
 }
 
-export async function sendQueueableTimerEvent<T>(
-  path: string,
-  body: Record<string, unknown>,
-): Promise<T | { queuedOffline: true }> {
+function announceQueue(count: number): void {
+  window.dispatchEvent(new CustomEvent("workbench:offline-queue", { detail: count }));
+}
+
+async function enqueue(item: QueuedRequest): Promise<void> {
+  const queue = await readQueue();
+  const duplicate = queue.some((existing) => existing.id === item.id);
+  if (!duplicate) await transaction("readwrite", (store) => store.put(item));
+  const overflow = duplicate ? [] : queue.slice(0, Math.max(0, queue.length + 1 - MAX_QUEUED_EVENTS));
+  await Promise.all(overflow.map((entry) => transaction("readwrite", (store) => store.delete(entry.id))));
+  announceQueue(Math.min(MAX_QUEUED_EVENTS, duplicate ? queue.length : queue.length + 1));
+}
+
+async function remove(id: string): Promise<void> {
+  await transaction("readwrite", (store) => store.delete(id));
+  announceQueue((await readQueue()).length);
+}
+
+export async function queuedTimerEventCount(): Promise<number> {
+  return (await readQueue()).length;
+}
+
+async function queueTimerEvent(path: string, body: Record<string, unknown>): Promise<void> {
+  await enqueue({ id: String(body.eventId ?? crypto.randomUUID()), path, body, queuedAt: new Date().toISOString() });
+}
+
+export async function sendQueueableTimerEvent<T>(path: string, body: Record<string, unknown>): Promise<T | { queuedOffline: true }> {
   if (!navigator.onLine) {
-    const queue = readQueue();
-    queue.push({ id: String(body.eventId ?? crypto.randomUUID()), path, body, queuedAt: new Date().toISOString() });
-    writeQueue(queue);
+    await queueTimerEvent(path, body);
     return { queuedOffline: true };
   }
   try {
     return await api<T>(path, { method: "POST", body });
   } catch (error) {
     if (error instanceof TypeError) {
-      const queue = readQueue();
-      queue.push({ id: String(body.eventId ?? crypto.randomUUID()), path, body, queuedAt: new Date().toISOString() });
-      writeQueue(queue);
+      await queueTimerEvent(path, body);
       return { queuedOffline: true };
     }
     throw error;
@@ -55,18 +88,18 @@ export async function replayOfflineTimerEvents(): Promise<void> {
   if (replaying || !navigator.onLine) return;
   replaying = true;
   try {
-    const queue = readQueue();
-    const remaining: QueuedRequest[] = [];
-    for (let index = 0; index < queue.length; index += 1) {
-      const item = queue[index]!;
+    for (const item of await readQueue()) {
       try {
         await api(item.path, { method: "POST", body: item.body });
+        // Delete only the acknowledged item. A new event enqueued while this
+        // replay is running remains durable and ordered for the next pass.
+        await remove(item.id);
       } catch (error) {
-        remaining.push(item, ...queue.slice(index + 1));
         if (error instanceof TypeError) break;
+        // A 4xx/5xx must remain reviewable rather than being silently dropped.
+        break;
       }
     }
-    writeQueue(remaining);
   } finally {
     replaying = false;
   }
