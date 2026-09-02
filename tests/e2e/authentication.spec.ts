@@ -4,7 +4,7 @@ async function mockAuthenticatedWorkspace(page: Page): Promise<void> {
   let authenticated = false;
   await page.route("**/api/auth/csrf", (route) => route.fulfill({ json: { csrfToken: "test-csrf-token" } }));
   await page.route("**/api/auth/login", async (route) => { authenticated = true; await route.fulfill({ json: { ok: true } }); });
-  await page.route("**/api/me", (route) => authenticated ? route.fulfill({ json: { user: { id: "00000000-0000-4000-8000-000000000001", membershipId: "00000000-0000-4000-8000-000000000002", organizationId: "00000000-0000-4000-8000-000000000003", displayName: "林知夏" }, permissions: [{ permission: "work.view_own", scopeKind: "self", scopeId: "00000000-0000-4000-8000-000000000002" }, { permission: "payroll.view_own", scopeKind: "self", scopeId: "00000000-0000-4000-8000-000000000002" }] } }) : route.fulfill({ status: 401, json: { error: "unauthorized" } }));
+  await page.route("**/api/me", (route) => authenticated ? route.fulfill({ json: { user: { id: "00000000-0000-4000-8000-000000000001", membershipId: "00000000-0000-4000-8000-000000000002", organizationId: "00000000-0000-4000-8000-000000000003", displayName: "林知夏" }, permissions: [{ permission: "work.view_own", scopeKind: "self", scopeId: "00000000-0000-4000-8000-000000000002" }, { permission: "payroll.view_own", scopeKind: "self", scopeId: "00000000-0000-4000-8000-000000000002" }, { permission: "import.scope", scopeKind: "organization", scopeId: null }] } }) : route.fulfill({ status: 401, json: { error: "unauthorized" } }));
   await page.route("**/api/work-sessions?**", (route) => route.fulfill({ json: { items: [], nextCursor: null } }));
   await page.route("**/api/timer", (route) => route.fulfill({ json: { timer: null } }));
   await page.route("**/api/notifications", (route) => route.fulfill({ json: { items: [] } }));
@@ -86,6 +86,23 @@ test("notification preferences can disable a worker-backed category", async ({ p
   await page.goto("/notification-preferences");
   await expect(page.getByRole("heading", { name: "通知设置" })).toBeVisible();
   await page.getByText("长时间计时").locator("xpath=../..").getByRole("button", { name: "关闭" }).click();
+});
+
+test("CSV import blocks invalid previews and confirms only the previewed content", async ({ page }) => {
+  await mockAuthenticatedWorkspace(page);
+  const csv = "startAt,endAt,content\n2026-09-02T01:00:00.000Z,2026-09-02T02:00:00.000Z,导入验收";
+  await page.route("**/api/imports/work-sessions/preview", async (route) => { expect(route.request().postDataJSON()).toEqual({ csv }); await route.fulfill({ json: { importId: "00000000-0000-4000-8000-000000000051", hash: "a".repeat(64), rowCount: 1, validCount: 1, errors: [] } }); });
+  await page.route("**/api/imports/00000000-0000-4000-8000-000000000051/confirm", async (route) => { expect(route.request().postDataJSON()).toEqual({ csv }); await route.fulfill({ json: { importedCount: 1 } }); });
+  await page.goto("/login");
+  await page.getByLabel("邮箱或手机号").fill("owner@example.test");
+  await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+  await page.goto("/imports");
+  await page.getByLabel("工时 CSV 文件").setInputFiles({ name: "work.csv", mimeType: "text/csv", buffer: Buffer.from(csv) });
+  await page.getByRole("button", { name: "预览并校验" }).click();
+  await expect(page.getByText("校验通过，可以确认导入。")).toBeVisible();
+  await page.getByRole("button", { name: "确认原子导入" }).click();
+  await expect(page.getByRole("status")).toHaveText("已原子导入 1 条工时记录。");
 });
 
 test("mobile navigation exposes the five primary destinations", async ({ page }, testInfo) => {

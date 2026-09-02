@@ -22,6 +22,7 @@ const navigation: NavigationItem[] = [
   { label: "组织与人员", shortLabel: "组织", to: "/organization", icon: BriefcaseBusiness, permission: "members.manage" },
   { label: "账户安全", shortLabel: "安全", to: "/security", icon: Settings },
   { label: "通知设置", shortLabel: "通知", to: "/notification-preferences", icon: Bell },
+  { label: "导入工时", shortLabel: "导入", to: "/imports", icon: FileCheck2, permission: "import.scope" },
 ];
 
 export function AppShell({ me }: { me: Me }) {
