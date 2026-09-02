@@ -7,7 +7,7 @@ import { Button, cn } from "@workbench/ui";
 
 import { api, hasGrant, resetCsrfToken, type Me } from "./api.js";
 
-interface NavigationItem { label: string; shortLabel: string; to: string; icon: LucideIcon; permission?: string }
+interface NavigationItem { label: string; shortLabel: string; to: string; icon: LucideIcon; permission?: string; organizationPermission?: string }
 interface NotificationItem { id: string; title: string; body: string; severity: string; actionUrl: string | null; readAt: string | null; createdAt: string }
 const navigation: NavigationItem[] = [
   { label: "今日工作台", shortLabel: "今日", to: "/", icon: Home },
@@ -22,7 +22,7 @@ const navigation: NavigationItem[] = [
   { label: "组织与人员", shortLabel: "组织", to: "/organization", icon: BriefcaseBusiness, permission: "members.manage" },
   { label: "账户安全", shortLabel: "安全", to: "/security", icon: Settings },
   { label: "通知设置", shortLabel: "通知", to: "/notification-preferences", icon: Bell },
-  { label: "导入工时", shortLabel: "导入", to: "/imports", icon: FileCheck2, permission: "import.scope" },
+  { label: "导入工时", shortLabel: "导入", to: "/imports", icon: FileCheck2, organizationPermission: "import.scope" },
 ];
 
 export function AppShell({ me }: { me: Me }) {
@@ -33,7 +33,7 @@ export function AppShell({ me }: { me: Me }) {
   const [accent, setAccent] = useState(() => localStorage.getItem("workbench-accent") ?? "#3468f5");
   const queryClient = useQueryClient();
   const navigate = useNavigate();
-  const visibleNavigation = navigation.filter((item) => !item.permission || hasGrant(me, item.permission));
+  const visibleNavigation = navigation.filter((item) => (!item.permission || hasGrant(me, item.permission)) && (!item.organizationPermission || me.permissions.some((grant) => grant.permission === item.organizationPermission && grant.scopeKind === "organization")));
   const mobileNavigation = ["/", "/work", "/projects", "/analytics", "/payroll"].map((path) => visibleNavigation.find((item) => item.to === path)).filter((item): item is NavigationItem => Boolean(item));
   const logout = useMutation({ mutationFn: () => api<void>("/api/auth/logout", { method: "POST" }), onSettled: async () => { resetCsrfToken(); await queryClient.invalidateQueries({ queryKey: ["me"] }); navigate("/login", { replace: true }); } });
   const notifications = useQuery({ queryKey: ["notifications"], queryFn: () => api<{ items: NotificationItem[] }>("/api/notifications"), refetchInterval: 30_000 });

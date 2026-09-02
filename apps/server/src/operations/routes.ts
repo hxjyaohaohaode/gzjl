@@ -10,18 +10,10 @@ const importParams = z.object({ importId: z.uuid() });
 const auditQuery = z.object({ limit: z.coerce.number().int().min(1).max(200).default(100), before: z.iso.datetime({ offset: true }).optional() });
 
 export async function registerOperationsRoutes(app: FastifyInstance, service: OperationsService, authenticate: preHandlerHookHandler): Promise<void> {
-  const requireImport: preHandlerHookHandler = async (request, reply) => {
-    if (!request.auth?.grants.some((grant) => grant.permission === "import.scope")) {
-      return reply.code(403).send({ error: "forbidden", message: "当前账号没有导入权限。", requestId: request.id });
-    }
-  };
-  const requireExport: preHandlerHookHandler = async (request, reply) => {
-    if (!request.auth?.grants.some((grant) => grant.permission === "export.scope")) {
-      return reply.code(403).send({ error: "forbidden", message: "当前账号没有导出权限。", requestId: request.id });
-    }
-  };
-  app.get("/api/exports/work-sessions.csv", { preHandler: [authenticate, requireExport] }, async (request, reply) => { const query = rangeQuery.parse(request.query); const result = await service.exportWorkSessions(request.auth!, new Date(query.from), new Date(query.to)); return reply.header("content-type", "text/csv; charset=utf-8").header("content-disposition", 'attachment; filename="work-sessions.csv"').header("x-content-sha256", result.sha256).send(`\uFEFF${result.csv}`); });
-  app.post("/api/imports/work-sessions/preview", { preHandler: [app.csrfProtection, authenticate, requireImport] }, async (request, reply) => { const { csv } = csvBody.parse(request.body); try { return await service.createImportPreview(request.auth!, csv); } catch (error) { if (error instanceof ImportValidationError) return reply.code(400).send({ error: "invalid_import", message: error.message }); throw error; } });
-  app.post("/api/imports/:importId/confirm", { preHandler: [app.csrfProtection, authenticate, requireImport] }, async (request, reply) => { const { importId } = importParams.parse(request.params); const { csv } = csvBody.parse(request.body); try { return await service.confirmImport(request.auth!, importId, csv); } catch (error) { if (error instanceof ImportValidationError) return reply.code(409).send({ error: "import_conflict", message: error.message }); throw error; } });
+  const requireOrgImport = requirePermission("import.scope", () => ({ scopeKind: "organization" }));
+  const requireOrgExport = requirePermission("export.scope", () => ({ scopeKind: "organization" }));
+  app.get("/api/exports/work-sessions.csv", { preHandler: [authenticate, requireOrgExport] }, async (request, reply) => { const query = rangeQuery.parse(request.query); const result = await service.exportWorkSessions(request.auth!, new Date(query.from), new Date(query.to)); return reply.header("content-type", "text/csv; charset=utf-8").header("content-disposition", 'attachment; filename="work-sessions.csv"').header("x-content-sha256", result.sha256).send(`\uFEFF${result.csv}`); });
+  app.post("/api/imports/work-sessions/preview", { preHandler: [app.csrfProtection, authenticate, requireOrgImport] }, async (request, reply) => { const { csv } = csvBody.parse(request.body); try { return await service.createImportPreview(request.auth!, csv); } catch (error) { if (error instanceof ImportValidationError) return reply.code(400).send({ error: "invalid_import", message: error.message }); throw error; } });
+  app.post("/api/imports/:importId/confirm", { preHandler: [app.csrfProtection, authenticate, requireOrgImport] }, async (request, reply) => { const { importId } = importParams.parse(request.params); const { csv } = csvBody.parse(request.body); try { return await service.confirmImport(request.auth!, importId, csv); } catch (error) { if (error instanceof ImportValidationError) return reply.code(409).send({ error: "import_conflict", message: error.message }); throw error; } });
   app.get("/api/audit", { preHandler: [authenticate, requirePermission("audit.view", () => ({ scopeKind: "organization" }))] }, async (request) => { const query = auditQuery.parse(request.query); return { items: await service.audit(request.auth!, query.limit, query.before ? new Date(query.before) : undefined) }; });
 }

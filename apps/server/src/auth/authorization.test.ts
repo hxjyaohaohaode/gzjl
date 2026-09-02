@@ -27,4 +27,13 @@ describe("isAuthorized", () => {
   it("denies a different permission even when scope matches", () => {
     expect(isAuthorized(grants, "payroll.configure", { scopeKind: "organization" })).toBe(false);
   });
+
+  it("does not allow a self-scoped bulk import or export grant to satisfy an organization operation", () => {
+    const selfScoped: PermissionGrant[] = [
+      { permission: "import.scope", scopeKind: "self", scopeId: "member-a" },
+      { permission: "export.scope", scopeKind: "project", scopeId: "project-a" },
+    ];
+    expect(isAuthorized(selfScoped, "import.scope", { scopeKind: "organization" })).toBe(false);
+    expect(isAuthorized(selfScoped, "export.scope", { scopeKind: "organization" })).toBe(false);
+  });
 });

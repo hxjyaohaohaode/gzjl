@@ -101,7 +101,7 @@ export function ImportPage({ me }: { me: Me }) {
   const [fileError, setFileError] = useState<string | null>(null);
   const previewImport = useMutation({ mutationFn: () => api<ImportPreview>("/api/imports/work-sessions/preview", { method: "POST", body: { csv } }), onSuccess: setPreview });
   const confirmImport = useMutation({ mutationFn: () => { if (!preview) throw new Error("请先完成预览。"); return api<{ importedCount: number }>(`/api/imports/${preview.importId}/confirm`, { method: "POST", body: { csv } }); }, onSuccess: async () => { setPreview(null); setCsv(""); setFileName(""); await queryClient.invalidateQueries({ queryKey: ["work-sessions"] }); } });
-  if (!hasGrant(me, "import.scope")) return <><PageHeader title="导入工时" description="导入属于受控批量写入操作。" /><Card><EmptyState description="你没有导入授权；请联系组织管理员按范围授予 import.scope。" icon={<FileText />} title="没有导入权限" /></Card></>;
+  if (!me.permissions.some((grant) => grant.permission === "import.scope" && grant.scopeKind === "organization")) return <><PageHeader title="导入工时" description="导入属于受控批量写入操作。" /><Card><EmptyState description="你没有组织级导入授权；请联系组织管理员按范围授予 import.scope。" icon={<FileText />} title="没有导入权限" /></Card></>;
   const selectFile = async (file: File | undefined) => {
     setPreview(null); setFileError(null);
     if (!file) return;
