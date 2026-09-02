@@ -31,7 +31,7 @@ export function App() {
         <Route path="team" element={<TeamPage />} />
         <Route path="analytics" element={<AnalyticsPage me={me!} />} />
         <Route path="payroll" element={<PayrollPage />} />
-        <Route path="ai" element={<AiPage />} />
+        <Route path="ai" element={<AiPage me={me!} />} />
         <Route path="approvals" element={<ApprovalsPage />} />
         <Route path="organization" element={<OrganizationPage />} />
         <Route path="security" element={<SecurityPage />} />
