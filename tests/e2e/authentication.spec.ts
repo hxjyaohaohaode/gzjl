@@ -163,6 +163,18 @@ test("analytics uses accessible, server-backed responsive chart containers", asy
   await expect(page.getByText("工作台正式版")).toBeVisible();
 });
 
+test("AI page does not expose team analysis without an organization-scoped grant", async ({ page }) => {
+  await mockAuthenticatedWorkspace(page);
+  await page.route("**/api/ai/reports", (route) => route.fulfill({ json: { items: [] } }));
+  await page.goto("/login");
+  await page.getByLabel("邮箱或手机号").fill("owner@example.test");
+  await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+  await page.goto("/ai");
+  await expect(page.getByRole("combobox")).toHaveValue("self");
+  await expect(page.getByRole("option", { name: "团队授权范围" })).toHaveCount(0);
+});
+
 test("critical workspace widths do not introduce horizontal document overflow", async ({ page }) => {
   await mockAuthenticatedWorkspace(page);
   await page.goto("/login");
