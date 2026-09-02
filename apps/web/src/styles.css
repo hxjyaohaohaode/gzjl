@@ -20,7 +20,9 @@
   --text-subtle: #8a9690;
   --accent: #1f765c;
   --accent-strong: #155c47;
+  --accent-foreground: #ffffff;
   --accent-soft: #e4f2eb;
+  --danger-foreground: #ffffff;
   --positive: #137951;
   --positive-soft: #e3f3e9;
   --warning: #9a6106;
@@ -50,7 +52,9 @@
   --text-subtle: #829289;
   --accent: #56c494;
   --accent-strong: #8de0b7;
+  --accent-foreground: #10261d;
   --accent-soft: #173b2c;
+  --danger-foreground: #10261d;
   --positive: #75d9a8;
   --positive-soft: #173a2a;
   --warning: #f0c66e;
@@ -81,7 +85,9 @@
     --text-subtle: #829289;
     --accent: #56c494;
     --accent-strong: #8de0b7;
+    --accent-foreground: #10261d;
     --accent-soft: #173b2c;
+    --danger-foreground: #10261d;
     --positive: #75d9a8;
     --positive-soft: #173a2a;
     --warning: #f0c66e;
@@ -190,6 +196,15 @@ input[type="file"]::file-selector-button {
   border-radius: 999px;
   background: color-mix(in srgb, var(--accent) 7%, transparent);
   content: "";
+}
+
+/* Keep icon/monogram surfaces readable when a user chooses a light accent. */
+[class*="bg-[var(--accent)]"][class*="text-white"] {
+  color: var(--accent-foreground) !important;
+}
+
+[class*="bg-[var(--danger)]"][class*="text-white"] {
+  color: var(--danger-foreground) !important;
 }
 
 .project-canvas .react-flow__controls,

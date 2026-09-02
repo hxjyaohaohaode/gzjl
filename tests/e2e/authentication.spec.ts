@@ -217,3 +217,44 @@ test("project tree renders a pannable canvas with a list fallback", async ({ pag
   await page.getByRole("button", { name: "列表", exact: true }).click();
   await expect(page.getByText("task · v1")).toBeVisible();
 });
+
+test("command palette only navigates through authorized workspace destinations", async ({ page }) => {
+  await mockAuthenticatedWorkspace(page);
+  await page.goto("/login");
+  await page.getByLabel("邮箱或手机号").fill("owner@example.test");
+  await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "林知夏，今天好" })).toBeVisible();
+  await page.keyboard.press("Control+K");
+  await expect(page.getByRole("dialog", { name: "全局导航" })).toBeVisible();
+  await page.getByLabel("搜索工作台页面").fill("日历");
+  await page.getByRole("button", { name: "日历 工作空间" }).click();
+  await expect(page.getByRole("heading", { name: "工作日历" })).toBeVisible();
+});
+
+test("project color chips keep readable text for light server colors", async ({ page }) => {
+  await mockAuthenticatedWorkspace(page);
+  await page.route("**/api/projects", (route) => route.fulfill({ json: { items: [{ id: "00000000-0000-4000-8000-000000000061", key: "LT", name: "浅色项目", description: "对比度验证", color: "#ffffff", status: "active", version: 1, updatedAt: "2026-09-02T01:00:00.000Z" }] } }));
+  await page.goto("/login");
+  await page.getByLabel("邮箱或手机号").fill("owner@example.test");
+  await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+  await page.goto("/projects");
+  const colorChip = page.getByText("LT", { exact: true });
+  await expect(colorChip).toBeVisible();
+  await expect.poll(() => colorChip.evaluate((element) => getComputedStyle(element).color)).toBe("rgb(21, 51, 42)");
+});
+
+test("header notification and appearance popovers do not overlap", async ({ page }) => {
+  await mockAuthenticatedWorkspace(page);
+  await page.goto("/login");
+  await page.getByLabel("邮箱或手机号").fill("owner@example.test");
+  await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "林知夏，今天好" })).toBeVisible();
+  await page.getByRole("button", { name: "外观设置" }).click();
+  await expect(page.getByLabel("自定义强调色")).toBeVisible();
+  await page.getByRole("button", { name: "通知" }).click();
+  await expect(page.getByLabel("自定义强调色")).toHaveCount(0);
+  await expect(page.getByText("通知中心")).toBeVisible();
+});
