@@ -16,6 +16,7 @@ const listQuerySchema = z.object({
 });
 const submitParamsSchema = z.object({ sessionId: z.uuid() });
 const submitBodySchema = z.object({ expectedVersion: z.number().int().positive() });
+const scheduleSchema = z.object({ expectedVersion: z.number().int().positive(), startAt: z.iso.datetime({ offset: true }), endAt: z.iso.datetime({ offset: true }) });
 
 export async function registerWorkRoutes(
   app: FastifyInstance,
@@ -65,6 +66,22 @@ export async function registerWorkRoutes(
         if (error instanceof WorkSessionConflictError) {
           return reply.code(409).send({ error: "work_session_overlap", message: error.message });
         }
+        throw error;
+      }
+    },
+  );
+
+  app.patch(
+    "/api/work-sessions/:sessionId/schedule",
+    { preHandler: [app.csrfProtection, authenticate, ownPermission] },
+    async (request, reply) => {
+      const { sessionId } = submitParamsSchema.parse(request.params);
+      const input = scheduleSchema.parse(request.body);
+      try {
+        return { session: await service.rescheduleOwn(request.auth!, sessionId, input.expectedVersion, new Date(input.startAt), new Date(input.endAt)) };
+      } catch (error) {
+        if (error instanceof WorkSessionValidationError) return reply.code(400).send({ error: "invalid_work_session", message: error.message });
+        if (error instanceof WorkSessionConflictError || error instanceof WorkSessionVersionConflictError) return reply.code(409).send({ error: "work_session_conflict", message: error.message });
         throw error;
       }
     },

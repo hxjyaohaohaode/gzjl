@@ -50,6 +50,24 @@ test("mobile navigation exposes the five primary destinations", async ({ page },
   }
 });
 
+test("calendar offers day week month views and versioned draft rescheduling", async ({ page }) => {
+  await mockAuthenticatedWorkspace(page);
+  const session = { id: "00000000-0000-4000-8000-000000000031", startAt: "2026-09-02T01:00:00.000Z", endAt: "2026-09-02T02:00:00.000Z", netSeconds: 3_600, content: "日历改期验证", result: "", source: "manual", submissionStatus: "draft", approvalStatus: "not_requested", version: 2, visibility: "management_only" };
+  await page.route("**/api/work-sessions?**", (route) => route.fulfill({ json: { items: [session], nextCursor: null } }));
+  await page.route("**/api/work-sessions/00000000-0000-4000-8000-000000000031/schedule", async (route) => {
+    expect(route.request().postDataJSON()).toMatchObject({ expectedVersion: 2 });
+    await route.fulfill({ json: { session } });
+  });
+  await page.goto("/login");
+  await page.getByLabel("邮箱或手机号").fill("owner@example.test");
+  await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+  await page.goto("/calendar");
+  await expect(page.getByText("日历改期验证")).toBeVisible();
+  await page.getByRole("button", { name: "月", exact: true }).click();
+  await page.getByRole("button", { name: "前一天" }).click();
+});
+
 test("analytics uses accessible, server-backed responsive chart containers", async ({ page }) => {
   await mockAuthenticatedWorkspace(page);
   await page.goto("/login");

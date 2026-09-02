@@ -1,4 +1,4 @@
-import { and, desc, eq, gt, inArray, isNull, lt, or } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, isNull, lt, ne, or } from "drizzle-orm";
 import type { Database } from "@workbench/db";
 import {
   auditLogs,
@@ -231,6 +231,38 @@ export class WorkSessionService {
       )
       .orderBy(desc(workSessions.startAt), desc(workSessions.id))
       .limit(limit);
+  }
+
+  /** Move an editable draft without altering its approved financial duration. */
+  async rescheduleOwn(
+    actor: WorkActor,
+    sessionId: string,
+    expectedVersion: number,
+    startAt: Date,
+    endAt: Date,
+  ) {
+    if (endAt <= startAt) throw new WorkSessionValidationError("结束时间必须晚于开始时间。");
+    if (endAt > new Date(Date.now() + 5 * 60_000)) throw new WorkSessionValidationError("结束时间不能晚于当前时间。");
+    return this.db.transaction(async (tx) => {
+      const [current] = await tx.select().from(workSessions).where(and(eq(workSessions.id, sessionId), eq(workSessions.organizationId, actor.organizationId), eq(workSessions.membershipId, actor.membershipId), eq(workSessions.version, expectedVersion), eq(workSessions.submissionStatus, "draft"), inArray(workSessions.approvalStatus, ["not_requested", "returned"]), isNull(workSessions.lockedAt), isNull(workSessions.deletedAt))).for("update").limit(1);
+      if (!current) throw new WorkSessionVersionConflictError();
+      const originalDuration = current.endAt.getTime() - current.startAt.getTime();
+      if (endAt.getTime() - startAt.getTime() !== originalDuration) {
+        throw new WorkSessionValidationError("日历改期必须保持原记录时长；如需调整时长，请在记录编辑中完成。");
+      }
+      const [overlap] = await tx.select({ id: workSessions.id }).from(workSessions).where(and(eq(workSessions.organizationId, actor.organizationId), eq(workSessions.membershipId, actor.membershipId), ne(workSessions.id, sessionId), isNull(workSessions.deletedAt), lt(workSessions.startAt, endAt), gt(workSessions.endAt, startAt))).limit(1);
+      if (overlap && !current.parallelWork) throw new WorkSessionConflictError();
+      const delta = startAt.getTime() - current.startAt.getTime();
+      const [updated] = await tx.update(workSessions).set({ startAt, endAt, version: current.version + 1, updatedAt: new Date() }).where(and(eq(workSessions.id, sessionId), eq(workSessions.version, expectedVersion))).returning();
+      if (!updated) throw new WorkSessionVersionConflictError();
+      const breaks = await tx.select().from(workBreaks).where(eq(workBreaks.workSessionId, sessionId));
+      for (const entry of breaks) {
+        await tx.update(workBreaks).set({ startAt: new Date(entry.startAt.getTime() + delta), endAt: new Date(entry.endAt.getTime() + delta), updatedAt: new Date() }).where(eq(workBreaks.id, entry.id));
+      }
+      await tx.insert(workSessionVersions).values({ workSessionId: updated.id, version: updated.version, snapshot: updated, changeReason: "calendar_rescheduled", changedBy: actor.membershipId });
+      await tx.insert(auditLogs).values({ organizationId: actor.organizationId, actorMembershipId: actor.membershipId, action: "work_session.calendar_rescheduled", entityType: "work_session", entityId: updated.id, before: current, after: updated });
+      return updated;
+    });
   }
 
   async submit(actor: WorkActor, sessionId: string, expectedVersion: number) {
