@@ -36,4 +36,9 @@ describe("isAuthorized", () => {
     expect(isAuthorized(selfScoped, "import.scope", { scopeKind: "organization" })).toBe(false);
     expect(isAuthorized(selfScoped, "export.scope", { scopeKind: "organization" })).toBe(false);
   });
+
+  it("requires organization scope before a team AI capability can analyze organization data", () => {
+    expect(isAuthorized([{ permission: "ai.team_analysis", scopeKind: "project", scopeId: "project-a" }], "ai.team_analysis", { scopeKind: "organization" })).toBe(false);
+    expect(isAuthorized([{ permission: "ai.team_analysis", scopeKind: "organization", scopeId: null }], "ai.team_analysis", { scopeKind: "organization" })).toBe(true);
+  });
 });
