@@ -8,6 +8,7 @@ async function mockAuthenticatedWorkspace(page: Page): Promise<void> {
   await page.route("**/api/work-sessions?**", (route) => route.fulfill({ json: { items: [], nextCursor: null } }));
   await page.route("**/api/timer", (route) => route.fulfill({ json: { timer: null } }));
   await page.route("**/api/analytics/summary?**", (route) => route.fulfill({ json: { totals: { sessionCount: 2, totalSeconds: 19_800, approvedSeconds: 14_400, pendingSeconds: 5_400 }, byDay: [{ date: "2026-09-01", seconds: 7_200 }, { date: "2026-09-02", seconds: 12_600 }], byMember: [], byProject: [{ projectId: "00000000-0000-4000-8000-000000000004", projectName: "工作台正式版", seconds: 19_800 }] } }));
+  await page.route("**/api/projects/*/tree", (route) => route.fulfill({ json: { project: { id: "00000000-0000-4000-8000-000000000004", key: "WIP", name: "工作台正式版", version: 3 }, branches: [{ id: "00000000-0000-4000-8000-000000000005", name: "主线", isDefault: true }], nodes: [{ id: "00000000-0000-4000-8000-000000000006", branchId: "00000000-0000-4000-8000-000000000005", parentId: null, type: "phase", title: "工作台正式版", status: "in_progress", progress: "40", version: 2, sortOrder: 0 }, { id: "00000000-0000-4000-8000-000000000007", branchId: "00000000-0000-4000-8000-000000000005", parentId: "00000000-0000-4000-8000-000000000006", type: "task", title: "实现项目画布", status: "in_progress", progress: "65", version: 1, sortOrder: 0 }], edges: [{ id: "00000000-0000-4000-8000-000000000008", sourceNodeId: "00000000-0000-4000-8000-000000000006", targetNodeId: "00000000-0000-4000-8000-000000000007", type: "depends_on", label: "包含" }] } }));
 }
 
 test("logs in and renders a factual empty workspace", async ({ page }) => {
@@ -58,4 +59,17 @@ test("critical workspace widths do not introduce horizontal document overflow", 
     await expect(page.getByRole("heading", { name: "数据分析" })).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true);
   }
+});
+
+test("project tree renders a pannable canvas with a list fallback", async ({ page }) => {
+  await mockAuthenticatedWorkspace(page);
+  await page.goto("/login");
+  await page.getByLabel("邮箱或手机号").fill("owner@example.test");
+  await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+  await page.goto("/projects/00000000-0000-4000-8000-000000000004");
+  await expect(page.getByText("实现项目画布")).toBeVisible();
+  await expect(page.locator(".react-flow")).toBeVisible();
+  await page.getByRole("button", { name: "列表", exact: true }).click();
+  await expect(page.getByText("task · v1")).toBeVisible();
 });

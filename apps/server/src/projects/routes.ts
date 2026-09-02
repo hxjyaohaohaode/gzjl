@@ -29,6 +29,12 @@ const createNodeSchema = z.object({
   dueAt: z.iso.datetime({ offset: true }).optional(),
   sortOrder: z.number().int().min(0).default(0),
 });
+const createBranchSchema = z.object({
+  name: z.string().trim().min(1).max(160),
+  description: z.string().trim().max(10_000).optional(),
+  parentBranchId: z.uuid().optional(),
+  sourceNodeId: z.uuid().optional(),
+});
 const updateNodeSchema = z
   .object({
     expectedVersion: z.number().int().positive(),
@@ -119,6 +125,16 @@ export async function registerProjectRoutes(
     scopeId: projectIdParams.parse(request.params).projectId,
   }));
   const mutationHooks = [app.csrfProtection, authenticate, manageProject];
+
+  app.post("/api/projects/:projectId/branches", { preHandler: mutationHooks }, async (request, reply) => {
+    const { projectId } = projectIdParams.parse(request.params);
+    try {
+      const branch = await service.createBranch(request.auth!, projectId, createBranchSchema.parse(request.body));
+      return reply.code(201).send({ branch });
+    } catch (error) {
+      return mapProjectError(error, reply);
+    }
+  });
 
   app.post("/api/projects/:projectId/nodes", { preHandler: mutationHooks }, async (request, reply) => {
     const { projectId } = projectIdParams.parse(request.params);

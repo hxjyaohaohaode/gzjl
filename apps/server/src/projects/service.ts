@@ -5,6 +5,7 @@ import {
   projectActivityLog,
   projectBranches,
   projectBranchVersions,
+  projectEdges,
   projectMembers,
   projectNodes,
   projectNodeVersions,
@@ -56,6 +57,13 @@ export interface CreateNodeInput {
   startAt?: Date | undefined;
   dueAt?: Date | undefined;
   sortOrder: number;
+}
+
+export interface CreateBranchInput {
+  name: string;
+  description?: string | undefined;
+  parentBranchId?: string | undefined;
+  sourceNodeId?: string | undefined;
 }
 
 export class ProjectService {
@@ -214,7 +222,37 @@ export class ProjectService {
       .from(projectNodes)
       .where(and(eq(projectNodes.projectId, projectId), isNull(projectNodes.deletedAt)))
       .orderBy(asc(projectNodes.branchId), asc(projectNodes.parentId), asc(projectNodes.sortOrder));
-    return { project, branches, nodes };
+    const edges = await this.db
+      .select()
+      .from(projectEdges)
+      .where(eq(projectEdges.projectId, projectId))
+      .orderBy(asc(projectEdges.createdAt));
+    return { project, branches, nodes, edges };
+  }
+
+  async createBranch(actor: ProjectActor, projectId: string, input: CreateBranchInput) {
+    const [project] = await this.db
+      .select({ id: projects.id })
+      .from(projects)
+      .where(and(eq(projects.id, projectId), eq(projects.organizationId, actor.organizationId), isNull(projects.deletedAt)))
+      .limit(1);
+    if (!project) throw new ProjectNotFoundError();
+    if (input.parentBranchId) {
+      const [parent] = await this.db.select({ id: projectBranches.id }).from(projectBranches).where(and(eq(projectBranches.id, input.parentBranchId), eq(projectBranches.projectId, projectId), isNull(projectBranches.deletedAt))).limit(1);
+      if (!parent) throw new ProjectTreeValidationError("父分支不属于当前项目或已被删除。");
+    }
+    if (input.sourceNodeId) {
+      const [source] = await this.db.select({ id: projectNodes.id }).from(projectNodes).where(and(eq(projectNodes.id, input.sourceNodeId), eq(projectNodes.projectId, projectId), isNull(projectNodes.deletedAt))).limit(1);
+      if (!source) throw new ProjectTreeValidationError("分支来源节点不属于当前项目或已被删除。");
+    }
+    return this.db.transaction(async (tx) => {
+      const [branch] = await tx.insert(projectBranches).values({ projectId, name: input.name, description: input.description, parentBranchId: input.parentBranchId, sourceNodeId: input.sourceNodeId, createdBy: actor.membershipId }).returning();
+      if (!branch) throw new Error("Failed to create project branch");
+      await tx.insert(projectBranchVersions).values({ branchId: branch.id, version: 1, snapshot: branch, changeSummary: "创建分支", createdBy: actor.membershipId });
+      await tx.insert(projectActivityLog).values({ projectId, actorMembershipId: actor.membershipId, activityType: "branched", entityType: "project_branch", entityId: branch.id, entityVersion: 1, details: { parentBranchId: input.parentBranchId ?? null, sourceNodeId: input.sourceNodeId ?? null } });
+      await tx.insert(auditLogs).values({ organizationId: actor.organizationId, actorMembershipId: actor.membershipId, action: "project.branch_created", entityType: "project_branch", entityId: branch.id, after: branch });
+      return branch;
+    });
   }
 
   async createNode(actor: ProjectActor, projectId: string, input: CreateNodeInput) {
