@@ -3,82 +3,97 @@
 :root {
   color-scheme: light;
   font-family:
-    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    "SF Pro Display", "PingFang SC", Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
     "PingFang SC", "Microsoft YaHei", sans-serif;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
-  --canvas: #f6f7fb;
-  --surface: #ffffff;
-  --surface-subtle: #f2f4f8;
-  --border: #e4e7ee;
-  --text: #172033;
-  --text-muted: #667085;
-  --text-subtle: #98a2b3;
-  --accent: #3468f5;
-  --accent-strong: #2454d8;
-  --accent-soft: #ebf0ff;
-  --positive: #138a5b;
-  --positive-soft: #e8f7f0;
-  --warning: #a86608;
-  --warning-soft: #fff5dc;
-  --danger: #cf3d4f;
-  --danger-soft: #ffebee;
-  --success: #177b4d;
-  --success-soft: #e6f7ee;
-  --info: #2f68c5;
-  --info-soft: #eaf2ff;
-  --shadow-card: 0 1px 2px rgb(16 24 40 / 0.03), 0 6px 18px rgb(16 24 40 / 0.04);
+  --canvas: #f5f6f3;
+  --canvas-deep: #edf0eb;
+  --surface: #fffefd;
+  --surface-raised: #ffffff;
+  --surface-subtle: #f2f4ef;
+  --surface-tint: #f7f8f4;
+  --border: #e1e5dc;
+  --border-strong: #cbd4c8;
+  --text: #17221f;
+  --text-muted: #62706a;
+  --text-subtle: #8a9690;
+  --accent: #1f765c;
+  --accent-strong: #155c47;
+  --accent-soft: #e4f2eb;
+  --positive: #137951;
+  --positive-soft: #e3f3e9;
+  --warning: #9a6106;
+  --warning-soft: #fff3d9;
+  --danger: #c64150;
+  --danger-soft: #fff0f1;
+  --success: #137951;
+  --success-soft: #e3f3e9;
+  --info: #286aa4;
+  --info-soft: #e9f3fb;
+  --shadow-card: 0 1px 1px rgb(23 34 31 / 0.025), 0 10px 28px rgb(23 34 31 / 0.045);
+  --shadow-float: 0 14px 34px rgb(23 34 31 / 0.12), 0 2px 8px rgb(23 34 31 / 0.05);
 }
 
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --canvas: #0f131d;
-  --surface: #171c28;
-  --surface-subtle: #202634;
-  --border: #2a3140;
-  --text: #f3f5f9;
-  --text-muted: #aeb7c7;
-  --text-subtle: #7f8a9d;
-  --accent: #5f84ff;
-  --accent-strong: #82a0ff;
-  --accent-soft: #202d55;
-  --positive: #63d2a4;
-  --positive-soft: #15382c;
-  --warning: #f3bd63;
-  --warning-soft: #3e3018;
-  --danger: #ff8996;
-  --danger-soft: #411f27;
-  --success: #6ee7a4;
-  --success-soft: #173d2b;
-  --info: #8ab6ff;
-  --info-soft: #1b3155;
-  --shadow-card: 0 1px 2px rgb(0 0 0 / 0.2), 0 8px 22px rgb(0 0 0 / 0.16);
+  --canvas: #111916;
+  --canvas-deep: #0c1210;
+  --surface: #17211d;
+  --surface-raised: #1d2923;
+  --surface-subtle: #202c26;
+  --surface-tint: #1a251f;
+  --border: #304038;
+  --border-strong: #4a5e53;
+  --text: #edf4ef;
+  --text-muted: #b0c0b6;
+  --text-subtle: #829289;
+  --accent: #56c494;
+  --accent-strong: #8de0b7;
+  --accent-soft: #173b2c;
+  --positive: #75d9a8;
+  --positive-soft: #173a2a;
+  --warning: #f0c66e;
+  --warning-soft: #453619;
+  --danger: #ff9da8;
+  --danger-soft: #4a252b;
+  --success: #75d9a8;
+  --success-soft: #173a2a;
+  --info: #8bc7ff;
+  --info-soft: #193750;
+  --shadow-card: 0 1px 2px rgb(0 0 0 / 0.22), 0 12px 28px rgb(0 0 0 / 0.18);
+  --shadow-float: 0 18px 40px rgb(0 0 0 / 0.34), 0 3px 10px rgb(0 0 0 / 0.2);
 }
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme]) {
     color-scheme: dark;
-    --canvas: #0f131d;
-    --surface: #171c28;
-    --surface-subtle: #202634;
-    --border: #2a3140;
-    --text: #f3f5f9;
-    --text-muted: #aeb7c7;
-    --text-subtle: #7f8a9d;
-    --accent: #5f84ff;
-    --accent-strong: #82a0ff;
-    --accent-soft: #202d55;
-    --positive: #63d2a4;
-    --positive-soft: #15382c;
-    --warning: #f3bd63;
-    --warning-soft: #3e3018;
-    --danger: #ff8996;
-    --danger-soft: #411f27;
-    --success: #6ee7a4;
-    --success-soft: #173d2b;
-    --info: #8ab6ff;
-    --info-soft: #1b3155;
-    --shadow-card: 0 1px 2px rgb(0 0 0 / 0.2), 0 8px 22px rgb(0 0 0 / 0.16);
+    --canvas: #111916;
+    --canvas-deep: #0c1210;
+    --surface: #17211d;
+    --surface-raised: #1d2923;
+    --surface-subtle: #202c26;
+    --surface-tint: #1a251f;
+    --border: #304038;
+    --border-strong: #4a5e53;
+    --text: #edf4ef;
+    --text-muted: #b0c0b6;
+    --text-subtle: #829289;
+    --accent: #56c494;
+    --accent-strong: #8de0b7;
+    --accent-soft: #173b2c;
+    --positive: #75d9a8;
+    --positive-soft: #173a2a;
+    --warning: #f0c66e;
+    --warning-soft: #453619;
+    --danger: #ff9da8;
+    --danger-soft: #4a252b;
+    --success: #75d9a8;
+    --success-soft: #173a2a;
+    --info: #8bc7ff;
+    --info-soft: #193750;
+    --shadow-card: 0 1px 2px rgb(0 0 0 / 0.22), 0 12px 28px rgb(0 0 0 / 0.18);
+    --shadow-float: 0 18px 40px rgb(0 0 0 / 0.34), 0 3px 10px rgb(0 0 0 / 0.2);
   }
 }
 
@@ -90,7 +105,11 @@ body {
   margin: 0;
   min-width: 320px;
   min-height: 100dvh;
-  background: var(--canvas);
+  background:
+    radial-gradient(circle at 77% -16%, color-mix(in srgb, var(--accent) 7%, transparent), transparent 28rem),
+    var(--canvas);
+  color: var(--text);
+  letter-spacing: -0.01em;
 }
 
 button,
@@ -102,6 +121,94 @@ select {
 
 button {
   cursor: pointer;
+}
+
+::selection {
+  background: var(--accent-soft);
+  color: var(--text);
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: var(--text-subtle);
+}
+
+input[type="file"]::file-selector-button {
+  margin-right: 0.75rem;
+  border: 0;
+  border-radius: 0.5rem;
+  background: var(--surface-subtle);
+  padding: 0.45rem 0.7rem;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 0.75rem;
+  font-weight: 650;
+}
+
+[data-ui="card"] {
+  position: relative;
+  overflow: clip;
+}
+
+[data-ui="card"]::before {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  border-radius: inherit;
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.38);
+  content: "";
+}
+
+:root[data-theme="dark"] [data-ui="card"]::before {
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.045);
+}
+
+.app-page-header {
+  position: relative;
+  margin-bottom: 1.75rem;
+}
+
+.app-page-header h1 {
+  font-weight: 760;
+  letter-spacing: -0.045em;
+}
+
+.app-page-header p {
+  max-width: 46rem;
+}
+
+.app-stat-card {
+  overflow: hidden;
+}
+
+.app-stat-card::after {
+  position: absolute;
+  top: -2.5rem;
+  right: -2.5rem;
+  width: 7rem;
+  height: 7rem;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+  content: "";
+}
+
+.project-canvas .react-flow__controls,
+.project-canvas .react-flow__minimap {
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 0.75rem;
+  background: color-mix(in srgb, var(--surface-raised) 92%, transparent);
+  box-shadow: var(--shadow-card);
+}
+
+.project-canvas .react-flow__controls-button {
+  border-bottom-color: var(--border);
+  background: var(--surface-raised);
+  fill: var(--text-muted);
+}
+
+.project-canvas .react-flow__controls-button:hover {
+  background: var(--surface-subtle);
 }
 
 .skip-link {

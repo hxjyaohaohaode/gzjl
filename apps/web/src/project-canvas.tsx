@@ -47,14 +47,14 @@ export default function ProjectCanvas({
         id: node.id,
         position: { x: position.depth * 250, y: position.index * 92 },
         data: {
-          label: <div className="min-w-40"><p className="max-w-48 truncate text-sm font-semibold">{node.title}</p><p className="mt-1 text-xs text-slate-500">{node.status} · {Number(node.progress)}%</p></div>,
+          label: <div className="min-w-44"><div className="flex items-center justify-between gap-3"><p className="max-w-44 truncate text-sm font-bold tracking-[-0.015em]">{node.title}</p><span className="text-[10px] font-bold text-[var(--accent-strong)]">{Number(node.progress)}%</span></div><div className="mt-2 h-1.5 overflow-hidden rounded-full bg-[var(--surface-subtle)]"><div className="h-full rounded-full bg-[var(--accent)]" style={{ width: `${Math.max(0, Math.min(100, Number(node.progress)))}%` }} /></div><p className="mt-2 text-[11px] font-semibold text-[var(--text-muted)]">{node.status} · v{node.version}</p></div>,
         },
         style: {
-          borderRadius: 12,
+          borderRadius: 14,
           border: "1px solid var(--border)",
           background: "var(--surface)",
           color: "var(--text)",
-          padding: 10,
+          padding: 12,
           boxShadow: "var(--shadow-card)",
         },
       };
@@ -68,10 +68,12 @@ export default function ProjectCanvas({
         target: edge.targetNodeId,
         label: edge.label ?? edge.type,
         animated: edge.type === "blocks",
-        style: { stroke: "var(--accent)" },
+        style: { stroke: "var(--accent)", strokeWidth: 1.7, opacity: 0.75 },
+        labelStyle: { fill: "var(--text-muted)", fontSize: 11, fontWeight: 650 },
+        labelBgStyle: { fill: "var(--surface)", fillOpacity: 0.9 },
       })),
     [edges],
   );
 
-  return <div className="h-[560px] overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--surface-subtle)]"><ReactFlow edges={flowEdges} fitView nodes={flowNodes} nodesConnectable={false} nodesDraggable={false} proOptions={{ hideAttribution: true }}><Background gap={20} /><Controls /><MiniMap pannable zoomable /></ReactFlow></div>;
+  return <div className="project-canvas h-[min(64vh,620px)] min-h-[420px] overflow-hidden rounded-[18px] border border-[var(--border)] bg-[var(--surface-tint)]"><ReactFlow edges={flowEdges} fitView fitViewOptions={{ padding: 0.24 }} nodes={flowNodes} nodesConnectable={false} nodesDraggable={false} proOptions={{ hideAttribution: true }}><Background color="var(--border)" gap={22} size={1} /><Controls showInteractive={false} /><MiniMap maskColor="rgb(31 118 92 / 0.09)" pannable zoomable /></ReactFlow></div>;
 }

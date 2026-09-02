@@ -21,7 +21,7 @@ test("logs in and renders a factual empty workspace", async ({ page }) => {
   await page.getByRole("button", { name: "登录", exact: true }).click();
   await expect(page.getByRole("heading", { name: "林知夏，今天好" })).toBeVisible();
   await expect(page.getByText("还没有工作记录")).toBeVisible();
-  await expect(page.getByText("当前没有活动计时器")).toBeVisible();
+  await expect(page.getByText("还没有活动计时器")).toBeVisible();
 });
 
 test("TOTP login withholds the workspace until the second factor succeeds", async ({ page }) => {
