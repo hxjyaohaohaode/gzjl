@@ -72,6 +72,22 @@ test("notification panel shows real unread items and marks them read", async ({ 
   await page.getByText("待审核提醒").click();
 });
 
+test("notification preferences can disable a worker-backed category", async ({ page }) => {
+  await mockAuthenticatedWorkspace(page);
+  const preference = { category: "timer_long_running", inAppEnabled: true, pushEnabled: false, emailEnabled: false, quietHours: {}, mutedUntil: null };
+  await page.route("**/api/notification-preferences", async (route) => {
+    if (route.request().method() === "GET") await route.fulfill({ json: { items: [preference] } });
+    else { expect(route.request().postDataJSON()).toEqual({ ...preference, inAppEnabled: false }); await route.fulfill({ json: { preference: { ...preference, inAppEnabled: false } } }); }
+  });
+  await page.goto("/login");
+  await page.getByLabel("邮箱或手机号").fill("owner@example.test");
+  await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+  await page.goto("/notification-preferences");
+  await expect(page.getByRole("heading", { name: "通知设置" })).toBeVisible();
+  await page.getByText("长时间计时").locator("xpath=../..").getByRole("button", { name: "关闭" }).click();
+});
+
 test("mobile navigation exposes the five primary destinations", async ({ page }, testInfo) => {
   test.skip(!testInfo.project.name.startsWith("mobile"), "mobile-only assertion");
   await mockAuthenticatedWorkspace(page);
