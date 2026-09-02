@@ -16,6 +16,9 @@ const localLaunch = localChromium
 export default defineConfig({
   testDir: "./tests/e2e",
   fullyParallel: true,
+  // Dynamic chart modules are intentionally exercised in both viewports. Keep
+  // local fallback Chromium from saturating a Windows development machine.
+  workers: process.env.CI ? 2 : 4,
   retries: process.env.CI ? 2 : 0,
   reporter: process.env.CI ? "github" : "list",
   use: {
@@ -30,7 +33,9 @@ export default defineConfig({
   webServer: {
     command: "pnpm --filter @workbench/web dev",
     url: "http://127.0.0.1:5173",
-    reuseExistingServer: !process.env.CI,
+    // A stale Vite process can disappear midway through a parallel run. Reuse
+    // only when a developer explicitly opts in, not as the default test path.
+    reuseExistingServer: process.env.PLAYWRIGHT_REUSE_SERVER === "true",
     timeout: 120_000,
   },
 });

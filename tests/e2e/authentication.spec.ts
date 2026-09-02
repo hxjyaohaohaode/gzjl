@@ -22,6 +22,21 @@ test("logs in and renders a factual empty workspace", async ({ page }) => {
   await expect(page.getByText("当前没有活动计时器")).toBeVisible();
 });
 
+test("password reset requests a generic email delivery without exposing a token", async ({ page }) => {
+  await page.route("**/api/auth/csrf", (route) => route.fulfill({ json: { csrfToken: "test-csrf-token" } }));
+  await page.route("**/api/me", (route) => route.fulfill({ status: 401, json: { error: "unauthorized" } }));
+  await page.route("**/api/auth/password-reset/request", async (route) => {
+    expect(route.request().postDataJSON()).toEqual({ identifier: "member@example.test" });
+    await route.fulfill({ status: 202, json: { accepted: true, message: "若该邮箱对应有效账号，重置链接将发送至邮箱。" } });
+  });
+  await page.goto("/login");
+  await page.getByRole("link", { name: "忘记密码？" }).click();
+  await page.getByLabel("邮箱").fill("member@example.test");
+  await page.getByRole("button", { name: "发送重置链接" }).click();
+  await expect(page.getByRole("status")).toHaveText("若该邮箱对应有效账号，重置链接将发送至邮箱。");
+  await expect(page.locator("text=/[A-Za-z0-9_-]{32,}/")).toHaveCount(0);
+});
+
 test("mobile navigation exposes the five primary destinations", async ({ page }, testInfo) => {
   test.skip(!testInfo.project.name.startsWith("mobile"), "mobile-only assertion");
   await mockAuthenticatedWorkspace(page);

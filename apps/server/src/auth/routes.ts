@@ -2,7 +2,8 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 
 import type { ServerConfig } from "../config.js";
-import { AccountLockedError, InvalidCredentialsError } from "./service.js";
+import { AuthDeliveryUnavailableError, AuthMailer } from "./mailer.js";
+import { AccountLockedError, InvalidCredentialsError, PasswordResetTokenError } from "./service.js";
 import type { AuthService } from "./service.js";
 import { SESSION_COOKIE_DEV, SESSION_COOKIE_PROD } from "./security.js";
 
@@ -16,6 +17,9 @@ const loginSchema = z.object({
   identifier: z.string().trim().min(3).max(320),
   password: z.string().min(8).max(1_024),
 });
+const passwordResetRequestSchema = z.object({ identifier: z.string().trim().min(3).max(320) });
+const strongPassword = z.string().min(12).max(1_024).regex(/[a-z]/, "密码须包含小写字母。").regex(/[A-Z]/, "密码须包含大写字母。").regex(/\d/, "密码须包含数字。").regex(/[^A-Za-z0-9]/, "密码须包含特殊字符。");
+const passwordResetSchema = z.object({ token: z.string().min(32).max(512), password: strongPassword });
 
 export function sessionCookieName(config: ServerConfig): string {
   return config.NODE_ENV === "production" ? SESSION_COOKIE_PROD : SESSION_COOKIE_DEV;
@@ -53,6 +57,7 @@ export async function registerAuthRoutes(
 ): Promise<void> {
   const cookieName = sessionCookieName(config);
   const authenticate = createAuthenticationPreHandler(service, config);
+  const mailer = new AuthMailer(config);
   const cookieOptions = {
     path: "/",
     httpOnly: true,
@@ -103,6 +108,43 @@ export async function registerAuthRoutes(
       await service.logout(request.cookies[cookieName]);
       reply.clearCookie(cookieName, cookieOptions);
       return reply.code(204).send();
+    },
+  );
+
+  app.post(
+    "/api/auth/password-reset/request",
+    {
+      preHandler: app.csrfProtection,
+      config: { rateLimit: { max: 5, timeWindow: "15 minutes", ban: 3 } },
+    },
+    async (request, reply) => {
+      const { identifier } = passwordResetRequestSchema.parse(request.body);
+      try {
+        const reset = await service.requestPasswordReset(identifier);
+        if (reset) await mailer.sendPasswordReset(reset);
+        return reply.code(202).send({ accepted: true, message: "若该邮箱对应有效账号，重置链接将发送至邮箱。" });
+      } catch (error) {
+        if (error instanceof AuthDeliveryUnavailableError) {
+          return reply.code(503).send({ error: "password_reset_unavailable", message: error.message });
+        }
+        throw error;
+      }
+    },
+  );
+
+  app.post(
+    "/api/auth/password-reset/complete",
+    { preHandler: app.csrfProtection },
+    async (request, reply) => {
+      const input = passwordResetSchema.parse(request.body);
+      try {
+        return await service.resetPassword(input.token, input.password);
+      } catch (error) {
+        if (error instanceof PasswordResetTokenError) {
+          return reply.code(409).send({ error: "invalid_reset_token", message: error.message });
+        }
+        throw error;
+      }
     },
   );
 

@@ -2,11 +2,13 @@ import { and, eq, gt, isNull, or, sql } from "drizzle-orm";
 import type { Database } from "@workbench/db";
 import {
   memberRoles,
+  auditLogs,
   orgMemberships,
   rolePermissions,
   sessions,
   userCredentials,
   users,
+  verificationTokens,
 } from "@workbench/db/schema";
 import {
   permissions,
@@ -17,6 +19,7 @@ import {
 
 import {
   createOpaqueToken,
+  hashPassword,
   hashOpaqueToken,
   normalizeLoginIdentifier,
   verifyPassword,
@@ -50,11 +53,55 @@ export class AccountLockedError extends Error {
   }
 }
 
+export class PasswordResetTokenError extends Error {
+  constructor() {
+    super("重置链接无效、已使用或已过期。请重新申请。");
+    this.name = "PasswordResetTokenError";
+  }
+}
+
 export class AuthService {
   constructor(
     private readonly db: Database,
     private readonly sessionTtlSeconds: number,
+    private readonly passwordResetTtlSeconds: number,
   ) {}
+
+  async requestPasswordReset(identifier: string) {
+    const normalizedIdentifier = normalizeLoginIdentifier(identifier);
+    const [account] = await this.db.select({
+      credentialId: userCredentials.id,
+      email: userCredentials.normalizedIdentifier,
+      membershipId: orgMemberships.id,
+      organizationId: orgMemberships.organizationId,
+      userId: users.id,
+      userStatus: users.status,
+      membershipStatus: orgMemberships.status,
+    }).from(userCredentials).innerJoin(users, eq(users.id, userCredentials.userId)).innerJoin(orgMemberships, eq(orgMemberships.userId, users.id)).where(and(eq(userCredentials.normalizedIdentifier, normalizedIdentifier), eq(userCredentials.kind, "email"))).limit(1);
+    if (!account || account.userStatus !== "active" || account.membershipStatus !== "active") return null;
+    const token = createOpaqueToken();
+    const expiresAt = new Date(Date.now() + this.passwordResetTtlSeconds * 1_000);
+    await this.db.transaction(async (tx) => {
+      await tx.update(verificationTokens).set({ consumedAt: new Date() }).where(and(eq(verificationTokens.credentialId, account.credentialId), eq(verificationTokens.purpose, "password_reset"), isNull(verificationTokens.consumedAt)));
+      await tx.insert(verificationTokens).values({ credentialId: account.credentialId, purpose: "password_reset", tokenHash: hashOpaqueToken(token), expiresAt });
+      await tx.insert(auditLogs).values({ organizationId: account.organizationId, actorMembershipId: account.membershipId, action: "auth.password_reset_requested", entityType: "user", entityId: account.userId });
+    });
+    return { email: account.email, token, expiresAt };
+  }
+
+  async resetPassword(token: string, password: string) {
+    const passwordHash = await hashPassword(password);
+    return this.db.transaction(async (tx) => {
+      const [record] = await tx.select({ token: verificationTokens, credential: userCredentials, membership: orgMemberships }).from(verificationTokens).innerJoin(userCredentials, eq(userCredentials.id, verificationTokens.credentialId)).innerJoin(orgMemberships, eq(orgMemberships.userId, userCredentials.userId)).where(and(eq(verificationTokens.tokenHash, hashOpaqueToken(token)), eq(verificationTokens.purpose, "password_reset"), isNull(verificationTokens.consumedAt), gt(verificationTokens.expiresAt, new Date()), eq(orgMemberships.status, "active"))).for("update").limit(1);
+      if (!record) throw new PasswordResetTokenError();
+      const now = new Date();
+      await tx.update(userCredentials).set({ passwordHash, passwordChangedAt: now, failedLoginAttempts: 0, lockedUntil: null, updatedAt: now }).where(eq(userCredentials.id, record.credential.id));
+      await tx.update(verificationTokens).set({ consumedAt: now }).where(eq(verificationTokens.id, record.token.id));
+      await tx.update(sessions).set({ revokedAt: now, revokeReason: "password_reset" }).where(and(eq(sessions.userId, record.credential.userId), isNull(sessions.revokedAt)));
+      await tx.insert(auditLogs).values({ organizationId: record.membership.organizationId, actorMembershipId: record.membership.id, action: "auth.password_reset_completed", entityType: "user", entityId: record.credential.userId });
+      return { reset: true };
+    });
+  }
 
   async login(identifier: string, password: string): Promise<LoginResult> {
     const normalizedIdentifier = normalizeLoginIdentifier(identifier);

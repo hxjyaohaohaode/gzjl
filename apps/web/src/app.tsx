@@ -3,7 +3,7 @@ import { Navigate, Route, Routes } from "react-router-dom";
 
 import { api, ApiError, type Me } from "./api.js";
 import { AppShell } from "./shell.js";
-import { AiPage, AnalyticsPage, ApprovalsPage, CalendarPage, HomePage, InvitationPage, LoginPage, NotFoundPage, OrganizationPage, PayrollPage, ProjectDetailPage, ProjectsPage, SetupPage, TeamPage, WorkPage } from "./pages.js";
+import { AiPage, AnalyticsPage, ApprovalsPage, CalendarPage, HomePage, InvitationPage, LoginPage, NotFoundPage, OrganizationPage, PasswordResetPage, PasswordResetRequestPage, PayrollPage, ProjectDetailPage, ProjectsPage, SetupPage, TeamPage, WorkPage } from "./pages.js";
 
 async function getMe(): Promise<Me | null> {
   try { return await api<Me>("/api/me"); }
@@ -18,6 +18,8 @@ export function App() {
   return (
     <Routes>
       <Route path="/login" element={me ? <Navigate replace to="/" /> : <LoginPage />} />
+      <Route path="/forgot-password" element={me ? <Navigate replace to="/" /> : <PasswordResetRequestPage />} />
+      <Route path="/reset-password" element={me ? <Navigate replace to="/" /> : <PasswordResetPage />} />
       <Route path="/setup" element={me ? <Navigate replace to="/" /> : <SetupPage />} />
       <Route path="/invite" element={me ? <Navigate replace to="/" /> : <InvitationPage />} />
       <Route element={me ? <AppShell me={me} /> : <Navigate replace to="/login" />}>

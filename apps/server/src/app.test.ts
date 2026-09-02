@@ -8,10 +8,12 @@ const config: ServerConfig = {
   HOST: "127.0.0.1",
   PORT: 3_000,
   WEB_ORIGIN: "http://localhost:5173",
+  PUBLIC_APP_URL: "http://localhost:5173",
   WEB_DIST_DIR: "apps/web/dist",
   LOG_LEVEL: "silent",
   SESSION_SECRET: "test-secret-that-is-at-least-thirty-two-bytes",
   SESSION_TTL_SECONDS: 2_592_000,
+  PASSWORD_RESET_TTL_SECONDS: 3_600,
   DATABASE_URL: "postgresql://test:test@localhost:5432/test",
   DATABASE_POOL_MAX: 1,
   DATABASE_SSL: false,
@@ -22,6 +24,8 @@ const config: ServerConfig = {
   S3_REGION: "auto",
   S3_FORCE_PATH_STYLE: false,
   ATTACHMENT_MAX_BYTES: 20 * 1024 * 1024,
+  SMTP_PORT: 587,
+  SMTP_SECURE: false,
 };
 
 const apps: Awaited<ReturnType<typeof buildApp>>[] = [];

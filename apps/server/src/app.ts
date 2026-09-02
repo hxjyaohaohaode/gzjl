@@ -145,7 +145,11 @@ export async function buildApp({
 
   if (database) {
     await registerSetupRoutes(app, new SetupService(database), config);
-    const authService = new AuthService(database, config.SESSION_TTL_SECONDS);
+    const authService = new AuthService(
+      database,
+      config.SESSION_TTL_SECONDS,
+      config.PASSWORD_RESET_TTL_SECONDS,
+    );
     await registerAuthRoutes(
       app,
       authService,
