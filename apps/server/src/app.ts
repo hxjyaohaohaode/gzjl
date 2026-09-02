@@ -149,6 +149,7 @@ export async function buildApp({
       database,
       config.SESSION_TTL_SECONDS,
       config.PASSWORD_RESET_TTL_SECONDS,
+      config.SESSION_SECRET,
     );
     await registerAuthRoutes(
       app,

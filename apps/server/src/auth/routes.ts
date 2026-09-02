@@ -3,7 +3,7 @@ import { z } from "zod";
 
 import type { ServerConfig } from "../config.js";
 import { AuthDeliveryUnavailableError, AuthMailer } from "./mailer.js";
-import { AccountLockedError, InvalidCredentialsError, PasswordResetTokenError } from "./service.js";
+import { AccountLockedError, InvalidCredentialsError, PasswordResetTokenError, TotpCodeError, TotpSetupError } from "./service.js";
 import type { AuthService } from "./service.js";
 import { SESSION_COOKIE_DEV, SESSION_COOKIE_PROD } from "./security.js";
 
@@ -20,6 +20,9 @@ const loginSchema = z.object({
 const passwordResetRequestSchema = z.object({ identifier: z.string().trim().min(3).max(320) });
 const strongPassword = z.string().min(12).max(1_024).regex(/[a-z]/, "密码须包含小写字母。").regex(/[A-Z]/, "密码须包含大写字母。").regex(/\d/, "密码须包含数字。").regex(/[^A-Za-z0-9]/, "密码须包含特殊字符。");
 const passwordResetSchema = z.object({ token: z.string().min(32).max(512), password: strongPassword });
+const totpCode = z.string().regex(/^\d{6}$/, "请输入 6 位动态验证码。");
+const totpLoginSchema = z.object({ challengeToken: z.string().min(32).max(512), code: totpCode });
+const totpDisableSchema = z.object({ password: z.string().min(8).max(1_024), code: totpCode });
 
 export function sessionCookieName(config: ServerConfig): string {
   return config.NODE_ENV === "production" ? SESSION_COOKIE_PROD : SESSION_COOKIE_DEV;
@@ -75,6 +78,13 @@ export async function registerAuthRoutes(
       const input = loginSchema.parse(request.body);
       try {
         const result = await service.login(input.identifier, input.password);
+        if ("mfaRequired" in result) {
+          return reply.code(202).send({
+            mfaRequired: true,
+            challengeToken: result.challengeToken,
+            expiresAt: result.expiresAt,
+          });
+        }
         reply.setCookie(cookieName, result.token, {
           ...cookieOptions,
           expires: result.expiresAt,
@@ -102,12 +112,81 @@ export async function registerAuthRoutes(
   );
 
   app.post(
+    "/api/auth/login/mfa",
+    {
+      preHandler: app.csrfProtection,
+      config: { rateLimit: { max: 10, timeWindow: "15 minutes", ban: 3 } },
+    },
+    async (request, reply) => {
+      const input = totpLoginSchema.parse(request.body);
+      try {
+        const result = await service.completeTotpLogin(input.challengeToken, input.code);
+        reply.setCookie(cookieName, result.token, { ...cookieOptions, expires: result.expiresAt, maxAge: config.SESSION_TTL_SECONDS });
+        return {
+          user: { id: result.context.userId, membershipId: result.context.membershipId, organizationId: result.context.organizationId, displayName: result.context.displayName },
+          permissions: result.context.grants,
+        };
+      } catch (error) {
+        if (error instanceof TotpCodeError) return reply.code(401).send({ error: "invalid_totp", message: error.message });
+        throw error;
+      }
+    },
+  );
+
+  app.post(
     "/api/auth/logout",
     { preHandler: [app.csrfProtection, authenticate] },
     async (request, reply) => {
       await service.logout(request.cookies[cookieName]);
       reply.clearCookie(cookieName, cookieOptions);
       return reply.code(204).send();
+    },
+  );
+
+  app.get(
+    "/api/auth/mfa/totp",
+    { preHandler: authenticate },
+    async (request) => service.getTotpStatus(request.auth!.userId),
+  );
+
+  app.post(
+    "/api/auth/mfa/totp/setup",
+    { preHandler: [app.csrfProtection, authenticate] },
+    async (request, reply) => {
+      try {
+        return await service.beginTotpSetup(request.auth!);
+      } catch (error) {
+        if (error instanceof TotpSetupError) return reply.code(409).send({ error: "totp_setup_failed", message: error.message });
+        throw error;
+      }
+    },
+  );
+
+  app.post(
+    "/api/auth/mfa/totp/confirm",
+    { preHandler: [app.csrfProtection, authenticate] },
+    async (request, reply) => {
+      const { code } = z.object({ code: totpCode }).parse(request.body);
+      try {
+        return await service.confirmTotpSetup(request.auth!, code);
+      } catch (error) {
+        if (error instanceof TotpSetupError) return reply.code(409).send({ error: "totp_confirmation_failed", message: error.message });
+        throw error;
+      }
+    },
+  );
+
+  app.delete(
+    "/api/auth/mfa/totp",
+    { preHandler: [app.csrfProtection, authenticate] },
+    async (request, reply) => {
+      const input = totpDisableSchema.parse(request.body);
+      try {
+        return await service.disableTotp(request.auth!, input.password, input.code);
+      } catch (error) {
+        if (error instanceof InvalidCredentialsError || error instanceof TotpCodeError) return reply.code(401).send({ error: "totp_disable_denied", message: "密码或动态验证码不正确。" });
+        throw error;
+      }
     },
   );
 

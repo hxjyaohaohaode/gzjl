@@ -24,6 +24,25 @@ test("logs in and renders a factual empty workspace", async ({ page }) => {
   await expect(page.getByText("当前没有活动计时器")).toBeVisible();
 });
 
+test("TOTP login withholds the workspace until the second factor succeeds", async ({ page }) => {
+  let authenticated = false;
+  await page.route("**/api/auth/csrf", (route) => route.fulfill({ json: { csrfToken: "test-csrf-token" } }));
+  await page.route("**/api/auth/login", (route) => route.fulfill({ status: 202, json: { mfaRequired: true, challengeToken: "a".repeat(43), expiresAt: "2026-09-02T01:05:00.000Z" } }));
+  await page.route("**/api/auth/login/mfa", async (route) => { expect(route.request().postDataJSON()).toEqual({ challengeToken: "a".repeat(43), code: "123456" }); authenticated = true; await route.fulfill({ json: { ok: true } }); });
+  await page.route("**/api/me", (route) => authenticated ? route.fulfill({ json: { user: { id: "00000000-0000-4000-8000-000000000001", membershipId: "00000000-0000-4000-8000-000000000002", organizationId: "00000000-0000-4000-8000-000000000003", displayName: "林知夏" }, permissions: [] } }) : route.fulfill({ status: 401, json: { error: "unauthorized" } }));
+  await page.route("**/api/work-sessions?**", (route) => route.fulfill({ json: { items: [], nextCursor: null } }));
+  await page.route("**/api/timer", (route) => route.fulfill({ json: { timer: null } }));
+  await page.route("**/api/notifications", (route) => route.fulfill({ json: { items: [] } }));
+  await page.goto("/login");
+  await page.getByLabel("邮箱或手机号").fill("owner@example.test");
+  await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "验证身份" })).toBeVisible();
+  await page.getByLabel("动态验证码").fill("123456");
+  await page.getByRole("button", { name: "完成安全登录" }).click();
+  await expect(page.getByRole("heading", { name: "林知夏，今天好" })).toBeVisible();
+});
+
 test("password reset requests a generic email delivery without exposing a token", async ({ page }) => {
   await page.route("**/api/auth/csrf", (route) => route.fulfill({ json: { csrfToken: "test-csrf-token" } }));
   await page.route("**/api/me", (route) => route.fulfill({ status: 401, json: { error: "unauthorized" } }));

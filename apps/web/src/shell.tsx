@@ -20,6 +20,7 @@ const navigation: NavigationItem[] = [
   { label: "AI 工作洞察", shortLabel: "AI", to: "/ai", icon: Bot },
   { label: "审批", shortLabel: "审批", to: "/approvals", icon: FileCheck2, permission: "work.review" },
   { label: "组织与人员", shortLabel: "组织", to: "/organization", icon: BriefcaseBusiness, permission: "members.manage" },
+  { label: "账户安全", shortLabel: "安全", to: "/security", icon: Settings },
 ];
 
 export function AppShell({ me }: { me: Me }) {

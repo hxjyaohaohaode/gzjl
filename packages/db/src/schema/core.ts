@@ -2,6 +2,7 @@ import { sql } from "drizzle-orm";
 import {
   type AnyPgColumn,
   boolean,
+  bigint,
   check,
   index,
   integer,
@@ -105,6 +106,22 @@ export const sessions = pgTable(
     uniqueIndex("sessions_token_hash_uidx").on(table.tokenHash),
     index("sessions_user_active_idx").on(table.userId, table.expiresAt),
   ],
+);
+
+/** One encrypted RFC 6238 factor per user. The raw shared secret never reaches PostgreSQL. */
+export const userTotpFactors = pgTable(
+  "user_totp_factors",
+  {
+    userId: uuid("user_id")
+      .primaryKey()
+      .references(() => users.id, { onDelete: "cascade" }),
+    secretCiphertext: text("secret_ciphertext").notNull(),
+    enabledAt: timestamp("enabled_at", { withTimezone: true }),
+    lastUsedCounter: bigint("last_used_counter", { mode: "number" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [index("user_totp_factors_enabled_idx").on(table.enabledAt)],
 );
 
 export const verificationTokens = pgTable(
