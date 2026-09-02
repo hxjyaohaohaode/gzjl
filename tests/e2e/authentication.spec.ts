@@ -105,6 +105,21 @@ test("CSV import blocks invalid previews and confirms only the previewed content
   await expect(page.getByRole("status")).toHaveText("已原子导入 1 条工时记录。");
 });
 
+test("CSV import keeps confirmation disabled when server validation reports a row error", async ({ page }) => {
+  await mockAuthenticatedWorkspace(page);
+  const csv = "startAt,endAt,content\ninvalid,2026-09-02T02:00:00.000Z,错误行";
+  await page.route("**/api/imports/work-sessions/preview", (route) => route.fulfill({ json: { importId: "00000000-0000-4000-8000-000000000052", hash: "b".repeat(64), rowCount: 1, validCount: 0, errors: [{ row: 2, field: "startAt", message: "Invalid ISO datetime" }] } }));
+  await page.goto("/login");
+  await page.getByLabel("邮箱或手机号").fill("owner@example.test");
+  await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+  await page.goto("/imports");
+  await page.getByLabel("工时 CSV 文件").setInputFiles({ name: "invalid.csv", mimeType: "text/csv", buffer: Buffer.from(csv) });
+  await page.getByRole("button", { name: "预览并校验" }).click();
+  await expect(page.getByText("Invalid ISO datetime")).toBeVisible();
+  await expect(page.getByRole("button", { name: "确认原子导入" })).toBeDisabled();
+});
+
 test("mobile navigation exposes the five primary destinations", async ({ page }, testInfo) => {
   test.skip(!testInfo.project.name.startsWith("mobile"), "mobile-only assertion");
   await mockAuthenticatedWorkspace(page);
