@@ -56,9 +56,10 @@ export class OrganizationService {
   async setMemberStatus(actor: OrganizationActor, membershipId: string, status: "active" | "inactive") {
     if (membershipId === actor.membershipId) throw new OrganizationConflictError("不能在当前会话中停用或恢复自己。");
     return this.db.transaction(async (tx) => {
-      const [member] = await tx.select({ membership: orgMemberships, roleKind: accessRoles.kind }).from(orgMemberships).leftJoin(memberRoles, eq(memberRoles.membershipId, orgMemberships.id)).leftJoin(accessRoles, eq(accessRoles.id, memberRoles.roleId)).where(and(eq(orgMemberships.id, membershipId), eq(orgMemberships.organizationId, actor.organizationId))).for("update").limit(1);
+      const [member] = await tx.select({ membership: orgMemberships }).from(orgMemberships).where(and(eq(orgMemberships.id, membershipId), eq(orgMemberships.organizationId, actor.organizationId))).for("update").limit(1);
       if (!member) throw new OrganizationConflictError("成员不存在或不属于当前组织。");
-      if (member.roleKind === "owner") throw new OrganizationConflictError("Owner 不能在此处停用；请先完成所有权转移。");
+      const [ownerRole] = await tx.select({ id: memberRoles.id }).from(memberRoles).innerJoin(accessRoles, eq(accessRoles.id, memberRoles.roleId)).where(and(eq(memberRoles.membershipId, membershipId), eq(accessRoles.kind, "owner"))).limit(1);
+      if (ownerRole) throw new OrganizationConflictError("Owner 不能在此处停用；请先完成所有权转移。");
       if (member.membership.status === status) return member.membership;
       const now = new Date();
       const [updated] = await tx.update(orgMemberships).set({ status, leftAt: status === "inactive" ? now : null, updatedAt: now }).where(eq(orgMemberships.id, membershipId)).returning();
