@@ -258,6 +258,30 @@ export function PayrollPage() {
 export function CalendarPage() {
   const queryClient = useQueryClient();
   const [view, setView] = useState<"day" | "week" | "month">("week");
+  const [anchorDate, setAnchorDate] = useState(() => new Date());
+  const work = useQuery({ queryKey: ["work-sessions"], queryFn: () => api<{ items: WorkSession[] }>("/api/work-sessions?limit=100") });
+  const reschedule = useMutation({ mutationFn: ({ item, days }: { item: WorkSession; days: number }) => { const shift = days * 86_400_000; return api(`/api/work-sessions/${item.id}/schedule`, { method: "PATCH", body: { expectedVersion: item.version, startAt: new Date(new Date(item.startAt).getTime() + shift).toISOString(), endAt: new Date(new Date(item.endAt).getTime() + shift).toISOString() } }); }, onSuccess: async () => { await queryClient.invalidateQueries({ queryKey: ["work-sessions"] }); } });
+  const groups = useMemo(() => {
+    const dayStart = new Date(anchorDate.getFullYear(), anchorDate.getMonth(), anchorDate.getDate()).getTime();
+    const weekStart = dayStart - ((anchorDate.getDay() + 6) % 7) * 86_400_000;
+    const month = `${anchorDate.getFullYear()}-${anchorDate.getMonth()}`;
+    const result = new Map<string, WorkSession[]>();
+    for (const item of work.data?.items ?? []) {
+      const date = new Date(item.startAt); const timestamp = new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+      if ((view === "day" && timestamp !== dayStart) || (view === "week" && (timestamp < weekStart || timestamp >= weekStart + 7 * 86_400_000)) || (view === "month" && `${date.getFullYear()}-${date.getMonth()}` !== month)) continue;
+      const key = new Intl.DateTimeFormat("zh-CN", { weekday: "short", month: "long", day: "numeric" }).format(date);
+      result.set(key, [...(result.get(key) ?? []), item]);
+    }
+    return [...result.entries()];
+  }, [anchorDate, view, work.data]);
+  const movePeriod = (direction: number) => setAnchorDate((date) => { const next = new Date(date); if (view === "month") next.setMonth(next.getMonth() + direction); else next.setDate(next.getDate() + direction * (view === "week" ? 7 : 1)); return next; });
+  const rangeLabel = view === "month" ? new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "long" }).format(anchorDate) : new Intl.DateTimeFormat("zh-CN", { month: "long", day: "numeric" }).format(anchorDate);
+  return <><PageHeader title="工作日历" description="浏览历史或未来周期；草稿改期由服务端保持时长、同步休息段、校验重叠并记录版本。" actions={<div className="flex flex-wrap gap-2"><Button onClick={() => movePeriod(-1)} size="compact" variant="secondary">上一周期</Button><Button onClick={() => setAnchorDate(new Date())} size="compact" variant="secondary">今天</Button><Button onClick={() => movePeriod(1)} size="compact" variant="secondary">下一周期</Button>{(["day", "week", "month"] as const).map((item) => <Button key={item} onClick={() => setView(item)} size="compact" variant={view === item ? "primary" : "secondary"}>{item === "day" ? "日" : item === "week" ? "周" : "月"}</Button>)}</div>} /><p className="mb-4 text-sm font-semibold text-[var(--text-muted)]">当前周期：{rangeLabel}</p>{work.isPending ? <Card><LoadingBlock /></Card> : groups.length ? <div className="space-y-5">{groups.map(([date, items]) => <Card key={date}><CardHeader><h2 className="font-bold">{date}</h2><Badge tone="info">{formatDuration(items.reduce((sum, item) => sum + item.netSeconds, 0))}</Badge></CardHeader><CardContent><div className="divide-y divide-[var(--border)]">{items.map((item) => <WorkRow action={item.submissionStatus === "draft" ? <span className="flex gap-1"><Button disabled={reschedule.isPending} onClick={() => reschedule.mutate({ item, days: -1 })} size="compact" variant="secondary">前一天</Button><Button disabled={reschedule.isPending} onClick={() => reschedule.mutate({ item, days: 1 })} size="compact" variant="secondary">后一天</Button></span> : null} item={item} key={item.id} />)}</div><ErrorMessage error={reschedule.error} /></CardContent></Card>)}</div> : <Card><EmptyState description={`当前${view === "day" ? "日" : view === "week" ? "周" : "月"}没有工时；创建记录后会按个人时区显示。`} icon={<CalendarDays />} title="日历中还没有记录" /></Card>}</>;
+}
+
+export function LegacyCalendarPage() {
+  const queryClient = useQueryClient();
+  const [view, setView] = useState<"day" | "week" | "month">("week");
   const work = useQuery({ queryKey: ["work-sessions"], queryFn: () => api<{ items: WorkSession[] }>("/api/work-sessions?limit=100") });
   const reschedule = useMutation({ mutationFn: ({ item, days }: { item: WorkSession; days: number }) => { const shift = days * 86_400_000; return api(`/api/work-sessions/${item.id}/schedule`, { method: "PATCH", body: { expectedVersion: item.version, startAt: new Date(new Date(item.startAt).getTime() + shift).toISOString(), endAt: new Date(new Date(item.endAt).getTime() + shift).toISOString() } }); }, onSuccess: async () => { await queryClient.invalidateQueries({ queryKey: ["work-sessions"] }); } });
   const groups = useMemo(() => { const now = new Date(); const dayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime(); const weekStart = dayStart - ((now.getDay() + 6) % 7) * 86_400_000; const month = `${now.getFullYear()}-${now.getMonth()}`; const result = new Map<string, WorkSession[]>(); for (const item of work.data?.items ?? []) { const date = new Date(item.startAt); const timestamp = new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime(); if ((view === "day" && timestamp !== dayStart) || (view === "week" && (timestamp < weekStart || timestamp >= weekStart + 7 * 86_400_000)) || (view === "month" && `${date.getFullYear()}-${date.getMonth()}` !== month)) continue; const key = new Intl.DateTimeFormat("zh-CN", { weekday: "short", month: "long", day: "numeric" }).format(date); result.set(key, [...(result.get(key) ?? []), item]); } return [...result.entries()]; }, [view, work.data]);
