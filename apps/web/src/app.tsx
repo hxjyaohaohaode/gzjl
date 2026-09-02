@@ -29,7 +29,7 @@ export function App() {
         <Route path="projects" element={<ProjectsPage me={me!} />} />
         <Route path="projects/:projectId" element={<ProjectDetailPage me={me!} />} />
         <Route path="team" element={<TeamPage />} />
-        <Route path="analytics" element={<AnalyticsPage />} />
+        <Route path="analytics" element={<AnalyticsPage me={me!} />} />
         <Route path="payroll" element={<PayrollPage />} />
         <Route path="ai" element={<AiPage />} />
         <Route path="approvals" element={<ApprovalsPage />} />
