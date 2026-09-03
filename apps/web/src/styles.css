@@ -1972,6 +1972,254 @@ input[type="file"]::file-selector-button {
 }
 
 /* -------------------------------------------------------------------------- */
+/* Interaction refinement: quiet surfaces, exact color controls, useful drag. */
+/* -------------------------------------------------------------------------- */
+
+:root {
+  /* Cards establish hierarchy through surface contrast and spacing, not a
+     collection of visible outlines and floating shadows. */
+  --shadow-card: none;
+  --shadow-float: 0 14px 34px rgb(24 33 54 / 0.12);
+  --shadow-primary-action: none;
+  --shadow-primary-action-hover: none;
+}
+
+:root[data-theme="dark"] {
+  --shadow-card: none;
+  --shadow-float: 0 14px 34px rgb(0 0 0 / 0.28);
+  --shadow-primary-action: none;
+  --shadow-primary-action-hover: none;
+}
+
+[data-ui="card"],
+.calendar-shell,
+.organization-workbench,
+.project-workbench,
+.project-canvas .react-flow__controls,
+.project-canvas .react-flow__minimap {
+  box-shadow: none !important;
+}
+
+[data-ui="card"]::before {
+  box-shadow: none !important;
+}
+
+.app-sidebar,
+.app-topbar,
+.app-topbar-search:hover,
+.organization-tree-root,
+.organization-tree-node:hover,
+.organization-tree-node.is-selected,
+.organization-inspector,
+.project-node-inspector,
+.project-timeline-bar,
+.project-flow-node.is-selected {
+  box-shadow: none !important;
+}
+
+.project-flow-node.is-selected {
+  outline: 2px solid color-mix(in srgb, var(--node-accent) 55%, transparent);
+  outline-offset: 1px;
+}
+
+.app-sidebar-resize-handle {
+  position: absolute;
+  z-index: 5;
+  top: 0;
+  right: -5px;
+  bottom: 0;
+  width: 10px;
+  cursor: col-resize;
+  outline: none;
+}
+
+.app-sidebar-resize-handle::after {
+  position: absolute;
+  top: 50%;
+  right: 3px;
+  width: 2px;
+  height: 3.5rem;
+  border-radius: 999px;
+  translate: 0 -50%;
+  background: transparent;
+  content: "";
+  transition: background-color 160ms ease;
+}
+
+.app-sidebar-resize-handle:hover::after,
+.app-sidebar-resize-handle:focus-visible::after {
+  background: color-mix(in srgb, var(--accent) 58%, transparent);
+}
+
+.app-context-backdrop {
+  background: rgb(18 28 46 / 0.025);
+}
+
+.app-context-panel,
+.app-utility-popover {
+  box-shadow: var(--shadow-float);
+}
+
+.accent-picker {
+  display: grid;
+  gap: 0.7rem;
+}
+
+.accent-picker-spectrum {
+  position: relative;
+  width: 100%;
+  height: 9.5rem;
+  overflow: hidden;
+  border-radius: 0.85rem;
+  cursor: crosshair;
+  outline: none;
+}
+
+.accent-picker-spectrum:focus-visible {
+  box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--accent);
+}
+
+.accent-picker-handle {
+  position: absolute;
+  width: 0.9rem;
+  height: 0.9rem;
+  border: 2px solid #fff;
+  border-radius: 999px;
+  translate: -50% -50%;
+  box-shadow: 0 0 0 1px rgb(0 0 0 / 0.38);
+  pointer-events: none;
+}
+
+.accent-picker-hue {
+  display: grid;
+  grid-template-columns: 2rem minmax(0, 1fr);
+  align-items: center;
+  gap: 0.65rem;
+  color: var(--text-subtle);
+  font-size: 0.68rem;
+  font-weight: 700;
+}
+
+.accent-picker-hue input {
+  width: 100%;
+  height: 0.65rem;
+  margin: 0;
+  border-radius: 999px;
+  appearance: none;
+  cursor: ew-resize;
+}
+
+.accent-picker-hue input::-webkit-slider-thumb {
+  width: 0.95rem;
+  height: 0.95rem;
+  border: 2px solid var(--surface);
+  border-radius: 999px;
+  background: var(--text);
+  box-shadow: 0 0 0 1px rgb(0 0 0 / 0.18);
+  appearance: none;
+}
+
+.accent-picker-hue input::-moz-range-thumb {
+  width: 0.95rem;
+  height: 0.95rem;
+  border: 2px solid var(--surface);
+  border-radius: 999px;
+  background: var(--text);
+  box-shadow: 0 0 0 1px rgb(0 0 0 / 0.18);
+}
+
+.accent-picker-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 2.5rem;
+  gap: 0.55rem;
+}
+
+.accent-picker-hex {
+  display: grid;
+  grid-template-columns: 2rem minmax(0, 1fr);
+  align-items: center;
+  gap: 0.55rem;
+  border-radius: 0.65rem;
+  background: var(--surface-subtle);
+  padding: 0 0.65rem;
+  color: var(--text-subtle);
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+}
+
+.accent-picker-hex input {
+  width: 100%;
+  min-width: 0;
+  height: 2.1rem;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.75rem;
+}
+
+.accent-picker-native {
+  display: grid;
+  width: 2.5rem;
+  height: 2.1rem;
+  place-items: center;
+  overflow: hidden;
+  border-radius: 0.65rem;
+  background: var(--surface-subtle);
+}
+
+.accent-picker-native input {
+  width: 1.5rem;
+  height: 1.5rem;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.accent-picker-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.42rem;
+}
+
+.accent-picker-presets button {
+  width: 1.35rem;
+  height: 1.35rem;
+  border: 2px solid transparent;
+  border-radius: 999px;
+  box-shadow: inset 0 0 0 1px rgb(0 0 0 / 0.08);
+}
+
+.accent-picker-presets button.is-selected {
+  border-color: var(--text);
+  box-shadow: 0 0 0 2px var(--surface), 0 0 0 3px var(--accent);
+}
+
+@media (max-width: 1023px) {
+  .app-sidebar {
+    width: min(var(--sidebar-width), 88vw) !important;
+  }
+
+  .app-sidebar-resize-handle {
+    display: none;
+  }
+
+  .app-context-backdrop {
+    background: rgb(18 28 46 / 0.1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app-sidebar-resize-handle::after {
+    transition: none;
+  }
+}
+
+/* -------------------------------------------------------------------------- */
 /* Quiet canvas revision: surfaces carry hierarchy; strokes only carry data.  */
 /* -------------------------------------------------------------------------- */
 
@@ -4535,4 +4783,161 @@ body {
     grid-template-columns: 9rem minmax(0, 1fr);
     min-width: 37rem;
   }
+}
+
+/* Final interaction layer: panel overlays close from their blank backdrop,
+   while ordinary surfaces remain intentionally quiet and border-light. */
+.organization-inspector-backdrop {
+  display: none;
+}
+
+.project-node-inspector-backdrop {
+  display: none;
+}
+
+.organization-invite-contact-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.55rem;
+}
+
+.organization-invite-contact-field {
+  display: grid;
+  gap: 0.35rem;
+  min-width: 0;
+}
+
+.organization-invite-contact-field > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.32rem;
+  color: var(--text-subtle);
+  font-size: 0.64rem;
+  font-weight: 700;
+}
+
+.organization-manual-link {
+  display: grid;
+  gap: 0.72rem;
+  margin-top: 0.7rem;
+  border-radius: 0.85rem;
+  background: color-mix(in srgb, var(--accent) 5%, var(--surface-tint));
+  padding: 0.78rem;
+}
+
+.organization-manual-link-icon {
+  display: grid;
+  width: 1.65rem;
+  height: 1.65rem;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.organization-manual-link strong,
+.organization-manual-link small {
+  display: block;
+}
+
+.organization-manual-link strong {
+  color: var(--text);
+  font-size: 0.7rem;
+  font-weight: 780;
+}
+
+.organization-manual-link small,
+.organization-manual-link > p {
+  margin-top: 0.18rem;
+  color: var(--text-muted);
+  font-size: 0.61rem;
+  line-height: 1.55;
+}
+
+.organization-manual-link > p {
+  margin: 0;
+}
+
+.organization-manual-link-copy {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.45rem;
+  align-items: center;
+}
+
+.organization-manual-link-copy input {
+  width: 100%;
+  min-width: 0;
+  min-height: 2rem;
+  border: 0;
+  border-radius: 0.6rem;
+  outline: none;
+  background: color-mix(in srgb, var(--surface) 86%, transparent);
+  padding: 0 0.55rem;
+  color: var(--text-muted);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.58rem;
+}
+
+.organization-manual-link-copy input:focus-visible {
+  box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--accent);
+}
+
+@media (max-width: 1535px) {
+  .organization-inspector-backdrop {
+    display: block;
+    position: fixed;
+    z-index: 34;
+    inset: 0;
+    margin: 0;
+    border: 0;
+    background: transparent;
+    padding: 0;
+  }
+}
+
+@media (max-width: 1170px) {
+  .project-node-inspector-backdrop {
+    display: block;
+    position: fixed;
+    z-index: 34;
+    inset: 0;
+    margin: 0;
+    border: 0;
+    background: transparent;
+    padding: 0;
+  }
+}
+
+@media (max-width: 640px) {
+  .organization-invite-contact-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* The source stylesheet carries historical visual revisions. Keep this final
+   token layer last so ordinary containers stay borderless and shadow-free;
+   only transient focus layers retain a restrained elevation cue. */
+:root,
+:root[data-theme="dark"] {
+  --shadow-card: none;
+}
+
+[data-ui="card"],
+.calendar-shell,
+.organization-workbench,
+.project-workbench,
+.organization-inspector,
+.project-node-inspector,
+.app-sidebar,
+.app-topbar {
+  box-shadow: none !important;
+}
+
+.app-command-palette,
+.app-utility-popover,
+.app-context-panel {
+  border-color: transparent !important;
+  box-shadow: var(--shadow-float) !important;
 }

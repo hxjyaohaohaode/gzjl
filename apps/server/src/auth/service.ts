@@ -177,6 +177,110 @@ export class AuthService {
     return { identifier: account.identifier, kind: account.kind, token, expiresAt };
   }
 
+  /**
+   * Creates an Owner-authorized, one-time reset capability when an
+   * organization intentionally does not configure email or SMS delivery.
+   * The caller must have just completed sensitive-action verification; this
+   * method still enforces organization ownership and never returns a contact
+   * identifier, so the link can be manually relayed without broadening data
+   * access.
+   */
+  async issueOwnerManagedPasswordResetLink(
+    context: AuthContext,
+    membershipId: string,
+  ) {
+    if (!context.isOwner) {
+      throw new CredentialConflictError(
+        "只有唯一 Owner 能为成员生成手工密码重置链接。",
+      );
+    }
+    const token = createOpaqueToken();
+    const expiresAt = new Date(
+      Date.now() + this.passwordResetTtlSeconds * 1_000,
+    );
+    return this.db.transaction(async (tx) => {
+      const [account] = await tx
+        .select({
+          membershipId: orgMemberships.id,
+          userId: users.id,
+          userStatus: users.status,
+          membershipStatus: orgMemberships.status,
+        })
+        .from(orgMemberships)
+        .innerJoin(users, eq(users.id, orgMemberships.userId))
+        .where(
+          and(
+            eq(orgMemberships.id, membershipId),
+            eq(orgMemberships.organizationId, context.organizationId),
+          ),
+        )
+        .for("update")
+        .limit(1);
+      if (
+        !account ||
+        account.userStatus !== "active" ||
+        account.membershipStatus !== "active"
+      ) {
+        throw new CredentialConflictError(
+          "只能为当前组织中的在职成员生成密码重置链接。",
+        );
+      }
+      const credentials = await tx
+        .select({ id: userCredentials.id, kind: userCredentials.kind })
+        .from(userCredentials)
+        .where(
+          and(
+            eq(userCredentials.userId, account.userId),
+            isNotNull(userCredentials.verifiedAt),
+          ),
+        )
+        .for("update");
+      if (!credentials.length) {
+        throw new CredentialConflictError(
+          "该成员尚无已验证的登录方式，不能生成密码重置链接。",
+        );
+      }
+      // Prefer email when both contacts exist only to select the token owner;
+      // completing a reset updates the shared password for every credential.
+      const credential =
+        credentials.find((item) => item.kind === "email") ?? credentials[0];
+      if (!credential) {
+        throw new CredentialConflictError(
+          "该成员尚无可用于生成重置链接的登录方式。",
+        );
+      }
+      const now = new Date();
+      await tx
+        .update(verificationTokens)
+        .set({ consumedAt: now })
+        .where(
+          and(
+            eq(verificationTokens.purpose, "password_reset"),
+            isNull(verificationTokens.consumedAt),
+            inArray(
+              verificationTokens.credentialId,
+              credentials.map((item) => item.id),
+            ),
+          ),
+        );
+      await tx.insert(verificationTokens).values({
+        credentialId: credential.id,
+        purpose: "password_reset",
+        tokenHash: hashOpaqueToken(token),
+        expiresAt,
+      });
+      await tx.insert(auditLogs).values({
+        organizationId: context.organizationId,
+        actorMembershipId: context.membershipId,
+        action: "auth.password_reset_owner_link_issued",
+        entityType: "org_membership",
+        entityId: membershipId,
+        after: { credentialKinds: credentials.map((item) => item.kind) },
+      });
+      return { token, expiresAt };
+    });
+  }
+
   async resetPassword(token: string, password: string) {
     const passwordHash = await hashPassword(password);
     return this.db.transaction(async (tx) => {

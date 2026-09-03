@@ -67,9 +67,10 @@ services:
       # Optional integrations deliberately have no sync:false placeholder.
       # A first deployment therefore needs no third-party credentials. Add
       # these values later in Render > Web service > Environment when the
-      # organization is ready to enable file uploads, email, SMS, or fallback
-      # AI. The application reports an unconfigured integration explicitly;
-      # it never pretends a file, message, or AI answer was delivered.
+      # organization is ready to enable file uploads, automatic email/SMS, or
+      # fallback AI. The default member invitation path uses an Owner/manager
+      # copied one-time link and therefore works without mail/SMS; automatic
+      # delivery always reports an unconfigured integration explicitly.
       - key: S3_REGION
         value: auto
       - key: S3_FORCE_PATH_STYLE

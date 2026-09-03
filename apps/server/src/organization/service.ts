@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gt, isNull, ne, or } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNull, ne, or } from "drizzle-orm";
 import type { Database } from "@workbench/db";
 import {
   accessRoles,
@@ -47,12 +47,31 @@ export class OrganizationConflictError extends Error {
 }
 
 type ScopeKind = "organization" | "org_unit" | "project" | "self";
+export type InvitationDeliveryMode = "manual" | CredentialDeliveryKind;
+
+interface InvitationInput {
+  displayName: string;
+  email?: string | undefined;
+  phone?: string | undefined;
+  deliveryMode: InvitationDeliveryMode;
+  positionTitle?: string | undefined;
+  orgUnitId: string | null;
+  roleId?: string | undefined;
+}
 
 export class OrganizationService {
   constructor(
     private readonly db: Database,
     private readonly mailer: AuthMailer,
   ) {}
+
+  /**
+   * Build a reset URL only after AuthService has created a short-lived token
+   * for an authorized Owner. The raw token is never persisted by this service.
+   */
+  passwordResetUrl(token: string): string {
+    return this.mailer.passwordResetUrl(token);
+  }
 
   /**
    * Organizations created before the system-role catalog existed can contain
@@ -1548,25 +1567,77 @@ export class OrganizationService {
     });
   }
 
-  async invite(
-    actor: OrganizationActor,
-    input: {
-      displayName: string;
-      identifier: string;
+  private requestedInvitationCredentials(input: InvitationInput) {
+    const credentials: Array<{
       kind: CredentialDeliveryKind;
-      positionTitle?: string | undefined;
-      orgUnitId: string | null;
-      roleId?: string | undefined;
-    },
+      normalizedIdentifier: string;
+    }> = [];
+    if (input.email?.trim()) {
+      credentials.push({
+        kind: "email",
+        normalizedIdentifier: normalizeLoginIdentifier(input.email),
+      });
+    }
+    if (input.phone?.trim()) {
+      credentials.push({
+        kind: "phone",
+        normalizedIdentifier: normalizeLoginIdentifier(input.phone),
+      });
+    }
+    if (!credentials.length)
+      throw new OrganizationConflictError("邀请至少需要填写一个邮箱或手机号。");
+    return credentials;
+  }
+
+  private invitationDeliveryCredential(
+    deliveryMode: InvitationDeliveryMode,
+    credentials: Array<{
+      kind: CredentialDeliveryKind;
+      normalizedIdentifier: string;
+    }>,
   ) {
+    const preferredKind: CredentialDeliveryKind =
+      deliveryMode === "manual"
+        ? credentials.some((item) => item.kind === "email")
+          ? "email"
+          : "phone"
+        : deliveryMode;
+    const credential = credentials.find((item) => item.kind === preferredKind);
+    if (!credential) {
+      throw new OrganizationConflictError(
+        preferredKind === "email"
+          ? "选择邮件投递时必须填写邮箱。"
+          : "选择短信投递时必须填写手机号。",
+      );
+    }
+    return credential;
+  }
+
+  async invite(actor: OrganizationActor, input: InvitationInput) {
     await this.ensureSystemAccessRoles(actor.organizationId);
-    const normalizedIdentifier = normalizeLoginIdentifier(input.identifier);
+    const requestedCredentials = this.requestedInvitationCredentials(input);
+    const deliveryCredential = this.invitationDeliveryCredential(
+      input.deliveryMode,
+      requestedCredentials,
+    );
     const [existing] = await this.db
       .select({ id: userCredentials.id })
       .from(userCredentials)
-      .where(eq(userCredentials.normalizedIdentifier, normalizedIdentifier))
+      .where(
+        or(
+          ...requestedCredentials.map((credential) =>
+            eq(
+              userCredentials.normalizedIdentifier,
+              credential.normalizedIdentifier,
+            ),
+          ),
+        ),
+      )
       .limit(1);
-    if (existing) throw new OrganizationConflictError("该邮箱或手机号已经绑定账号。");
+    if (existing)
+      throw new OrganizationConflictError(
+        "该邮箱或手机号已经绑定账号，不能重复加入白名单。",
+      );
     const [role] = await this.db
       .select()
       .from(accessRoles)
@@ -1601,11 +1672,12 @@ export class OrganizationService {
       if (!unit)
         throw new OrganizationConflictError("组织单元不存在或已归档。");
     }
-    // Do this after semantic validation but before creating an invited
-    // account: an Owner should never see a misleading white-list entry when
-    // the selected channel is plainly not configured. Transient provider
-    // failures remain safely resendable.
-    this.mailer.assertDeliveryConfigured(input.kind);
+    // Manual capability links are the default production path: they need no
+    // third-party service and are only revealed to the authorized manager in
+    // this response. Automatic delivery remains opt-in and must be configured
+    // before a pending identity is created.
+    if (input.deliveryMode !== "manual")
+      this.mailer.assertDeliveryConfigured(deliveryCredential.kind);
     const invitationToken = createOpaqueToken();
     const expiresAt = new Date(Date.now() + 7 * 86_400_000);
     const unusablePasswordHash = await hashPassword(createOpaqueToken(48));
@@ -1615,16 +1687,27 @@ export class OrganizationService {
         .values({ displayName: input.displayName })
         .returning();
       if (!user) throw new Error("Failed to create invited user");
-      const [credential] = await tx
+      const credentials = await tx
         .insert(userCredentials)
-        .values({
-          userId: user.id,
-          kind: input.kind,
-          normalizedIdentifier,
-          passwordHash: unusablePasswordHash,
-        })
+        .values(
+          requestedCredentials.map((credential) => ({
+            userId: user.id,
+            kind: credential.kind,
+            normalizedIdentifier: credential.normalizedIdentifier,
+            passwordHash: unusablePasswordHash,
+          })),
+        )
+        .onConflictDoNothing()
         .returning();
-      if (!credential) throw new Error("Failed to create invited credential");
+      if (credentials.length !== requestedCredentials.length)
+        throw new OrganizationConflictError(
+          "邮箱或手机号刚刚被其他账号绑定，请刷新后再检查。",
+        );
+      const deliveryCredentialRecord = credentials.find(
+        (credential) => credential.kind === deliveryCredential.kind,
+      );
+      if (!deliveryCredentialRecord)
+        throw new Error("Failed to create invitation delivery credential");
       const [membership] = await tx
         .insert(orgMemberships)
         .values({
@@ -1649,7 +1732,7 @@ export class OrganizationService {
         grantedBy: actor.membershipId,
       });
       await tx.insert(verificationTokens).values({
-        credentialId: credential.id,
+        credentialId: deliveryCredentialRecord.id,
         purpose: "invitation",
         tokenHash: hashOpaqueToken(invitationToken),
         expiresAt,
@@ -1662,16 +1745,21 @@ export class OrganizationService {
         entityId: membership.id,
         after: {
           displayName: input.displayName,
-          identifierHash: hashOpaqueToken(normalizedIdentifier),
-          credentialKind: input.kind,
+          credentials: requestedCredentials.map((credential) => ({
+            kind: credential.kind,
+            identifierHash: hashOpaqueToken(credential.normalizedIdentifier),
+          })),
+          deliveryMode: input.deliveryMode,
           roleId: role.id,
           orgUnitId: input.orgUnitId,
         },
       });
-      return membership;
+      return { membership, deliveryCredential: deliveryCredentialRecord };
     });
     return {
-      membership: result,
+      membership: result.membership,
+      deliveryCredential: result.deliveryCredential,
+      credentialKinds: requestedCredentials.map((credential) => credential.kind),
       invitationToken,
       expiresAt,
     };
@@ -1680,37 +1768,53 @@ export class OrganizationService {
   async deliverInvitation(
     invitation: Awaited<ReturnType<OrganizationService["invite"]>>,
     displayName: string,
-    identifier: string,
-    kind: CredentialDeliveryKind,
+    deliveryMode: InvitationDeliveryMode,
   ) {
+    if (deliveryMode === "manual") {
+      return {
+        membership: invitation.membership,
+        delivery: {
+          mode: "manual" as const,
+          expiresAt: invitation.expiresAt,
+          credentialKinds: invitation.credentialKinds,
+        },
+        // Deliberately ephemeral: never stored in the database, audit log, or
+        // query cache. Its token stays in the URL fragment to avoid HTTP logs.
+        manualLink: this.mailer.invitationUrl(invitation.invitationToken),
+      };
+    }
     await this.mailer.sendInvitation({
       displayName,
-      identifier,
-      kind,
+      identifier: invitation.deliveryCredential.normalizedIdentifier,
+      kind: invitation.deliveryCredential.kind,
       token: invitation.invitationToken,
       expiresAt: invitation.expiresAt,
     });
     return {
       membership: invitation.membership,
       delivery: {
-        kind,
+        mode: "automatic" as const,
+        kind: invitation.deliveryCredential.kind,
         expiresAt: invitation.expiresAt,
+        credentialKinds: invitation.credentialKinds,
       },
     };
   }
 
-  async resendInvitation(actor: OrganizationActor, membershipId: string) {
+  async resendInvitation(
+    actor: OrganizationActor,
+    membershipId: string,
+    deliveryMode: InvitationDeliveryMode = "manual",
+  ) {
     const now = new Date();
     const result = await this.db.transaction(async (tx) => {
       const [record] = await tx
         .select({
           membership: orgMemberships,
           user: users,
-          credential: userCredentials,
         })
         .from(orgMemberships)
         .innerJoin(users, eq(users.id, orgMemberships.userId))
-        .innerJoin(userCredentials, eq(userCredentials.userId, users.id))
         .where(
           and(
             eq(orgMemberships.id, membershipId),
@@ -1723,7 +1827,28 @@ export class OrganizationService {
       if (!record) {
         throw new OrganizationConflictError("只能重新发送当前组织中仍待加入的白名单邀请。");
       }
-      this.mailer.assertDeliveryConfigured(record.credential.kind);
+      const credentials = await tx
+        .select()
+        .from(userCredentials)
+        .where(eq(userCredentials.userId, record.user.id))
+        .for("update");
+      const preferredKind: CredentialDeliveryKind =
+        deliveryMode === "manual"
+          ? credentials.some((credential) => credential.kind === "email")
+            ? "email"
+            : "phone"
+          : deliveryMode;
+      const credential = credentials.find(
+        (candidate) => candidate.kind === preferredKind,
+      );
+      if (!credential)
+        throw new OrganizationConflictError(
+          preferredKind === "email"
+            ? "该成员没有已登记的邮箱白名单。"
+            : "该成员没有已登记的手机号白名单。",
+        );
+      if (deliveryMode !== "manual")
+        this.mailer.assertDeliveryConfigured(credential.kind);
 
       const invitationToken = createOpaqueToken();
       const expiresAt = new Date(now.getTime() + 7 * 86_400_000);
@@ -1732,13 +1857,16 @@ export class OrganizationService {
         .set({ consumedAt: now })
         .where(
           and(
-            eq(verificationTokens.credentialId, record.credential.id),
+            inArray(
+              verificationTokens.credentialId,
+              credentials.map((candidate) => candidate.id),
+            ),
             eq(verificationTokens.purpose, "invitation"),
             isNull(verificationTokens.consumedAt),
           ),
         );
       await tx.insert(verificationTokens).values({
-        credentialId: record.credential.id,
+        credentialId: credential.id,
         purpose: "invitation",
         tokenHash: hashOpaqueToken(invitationToken),
         expiresAt,
@@ -1749,21 +1877,41 @@ export class OrganizationService {
         action: "member.invitation_resent",
         entityType: "org_membership",
         entityId: membershipId,
-        after: { credentialKind: record.credential.kind },
+        after: {
+          deliveryMode,
+          credentialKind: credential.kind,
+          credentialKinds: credentials.map((candidate) => candidate.kind),
+        },
       });
-      return { record, invitationToken, expiresAt };
+      return { record, credential, credentials, invitationToken, expiresAt };
     });
 
+    if (deliveryMode === "manual") {
+      return {
+        membership: result.record.membership,
+        delivery: {
+          mode: "manual" as const,
+          expiresAt: result.expiresAt,
+          credentialKinds: result.credentials.map((credential) => credential.kind),
+        },
+        manualLink: this.mailer.invitationUrl(result.invitationToken),
+      };
+    }
     await this.mailer.sendInvitation({
       displayName: result.record.user.displayName,
-      identifier: result.record.credential.normalizedIdentifier,
-      kind: result.record.credential.kind,
+      identifier: result.credential.normalizedIdentifier,
+      kind: result.credential.kind,
       token: result.invitationToken,
       expiresAt: result.expiresAt,
     });
     return {
       membership: result.record.membership,
-      delivery: { kind: result.record.credential.kind, expiresAt: result.expiresAt },
+      delivery: {
+        mode: "automatic" as const,
+        kind: result.credential.kind,
+        expiresAt: result.expiresAt,
+        credentialKinds: result.credentials.map((credential) => credential.kind),
+      },
     };
   }
 
@@ -1800,6 +1948,11 @@ export class OrganizationService {
       if (!record)
         throw new OrganizationConflictError("邀请链接无效、已使用或已过期。");
       const now = new Date();
+      const credentials = await tx
+        .select({ id: userCredentials.id })
+        .from(userCredentials)
+        .where(eq(userCredentials.userId, record.credential.userId))
+        .for("update");
       await tx
         .update(userCredentials)
         .set({
@@ -1808,7 +1961,10 @@ export class OrganizationService {
           passwordChangedAt: now,
           updatedAt: now,
         })
-        .where(eq(userCredentials.id, record.credential.id));
+        // One organization-controlled invitation activates every identifier
+        // supplied by the Owner. Either the whitelisted email or phone can
+        // therefore be used for the same password after the first acceptance.
+        .where(eq(userCredentials.userId, record.credential.userId));
       const [membership] = await tx
         .update(orgMemberships)
         .set({ status: "active", joinedAt: now, updatedAt: now })
@@ -1817,7 +1973,16 @@ export class OrganizationService {
       await tx
         .update(verificationTokens)
         .set({ consumedAt: now })
-        .where(eq(verificationTokens.id, record.verification.id));
+        .where(
+          and(
+            eq(verificationTokens.purpose, "invitation"),
+            isNull(verificationTokens.consumedAt),
+            inArray(
+              verificationTokens.credentialId,
+              credentials.map((credential) => credential.id),
+            ),
+          ),
+        );
       await tx.insert(auditLogs).values({
         organizationId: record.membership.organizationId,
         actorMembershipId: record.membership.id,

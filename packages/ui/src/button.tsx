@@ -9,9 +9,9 @@ const buttonVariants = cva(
     variants: {
       variant: {
         primary:
-          "bg-[var(--accent)] text-[var(--accent-foreground)] shadow-[var(--shadow-primary-action)] hover:brightness-95 hover:shadow-[var(--shadow-primary-action-hover)] active:translate-y-px",
+          "bg-[var(--accent)] text-[var(--accent-foreground)] hover:brightness-95 active:translate-y-px",
         secondary:
-          "bg-[var(--surface-subtle)] text-[var(--text)] shadow-none hover:bg-[var(--surface-raised)] hover:shadow-[0_6px_16px_rgb(30_41_59_/_0.06)]",
+          "bg-[var(--surface-subtle)] text-[var(--text)] hover:bg-[var(--surface-raised)]",
         ghost:
           "text-[var(--text-muted)] hover:bg-[var(--surface-subtle)] hover:text-[var(--text)]",
         danger:

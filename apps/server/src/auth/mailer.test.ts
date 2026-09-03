@@ -32,6 +32,29 @@ const baseConfig: ServerConfig = {
 };
 
 describe("credential-delivery configuration", () => {
+  it("builds manual invitation and reset capabilities with tokens in URL fragments", () => {
+    const mailer = new AuthMailer({
+      ...baseConfig,
+      PUBLIC_APP_URL: "https://work.example.test/base-path/",
+    });
+
+    for (const url of [
+      mailer.invitationUrl("manual-invite-token"),
+      mailer.passwordResetUrl("manual-reset-token"),
+    ]) {
+      const parsed = new URL(url);
+      expect(parsed.search).toBe("");
+      expect(parsed.hash).toMatch(/^#token=/);
+      expect(parsed.hash).not.toContain("?");
+    }
+    expect(new URL(mailer.invitationUrl("manual-invite-token")).pathname).toBe(
+      "/invite",
+    );
+    expect(
+      new URL(mailer.passwordResetUrl("manual-reset-token")).pathname,
+    ).toBe("/reset-password");
+  });
+
   it("rejects an absent channel before an invitation creates a pending account", () => {
     const mailer = new AuthMailer(baseConfig);
 

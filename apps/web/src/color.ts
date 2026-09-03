@@ -4,6 +4,16 @@ const defaultAccent = "#5b5ce2";
 const darkSurface = "#171c30";
 const minimumSurfaceContrast = 3;
 
+export interface HsvColor {
+  hue: number;
+  saturation: number;
+  value: number;
+}
+
+function clamp(value: number, minimum: number, maximum: number): number {
+  return Math.min(Math.max(value, minimum), maximum);
+}
+
 function relativeLuminance(channel: number): number {
   const normalized = channel / 255;
   return normalized <= 0.03928
@@ -18,6 +28,57 @@ function rgb(hex: string): [number, number, number] {
     Number.parseInt(value.slice(2, 4), 16),
     Number.parseInt(value.slice(4, 6), 16),
   ];
+}
+
+/** Convert a persisted sRGB hex value into the coordinates used by the picker. */
+export function hexToHsv(value: string | null | undefined): HsvColor {
+  const [red, green, blue] = rgb(sanitizeAccent(value)).map(
+    (channel) => channel / 255,
+  ) as [number, number, number];
+  const maximum = Math.max(red, green, blue);
+  const minimum = Math.min(red, green, blue);
+  const delta = maximum - minimum;
+  let hue = 0;
+  if (delta) {
+    if (maximum === red) hue = 60 * (((green - blue) / delta) % 6);
+    else if (maximum === green) hue = 60 * ((blue - red) / delta + 2);
+    else hue = 60 * ((red - green) / delta + 4);
+  }
+  return {
+    hue: (hue + 360) % 360,
+    saturation: maximum === 0 ? 0 : (delta / maximum) * 100,
+    value: maximum * 100,
+  };
+}
+
+/** Convert picker coordinates to an exact six-digit sRGB value. */
+export function hsvToHex({ hue, saturation, value }: HsvColor): string {
+  const normalizedHue = ((hue % 360) + 360) % 360;
+  const normalizedSaturation = clamp(saturation, 0, 100) / 100;
+  const normalizedValue = clamp(value, 0, 100) / 100;
+  const chroma = normalizedValue * normalizedSaturation;
+  const offset = (normalizedHue / 60) % 2;
+  const secondary = chroma * (1 - Math.abs(offset - 1));
+  const match = normalizedValue - chroma;
+  const channels =
+    normalizedHue < 60
+      ? [chroma, secondary, 0]
+      : normalizedHue < 120
+        ? [secondary, chroma, 0]
+        : normalizedHue < 180
+          ? [0, chroma, secondary]
+          : normalizedHue < 240
+            ? [0, secondary, chroma]
+            : normalizedHue < 300
+              ? [secondary, 0, chroma]
+              : [chroma, 0, secondary];
+  return `#${channels
+    .map((channel) =>
+      Math.round((channel + match) * 255)
+        .toString(16)
+        .padStart(2, "0"),
+    )
+    .join("")}`;
 }
 
 function luminance(hex: string): number {

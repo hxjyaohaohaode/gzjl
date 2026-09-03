@@ -1,10 +1,16 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   BriefcaseBusiness,
+  Check,
   ChevronRight,
+  Copy,
   Crown,
   FolderTree,
+  KeyRound,
   Layers3,
+  Link2,
+  Mail,
+  Phone,
   Plus,
   Save,
   ShieldCheck,
@@ -13,7 +19,7 @@ import {
   UserRound,
   UsersRound,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { Badge, Button, Card, cn } from "@workbench/ui";
 
@@ -127,6 +133,20 @@ interface IdentityChangeRequest {
   createdAt: string;
 }
 
+interface InvitationDelivery {
+  mode: "manual" | "automatic";
+  kind?: "email" | "phone";
+  credentialKinds: Array<"email" | "phone">;
+  expiresAt: string;
+}
+
+interface InvitationResponse {
+  membership: { id: string };
+  delivery: InvitationDelivery;
+  /** Present only for an authorized, explicitly requested manual delivery. */
+  manualLink?: string;
+}
+
 function memberStatusTone(
   status: string,
 ): "positive" | "warning" | "danger" | "neutral" {
@@ -164,6 +184,74 @@ function scopeLabel(
 
 function initials(name: string): string {
   return name.trim().slice(0, 1) || "?";
+}
+
+function ManualCapabilityLink({
+  link,
+  expiresAt,
+  label,
+}: {
+  link: string;
+  expiresAt: string;
+  label: "邀请" | "密码重置";
+}) {
+  const [copied, setCopied] = useState(false);
+  const copy = async () => {
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(link);
+      } else {
+        const fallback = document.createElement("textarea");
+        fallback.value = link;
+        fallback.style.position = "fixed";
+        fallback.style.opacity = "0";
+        document.body.append(fallback);
+        fallback.select();
+        const copiedWithFallback = document.execCommand("copy");
+        fallback.remove();
+        if (!copiedWithFallback) throw new Error("浏览器未允许写入剪贴板。");
+      }
+      setCopied(true);
+    } catch {
+      setCopied(false);
+    }
+  };
+  return (
+    <div className="organization-manual-link" role="status">
+      <div className="flex items-start gap-2">
+        <span className="organization-manual-link-icon">
+          <Link2 size={15} />
+        </span>
+        <span className="min-w-0 flex-1">
+          <strong>一次性{label}链接已生成</strong>
+          <small>
+            仅在这次授权管理操作中显示。请通过私密渠道单独发送给当事人；
+            {new Date(expiresAt).toLocaleString("zh-CN")} 后自动失效，重新生成会使旧链接失效。
+          </small>
+        </span>
+      </div>
+      <div className="organization-manual-link-copy">
+        <input
+          aria-label={`${label}一次性链接`}
+          onFocus={(event) => event.currentTarget.select()}
+          readOnly
+          value={link}
+        />
+        <Button
+          aria-label={`复制${label}链接`}
+          onClick={() => void copy()}
+          size="compact"
+          variant="secondary"
+        >
+          {copied ? <Check size={14} /> : <Copy size={14} />}
+          {copied ? "已复制" : "复制"}
+        </Button>
+      </div>
+      {!copied ? (
+        <p>若浏览器禁止剪贴板，请点击输入框后手动复制；不要把链接发到公开群或工单。</p>
+      ) : null}
+    </div>
+  );
 }
 
 function CategoryLabel({
@@ -355,12 +443,14 @@ function MemberInspector({
   overview,
   projects,
   currentMembershipId,
+  viewerIsOwner,
   onClose,
 }: {
   member: OrganizationMember;
   overview: OrganizationOverview;
   projects: ProjectChoice[];
   currentMembershipId: string;
+  viewerIsOwner: boolean;
   onClose: () => void;
 }) {
   const queryClient = useQueryClient();
@@ -387,6 +477,16 @@ function MemberInspector({
   const [newOwnerMembershipId, setNewOwnerMembershipId] = useState("");
   const [ownershipPassword, setOwnershipPassword] = useState("");
   const [ownershipTotpCode, setOwnershipTotpCode] = useState("");
+  const [manualInvitationLink, setManualInvitationLink] = useState<{
+    link: string;
+    expiresAt: string;
+  } | null>(null);
+  const [resetPassword, setResetPassword] = useState("");
+  const [resetTotpCode, setResetTotpCode] = useState("");
+  const [manualResetLink, setManualResetLink] = useState<{
+    link: string;
+    expiresAt: string;
+  } | null>(null);
   const refresh = () =>
     queryClient.invalidateQueries({ queryKey: ["organization"] });
   const profileMutation = useMutation({
@@ -426,11 +526,39 @@ function MemberInspector({
   });
   const resendInvitation = useMutation({
     mutationFn: () =>
-      api(
+      api<InvitationResponse>(
         `/api/organization/invitations/${member.membership.id}/resend`,
-        { method: "POST" },
+        { method: "POST", body: { deliveryMode: "manual" } },
       ),
-    onSuccess: refresh,
+    onSuccess: async (result) => {
+      setManualInvitationLink(
+        result.manualLink
+          ? { link: result.manualLink, expiresAt: result.delivery.expiresAt }
+          : null,
+      );
+      await refresh();
+    },
+  });
+  const issueManualPasswordReset = useMutation({
+    mutationFn: () =>
+      api<{ manualLink: string; expiresAt: string }>(
+        `/api/organization/members/${member.membership.id}/password-reset-link`,
+        {
+          method: "POST",
+          body: {
+            password: resetPassword,
+            ...(resetTotpCode ? { totpCode: resetTotpCode } : {}),
+          },
+        },
+      ),
+    onSuccess: (result) => {
+      setManualResetLink({
+        link: result.manualLink,
+        expiresAt: result.expiresAt,
+      });
+      setResetPassword("");
+      setResetTotpCode("");
+    },
   });
   const requestOwnershipTransfer = useMutation({
     mutationFn: () => {
@@ -542,6 +670,10 @@ function MemberInspector({
   );
   const isCurrentOwner =
     member.isOwner && member.membership.id === currentMembershipId;
+  const canIssueManualPasswordReset =
+    viewerIsOwner &&
+    !isCurrentOwner &&
+    member.membership.status === "active";
   const isTransferRecipient =
     ownershipTransfer?.toMembershipId === currentMembershipId &&
     member.membership.id === currentMembershipId;
@@ -1011,13 +1143,14 @@ function MemberInspector({
             </Badge>
             {member.membership.status === "invited" ? (
               <Button
-                aria-label={`重新发送 ${member.user.displayName} 的白名单邀请`}
+                aria-label={`为 ${member.user.displayName} 生成新的白名单邀请链接`}
                 disabled={resendInvitation.isPending}
                 onClick={() => resendInvitation.mutate()}
                 size="compact"
                 variant="secondary"
               >
-                {resendInvitation.isPending ? "正在发送…" : "重新发送邀请"}
+                <Link2 size={14} />
+                {resendInvitation.isPending ? "正在生成…" : "生成新链接"}
               </Button>
             ) : member.membership.status !== "invited" && !member.isOwner ? (
               <Button
@@ -1038,7 +1171,77 @@ function MemberInspector({
               </Button>
             ) : null}
           </div>
+          {manualInvitationLink ? (
+            <div className="mt-3">
+              <ManualCapabilityLink
+                expiresAt={manualInvitationLink.expiresAt}
+                label="邀请"
+                link={manualInvitationLink.link}
+              />
+            </div>
+          ) : null}
         </section>
+        {canIssueManualPasswordReset ? (
+          <section className="organization-inspector-section">
+            <CategoryLabel icon={<KeyRound size={14} />}>
+              手工密码重置链接
+            </CategoryLabel>
+            <p className="organization-inspector-description">
+              未配置邮件或短信时，唯一 Owner 可以重新验证本人身份后生成一次性链接，并私下交给该成员。链接只重置这位成员的共享登录密码；完成后会撤销其现有登录会话。
+            </p>
+            <div className="mt-3 grid gap-3">
+              <Field label="当前 Owner 密码（二次验证）">
+                <input
+                  autoComplete="current-password"
+                  className={fieldClass}
+                  onChange={(event) => setResetPassword(event.target.value)}
+                  type="password"
+                  value={resetPassword}
+                />
+              </Field>
+              {mfaStatus.data?.enabled ? (
+                <Field label="动态验证码（6 位）">
+                  <input
+                    autoComplete="one-time-code"
+                    className={fieldClass}
+                    inputMode="numeric"
+                    maxLength={6}
+                    onChange={(event) =>
+                      setResetTotpCode(
+                        event.target.value.replace(/\D/g, "").slice(0, 6),
+                      )
+                    }
+                    pattern="[0-9]*"
+                    value={resetTotpCode}
+                  />
+                </Field>
+              ) : null}
+              <Button
+                disabled={
+                  issueManualPasswordReset.isPending ||
+                  !resetPassword ||
+                  (Boolean(mfaStatus.data?.enabled) &&
+                    !/^\d{6}$/.test(resetTotpCode))
+                }
+                onClick={() => issueManualPasswordReset.mutate()}
+                size="compact"
+                variant="secondary"
+              >
+                <KeyRound size={14} />
+                {issueManualPasswordReset.isPending
+                  ? "正在生成…"
+                  : "生成一次性重置链接"}
+              </Button>
+              {manualResetLink ? (
+                <ManualCapabilityLink
+                  expiresAt={manualResetLink.expiresAt}
+                  label="密码重置"
+                  link={manualResetLink.link}
+                />
+              ) : null}
+            </div>
+          </section>
+        ) : null}
         <ErrorMessage
           error={
             profileMutation.error ??
@@ -1046,6 +1249,7 @@ function MemberInspector({
             rolesMutation.error ??
             statusMutation.error ??
             resendInvitation.error ??
+            issueManualPasswordReset.error ??
             requestOwnershipTransfer.error ??
             confirmOwnershipTransfer.error ??
             cancelOwnershipTransfer.error ??
@@ -1249,20 +1453,28 @@ function OrganizationSidebar({
   const [identityDescription, setIdentityDescription] = useState("");
   const [invite, setInvite] = useState({
     displayName: "",
-    identifier: "",
-    kind: "email" as "email" | "phone",
+    email: "",
+    phone: "",
+    deliveryMode: "manual" as "manual" | "email" | "phone",
     positionTitle: "",
     orgUnitId: "",
     roleId: "",
   });
-  const [deliveryFeedback, setDeliveryFeedback] = useState<{
-    kind: "email" | "phone";
-    expiresAt: string;
-  } | null>(null);
+  const [inviteFormError, setInviteFormError] = useState<string | null>(null);
+  const [deliveryFeedback, setDeliveryFeedback] =
+    useState<InvitationResponse | null>(null);
   const selectedInviteRole =
     invitableRoles.find((role) => role.id === invite.roleId) ??
     invitableRoles.find((role) => role.kind === "member");
   const effectiveInviteRoleId = selectedInviteRole?.id ?? "";
+  const hasInviteContact = Boolean(invite.email.trim() || invite.phone.trim());
+  const selectedDeliveryHasCredential =
+    invite.deliveryMode === "manual" ||
+    (invite.deliveryMode === "email" && Boolean(invite.email.trim())) ||
+    (invite.deliveryMode === "phone" && Boolean(invite.phone.trim()));
+  // Keep the action available for local form validation so an Owner gets a
+  // clear explanation for the at-least-one-contact rule. A missing role is
+  // different: it must never submit and is therefore disabled outright.
   const canSubmitInvite = Boolean(effectiveInviteRoleId);
   const refresh = () =>
     queryClient.invalidateQueries({ queryKey: ["organization"] });
@@ -1294,35 +1506,35 @@ function OrganizationSidebar({
   });
   const inviteMember = useMutation({
     mutationFn: () =>
-      api<{
-        delivery: { kind: "email" | "phone"; expiresAt: string };
-      }>("/api/organization/invitations", {
+      api<InvitationResponse>("/api/organization/invitations", {
         method: "POST",
         body: {
-          displayName: invite.displayName,
-          identifier: invite.identifier,
-          kind: invite.kind,
-          positionTitle: invite.positionTitle || undefined,
+          displayName: invite.displayName.trim(),
+          ...(invite.email.trim() ? { email: invite.email.trim() } : {}),
+          ...(invite.phone.trim() ? { phone: invite.phone.trim() } : {}),
+          deliveryMode: invite.deliveryMode,
+          positionTitle: invite.positionTitle.trim() || undefined,
           orgUnitId: invite.orgUnitId || null,
           roleId: effectiveInviteRoleId,
         },
-      }),
+    }),
     onSuccess: async (result) => {
-      setDeliveryFeedback(result.delivery);
+      setDeliveryFeedback(result);
+      setInviteFormError(null);
       setInvite({
         displayName: "",
-        identifier: "",
-        kind: "email",
+        email: "",
+        phone: "",
+        deliveryMode: "manual",
         positionTitle: "",
         orgUnitId: "",
         roleId: "",
       });
       await refresh();
     },
-    // A transient provider outage happens after the server has safely created
-    // a pending white-list entry. Refresh even on an error so the Owner sees
-    // that entry and can use the explicit resend action instead of attempting
-    // to create the same person a second time.
+    // An automatic delivery provider can fail after the server has already
+    // created a pending white-list entry. Refresh so the manager sees that
+    // entry and can generate a safe manual link instead of duplicating it.
     onError: async () => {
       await refresh();
     },
@@ -1543,12 +1755,28 @@ function OrganizationSidebar({
       <section className="organization-rail-section">
         <p className="app-section-label">白名单邀请</p>
         <details className="organization-rail-disclosure">
-          <summary>添加成员并发送加入链接</summary>
+          <summary>添加成员并生成加入链接</summary>
           <form
             className="mt-2 grid gap-2"
             onSubmit={(event) => {
               event.preventDefault();
-              if (!canSubmitInvite) return;
+              setInviteFormError(null);
+              if (!hasInviteContact) {
+                setInviteFormError("请至少填写一个邮箱或手机号。两个都填也可以。");
+                return;
+              }
+              if (!selectedDeliveryHasCredential) {
+                setInviteFormError(
+                  invite.deliveryMode === "email"
+                    ? "选择邮件自动投递时必须填写邮箱。"
+                    : "选择短信自动投递时必须填写手机号。",
+                );
+                return;
+              }
+              if (!effectiveInviteRoleId) {
+                setInviteFormError("正在恢复可邀请角色目录，请稍候再试。");
+                return;
+              }
               inviteMember.mutate();
             }}
           >
@@ -1561,37 +1789,62 @@ function OrganizationSidebar({
               required
               value={invite.displayName}
             />
+            <div className="organization-invite-contact-grid">
+              <label className="organization-invite-contact-field">
+                <span>
+                  <Mail size={14} /> 邮箱（可选）
+                </span>
+                <input
+                  aria-label="白名单邮箱（可选）"
+                  autoComplete="email"
+                  className={fieldClass}
+                  onChange={(event) =>
+                    setInvite({ ...invite, email: event.target.value })
+                  }
+                  placeholder="member@example.com"
+                  type="email"
+                  value={invite.email}
+                />
+              </label>
+              <label className="organization-invite-contact-field">
+                <span>
+                  <Phone size={14} /> 手机号（可选）
+                </span>
+                <input
+                  aria-label="白名单手机号（可选）"
+                  autoComplete="tel"
+                  className={fieldClass}
+                  inputMode="tel"
+                  onChange={(event) =>
+                    setInvite({ ...invite, phone: event.target.value })
+                  }
+                  placeholder="+8613812345678"
+                  type="tel"
+                  value={invite.phone}
+                />
+              </label>
+            </div>
+            <p className="text-xs leading-5 text-[var(--text-muted)]">
+              邮箱与手机号至少填一项；两项都填后，成员接受一次邀请即可使用任一项登录。
+            </p>
             <select
-              aria-label="白名单渠道"
+              aria-label="邀请传递方式"
               className={fieldClass}
               onChange={(event) =>
                 setInvite({
                   ...invite,
-                  kind: event.target.value as "email" | "phone",
-                  identifier: "",
+                  deliveryMode: event.target.value as
+                    | "manual"
+                    | "email"
+                    | "phone",
                 })
               }
-              value={invite.kind}
+              value={invite.deliveryMode}
             >
-              <option value="email">邮箱白名单</option>
-              <option value="phone">手机号白名单</option>
+              <option value="manual">手工复制一次性链接（推荐）</option>
+              <option value="email">通过邮件自动投递</option>
+              <option value="phone">通过短信自动投递</option>
             </select>
-            <input
-              aria-label={invite.kind === "email" ? "白名单邮箱" : "白名单手机号"}
-              className={fieldClass}
-              inputMode={invite.kind === "phone" ? "tel" : "email"}
-              onChange={(event) =>
-                setInvite({ ...invite, identifier: event.target.value })
-              }
-              placeholder={
-                invite.kind === "email"
-                  ? "成员邮箱"
-                  : "手机号，例如 +8613812345678"
-              }
-              required
-              type={invite.kind === "email" ? "email" : "tel"}
-              value={invite.identifier}
-            />
             <input
               className={fieldClass}
               onChange={(event) =>
@@ -1651,24 +1904,44 @@ function OrganizationSidebar({
               type="submit"
             >
               <UserRound size={15} />
-              {inviteMember.isPending ? "正在发送…" : "加入白名单并发送"}
+              {inviteMember.isPending
+                ? "正在处理…"
+                : invite.deliveryMode === "manual"
+                  ? "加入白名单并生成链接"
+                  : "加入白名单并发送"}
             </Button>
           </form>
         </details>
         <p className="mt-2 text-xs leading-5 text-[var(--text-muted)]">
-          只有这里加入白名单的邮箱或手机号才能激活账号。一次性链接不会在管理端显示；邮件或短信服务未配置时会明确报错，避免伪造“已发送”。
+          只有这里加入白名单的邮箱或手机号才能激活账号。默认的手工链接不依赖邮件或短信服务；它仅在这次操作中显示，请复制后通过私密渠道单独发送。
         </p>
         {deliveryFeedback ? (
-          <div className="organization-delivery-feedback" role="status">
-            <strong>投递已提交</strong>
-            <small>
-              已将成员加入
-              {deliveryFeedback.kind === "email" ? "邮箱" : "手机号"}
-              白名单，并向该渠道发送一次性加入链接；链接将于
-              {new Date(deliveryFeedback.expiresAt).toLocaleString("zh-CN")}
-              失效。管理端不显示任何令牌。
-            </small>
-          </div>
+          deliveryFeedback.delivery.mode === "manual" &&
+          deliveryFeedback.manualLink ? (
+            <ManualCapabilityLink
+              expiresAt={deliveryFeedback.delivery.expiresAt}
+              label="邀请"
+              link={deliveryFeedback.manualLink}
+            />
+          ) : (
+            <div className="organization-delivery-feedback" role="status">
+              <strong>投递已提交</strong>
+              <small>
+                已将成员加入
+                {deliveryFeedback.delivery.kind === "email" ? "邮箱" : "手机号"}
+                白名单，并向该渠道提交一次性加入链接；链接将于
+                {new Date(
+                  deliveryFeedback.delivery.expiresAt,
+                ).toLocaleString("zh-CN")}
+                失效。
+              </small>
+            </div>
+          )
+        ) : null}
+        {inviteFormError ? (
+          <p className="mt-2 text-xs leading-5 text-[var(--danger)]" role="alert">
+            {inviteFormError}
+          </p>
         ) : null}
         {inviteMember.error ? <ErrorMessage error={inviteMember.error} /> : null}
       </section>
@@ -1704,6 +1977,21 @@ export function OrganizationPage({ me }: { me: Me }) {
     overview?.members.find(
       (member) => member.membership.id === selectedMemberId,
     ) ?? null;
+  const closeInspector = () => {
+    setSelectedMemberId(null);
+    setSelectedUnitId(null);
+  };
+  useEffect(() => {
+    if (!selectedMemberId && !selectedUnitId) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setSelectedMemberId(null);
+        setSelectedUnitId(null);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [selectedMemberId, selectedUnitId]);
   const visibleMembers = useMemo(
     () =>
       selectedUnitId && tab === "tree"
@@ -1718,14 +2006,15 @@ export function OrganizationPage({ me }: { me: Me }) {
       currentMembershipId={me.user.membershipId}
       key={`${selectedMember.membership.id}-${selectedMember.membership.status}`}
       member={selectedMember}
-      onClose={() => setSelectedMemberId(null)}
+      onClose={closeInspector}
       overview={overview!}
       projects={projects.data?.items ?? []}
+      viewerIsOwner={me.user.isOwner}
     />
   ) : selectedUnit ? (
     <UnitInspector
       key={`${selectedUnit.id}-${selectedUnit.version}`}
-      onClose={() => setSelectedUnitId(null)}
+      onClose={closeInspector}
       overview={overview!}
       unit={selectedUnit}
     />
@@ -2010,6 +2299,14 @@ export function OrganizationPage({ me }: { me: Me }) {
             overview={overview}
             selectedUnit={selectedUnit}
           />
+          {selectedInspector ? (
+            <button
+              aria-label="关闭成员或组织单元详情"
+              className="organization-inspector-backdrop"
+              onClick={closeInspector}
+              type="button"
+            />
+          ) : null}
           {selectedInspector}
         </div>
       ) : null}

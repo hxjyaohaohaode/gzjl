@@ -26,11 +26,7 @@ export interface CredentialVerificationRecipient {
   expiresAt: Date;
 }
 
-/**
- * Delivery is deliberately fail-closed. Neither an invitation nor a reset
- * token is ever returned to a browser as a fallback when the configured
- * channel cannot deliver it.
- */
+/** Automatic third-party delivery is deliberately fail-closed. */
 export class AuthDeliveryUnavailableError extends Error {
   constructor(message = "消息投递服务尚未配置或暂不可用，请联系管理员。") {
     super(message);
@@ -56,6 +52,19 @@ function capabilityUrl(pathname: string, token: string, baseUrl: string): string
 
 export class AuthMailer {
   constructor(private readonly config: ServerConfig) {}
+
+  /**
+   * A manual link is intentionally generated only by authenticated,
+   * organization-admin routes. The fragment keeps the capability out of
+   * request URLs and ordinary server/proxy logs.
+   */
+  invitationUrl(token: string): string {
+    return capabilityUrl("/invite", token, this.config.PUBLIC_APP_URL);
+  }
+
+  passwordResetUrl(token: string): string {
+    return capabilityUrl("/reset-password", token, this.config.PUBLIC_APP_URL);
+  }
 
   /**
    * Validate the selected channel before an invitation transaction creates a
@@ -97,11 +106,7 @@ export class AuthMailer {
     token,
     expiresAt,
   }: PasswordResetRecipient): Promise<void> {
-    const resetUrl = capabilityUrl(
-      "/reset-password",
-      token,
-      this.config.PUBLIC_APP_URL,
-    );
+    const resetUrl = this.passwordResetUrl(token);
     const body =
       kind === "phone"
         ? `工作智能工作台密码重置：${resetUrl}（${expiryLabel(expiresAt)} 前有效；非本人操作请忽略）`
@@ -116,11 +121,7 @@ export class AuthMailer {
     token,
     expiresAt,
   }: InvitationRecipient): Promise<void> {
-    const invitationUrl = capabilityUrl(
-      "/invite",
-      token,
-      this.config.PUBLIC_APP_URL,
-    );
+    const invitationUrl = this.invitationUrl(token);
     const body =
       kind === "phone"
         ? `工作智能工作台邀请：${invitationUrl}（${expiryLabel(expiresAt)} 前有效，仅限本人使用一次）`

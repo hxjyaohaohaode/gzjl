@@ -3,6 +3,7 @@ import { z } from "zod";
 
 import { requirePermission } from "../auth/authorization.js";
 import {
+  CredentialConflictError,
   InvalidCredentialsError,
   TotpCodeError,
   type AuthService,
@@ -49,16 +50,78 @@ const inviteBaseSchema = z.object({
   // the server has reconciled the system role catalog.
   roleId: z.uuid().optional(),
 });
-const inviteSchema = z.discriminatedUnion("kind", [
+const manualInviteSchema = inviteBaseSchema
+  .extend({
+    email: z.string().trim().email().max(320).optional(),
+    phone: z
+      .string()
+      .trim()
+      .regex(
+        /^\+[1-9]\d{7,14}$/,
+        "手机号须使用 E.164 格式，例如 +8613812345678。",
+      )
+      .optional(),
+    deliveryMode: z.enum(["manual", "email", "phone"]).default("manual"),
+  })
+  .superRefine((input, context) => {
+    if (!input.email && !input.phone) {
+      context.addIssue({
+        code: "custom",
+        path: ["email"],
+        message: "至少填写一个邮箱或手机号加入白名单。",
+      });
+    }
+    if (input.deliveryMode === "email" && !input.email) {
+      context.addIssue({
+        code: "custom",
+        path: ["email"],
+        message: "选择邮件投递时必须填写邮箱。",
+      });
+    }
+    if (input.deliveryMode === "phone" && !input.phone) {
+      context.addIssue({
+        code: "custom",
+        path: ["phone"],
+        message: "选择短信投递时必须填写手机号。",
+      });
+    }
+  });
+// Keep a briefly cached prior web build from turning into a production 400.
+// It maps the old one-contact payload to the new manual/automatic contract.
+const legacyInviteSchema = z.discriminatedUnion("kind", [
   inviteBaseSchema.extend({
     kind: z.literal("email"),
     identifier: z.email().max(320),
   }),
   inviteBaseSchema.extend({
     kind: z.literal("phone"),
-    identifier: z.string().regex(/^\+[1-9]\d{7,14}$/, "手机号须使用 E.164 格式，例如 +8613812345678。"),
+    identifier: z
+      .string()
+      .regex(
+        /^\+[1-9]\d{7,14}$/,
+        "手机号须使用 E.164 格式，例如 +8613812345678。",
+      ),
   }),
 ]);
+const inviteSchema = z
+  .union([manualInviteSchema, legacyInviteSchema])
+  .transform((input) => {
+    if ("identifier" in input) {
+      return {
+        displayName: input.displayName,
+        email: input.kind === "email" ? input.identifier : undefined,
+        phone: input.kind === "phone" ? input.identifier : undefined,
+        deliveryMode: input.kind,
+        positionTitle: input.positionTitle,
+        orgUnitId: input.orgUnitId,
+        roleId: input.roleId,
+      };
+    }
+    return input;
+  });
+const invitationResendSchema = z.object({
+  deliveryMode: z.enum(["manual", "email", "phone"]).default("manual"),
+});
 const membershipParams = z.object({ membershipId: z.uuid() });
 const memberStatusSchema = z.object({ status: z.enum(["active", "inactive"]) });
 const memberPatchSchema = z
@@ -146,6 +209,10 @@ function sendConflict(
     return reply
       .code(503)
       .send({ error: "delivery_unavailable", message: error.message });
+  if (error instanceof CredentialConflictError)
+    return reply
+      .code(409)
+      .send({ error: "credential_conflict", message: error.message });
   if (error instanceof InvalidCredentialsError || error instanceof TotpCodeError)
     return reply.code(401).send({
       error: "sensitive_action_verification_failed",
@@ -383,8 +450,7 @@ export async function registerOrganizationRoutes(
             await service.deliverInvitation(
               invitation,
               input.displayName,
-              input.identifier,
-              input.kind,
+              input.deliveryMode,
             ),
           );
       } catch (error) {
@@ -398,9 +464,47 @@ export async function registerOrganizationRoutes(
     async (request, reply) => {
       const { membershipId } = membershipParams.parse(request.params);
       try {
-        return {
-          invitation: await service.resendInvitation(request.auth!, membershipId),
-        };
+        return reply.send(
+          await service.resendInvitation(
+            request.auth!,
+            membershipId,
+            invitationResendSchema.parse(request.body ?? {}).deliveryMode,
+          ),
+        );
+      } catch (error) {
+        return sendConflict(error, reply);
+      }
+    },
+  );
+  app.post(
+    "/api/organization/members/:membershipId/password-reset-link",
+    {
+      preHandler: [app.csrfProtection, authenticate, manageOrg],
+      config: { rateLimit: { max: 5, timeWindow: "15 minutes", ban: 2 } },
+    },
+    async (request, reply) => {
+      const { membershipId } = membershipParams.parse(request.params);
+      if (!request.auth!.isOwner) {
+        return reply.code(403).send({
+          error: "owner_required",
+          message: "只有唯一 Owner 能生成手工密码重置链接。",
+        });
+      }
+      try {
+        const input = sensitiveActionVerificationSchema.parse(request.body);
+        await authService.verifySensitiveAction(
+          request.auth!,
+          input.password,
+          input.totpCode,
+        );
+        const reset = await authService.issueOwnerManagedPasswordResetLink(
+          request.auth!,
+          membershipId,
+        );
+        return reply.code(201).send({
+          manualLink: service.passwordResetUrl(reset.token),
+          expiresAt: reset.expiresAt,
+        });
       } catch (error) {
         return sendConflict(error, reply);
       }

@@ -1153,17 +1153,16 @@ test("project color chips keep readable text for light server colors", async ({
     .toBe("rgb(23, 32, 54)");
 });
 
-test("a low-contrast custom accent is adjusted for both supported work surfaces", async ({
+test("a custom accent is rendered exactly while its foreground remains readable", async ({
   page,
 }) => {
   await mockAuthenticatedWorkspace(page);
-  await page.addInitScript(() =>
-    localStorage.setItem("workbench-accent", "#ffffff"),
-  );
   await page.goto("/login");
   await page.getByLabel("邮箱或手机号").fill("owner@example.test");
   await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
   await page.getByRole("button", { name: "登录", exact: true }).click();
+  await page.getByRole("button", { name: "外观设置" }).click();
+  await page.getByLabel("强调色 HEX 值").fill("#ffffff");
   const contrast = await page.evaluate(() => {
     const hexToLuminance = (hex: string) => {
       const channels = [hex.slice(1, 3), hex.slice(3, 5), hex.slice(5, 7)].map(
@@ -1186,15 +1185,17 @@ test("a low-contrast custom accent is adjusted for both supported work surfaces"
     const accent = getComputedStyle(document.documentElement)
       .getPropertyValue("--accent")
       .trim();
+    const foreground = getComputedStyle(document.documentElement)
+      .getPropertyValue("--accent-foreground")
+      .trim();
     return {
       accent,
-      dark: ratio(accent, "#171c30"),
-      light: ratio(accent, "#ffffff"),
+      foreground,
+      foregroundContrast: ratio(accent, foreground),
     };
   });
-  expect(contrast.accent).not.toBe("#ffffff");
-  expect(contrast.light).toBeGreaterThanOrEqual(3);
-  expect(contrast.dark).toBeGreaterThanOrEqual(3);
+  expect(contrast.accent).toBe("#ffffff");
+  expect(contrast.foregroundContrast).toBeGreaterThanOrEqual(4.5);
 });
 
 test("light semantic status palettes keep text readable on their own surfaces", async ({
@@ -1308,7 +1309,18 @@ test("mobile system theme applies the same dark navigation surface when the devi
 
 test("header notification and appearance popovers do not overlap", async ({
   page,
-}) => {
+}, testInfo) => {
+  const clickOutsideUtilityPopover = async () => {
+    if (testInfo.project.name.startsWith("mobile")) {
+      const viewport = page.viewportSize();
+      if (!viewport) throw new Error("测试视口不可用。");
+      // On a narrow screen the picker can cover the heading itself. Tap the
+      // visible lower canvas instead of forcing a click through the popover.
+      await page.mouse.click(8, viewport.height - 120);
+      return;
+    }
+    await page.getByRole("heading", { name: "林知夏，今天好" }).click();
+  };
   await mockAuthenticatedWorkspace(page);
   await page.goto("/login");
   await page.getByLabel("邮箱或手机号").fill("owner@example.test");
@@ -1319,9 +1331,83 @@ test("header notification and appearance popovers do not overlap", async ({
   ).toBeVisible();
   await page.getByRole("button", { name: "外观设置" }).click();
   await expect(page.getByLabel("自定义强调色")).toBeVisible();
+  await clickOutsideUtilityPopover();
+  await expect(page.getByLabel("自定义强调色")).toHaveCount(0);
+  await page.getByRole("button", { name: "外观设置" }).click();
+  await page.getByLabel("强调色 HEX 值").fill("#c34359");
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        getComputedStyle(document.documentElement)
+          .getPropertyValue("--accent")
+          .trim(),
+      ),
+    )
+    .toBe("#c34359");
   await page.getByRole("button", { name: "通知" }).click();
   await expect(page.getByLabel("自定义强调色")).toHaveCount(0);
   await expect(page.getByText("通知中心")).toBeVisible();
+  await clickOutsideUtilityPopover();
+  await expect(page.getByText("通知中心")).toHaveCount(0);
+});
+
+test("desktop sidebar resizes with pointer controls and keeps its collapse state", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name.startsWith("mobile"),
+    "desktop-only interaction",
+  );
+  await mockAuthenticatedWorkspace(page);
+  await page.goto("/login");
+  await page.getByLabel("邮箱或手机号").fill("owner@example.test");
+  await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+  await expect(
+    page.getByRole("heading", { name: "林知夏，今天好" }),
+  ).toBeVisible();
+
+  const resizeHandle = page.getByRole("separator", {
+    name: "调整侧边栏宽度",
+  });
+  await expect(resizeHandle).toHaveAttribute("aria-valuenow", "272");
+  const bounds = await resizeHandle.boundingBox();
+  expect(bounds).not.toBeNull();
+  if (!bounds) throw new Error("侧边栏宽度拖拽手柄未渲染。");
+  await page.mouse.move(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(bounds.x + bounds.width / 2 + 64, bounds.y + bounds.height / 2);
+  await page.mouse.up();
+  await expect(resizeHandle).toHaveAttribute("aria-valuenow", "336");
+
+  await page.getByRole("button", { name: "收起侧栏" }).click();
+  await expect(resizeHandle).toHaveCount(0);
+  await expect
+    .poll(() =>
+      page.evaluate(() => localStorage.getItem("workbench-sidebar-collapsed")),
+    )
+    .toBe("true");
+  await page.getByRole("button", { name: "展开侧栏" }).click();
+  await expect(resizeHandle).toHaveAttribute("aria-valuenow", "336");
+});
+
+test("AI context panel closes from its backdrop and Escape", async ({ page }, testInfo) => {
+  test.skip(
+    testInfo.project.name.startsWith("mobile"),
+    "desktop-only interaction",
+  );
+  await mockAuthenticatedWorkspace(page);
+  await page.goto("/login");
+  await page.getByLabel("邮箱或手机号").fill("owner@example.test");
+  await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+  await page.getByRole("button", { name: "打开 AI 上下文" }).click();
+  await expect(page.getByRole("dialog", { name: "AI 上下文面板" })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("dialog", { name: "AI 上下文面板" })).toHaveCount(0);
+  await page.getByRole("button", { name: "打开 AI 上下文" }).click();
+  await page.getByRole("button", { name: "关闭 AI 上下文" }).first().click();
+  await expect(page.getByRole("dialog", { name: "AI 上下文面板" })).toHaveCount(0);
 });
 
 test("organization keeps access role, org position, and professional identity as separate real layers", async ({
@@ -1433,7 +1519,7 @@ test("organization keeps access role, org position, and professional identity as
   ).toBeVisible();
 });
 
-test("an owner sends a phone white-list invitation without receiving its token", async ({
+test("an owner can white-list both contacts and copy a manual one-time invitation", async ({
   page,
 }) => {
   await mockAuthenticatedWorkspace(page);
@@ -1485,8 +1571,9 @@ test("an owner sends a phone white-list invitation without receiving its token",
     expect(route.request().method()).toBe("POST");
     expect(route.request().postDataJSON()).toEqual({
       displayName: "新成员",
-      identifier: "+8613812345678",
-      kind: "phone",
+      email: "member@example.test",
+      phone: "+8613812345678",
+      deliveryMode: "manual",
       orgUnitId: null,
       roleId,
     });
@@ -1494,7 +1581,13 @@ test("an owner sends a phone white-list invitation without receiving its token",
       status: 201,
       json: {
         membership: { id: "00000000-0000-4000-8000-000000000075" },
-        delivery: { kind: "phone", expiresAt: "2026-09-10T01:00:00.000Z" },
+        delivery: {
+          mode: "manual",
+          credentialKinds: ["email", "phone"],
+          expiresAt: "2026-09-10T01:00:00.000Z",
+        },
+        manualLink:
+          "https://app.example.test/invite#token=manual-invitation-test-token",
       },
     });
   });
@@ -1503,16 +1596,23 @@ test("an owner sends a phone white-list invitation without receiving its token",
   await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
   await page.getByRole("button", { name: "登录", exact: true }).click();
   await page.goto("/organization");
-  await page.getByText("添加成员并发送加入链接").click();
-  await page.getByLabel("白名单渠道").selectOption("phone");
+  await page.getByText("添加成员并生成加入链接").click();
   await page.getByPlaceholder("姓名").fill("新成员");
-  await page.getByLabel("白名单手机号").fill("+8613812345678");
+  await page.getByRole("button", { name: "加入白名单并生成链接" }).click();
+  await expect(
+    page.getByText("请至少填写一个邮箱或手机号。两个都填也可以。"),
+  ).toBeVisible();
+  await page.getByLabel("白名单邮箱（可选）").fill("member@example.test");
+  await page.getByLabel("白名单手机号（可选）").fill("+8613812345678");
   await page.getByPlaceholder("岗位（可选）").fill("");
   await expect(page.getByLabel("初始访问角色")).toHaveValue(roleId);
   await expect(page.getByText("默认已选“成员”")).toBeVisible();
-  await page.getByRole("button", { name: "加入白名单并发送" }).click();
-  await expect(page.getByRole("status")).toContainText("手机号白名单");
-  await expect(page.getByRole("status")).toContainText("管理端不显示任何令牌");
+  await page.getByRole("button", { name: "加入白名单并生成链接" }).click();
+  await expect(page.getByText("一次性邀请链接已生成")).toBeVisible();
+  await expect(page.getByLabel("邀请一次性链接")).toHaveValue(
+    "https://app.example.test/invite#token=manual-invitation-test-token",
+  );
+  await expect(page.getByText(/私密渠道单独发送给当事人/)).toBeVisible();
 });
 
 test("white-list invitation never submits a required role select with no assignable role", async ({
@@ -1569,14 +1669,14 @@ test("white-list invitation never submits a required role select with no assigna
   await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
   await page.getByRole("button", { name: "登录", exact: true }).click();
   await page.goto("/organization");
-  await page.getByText("添加成员并发送加入链接").click();
+  await page.getByText("添加成员并生成加入链接").click();
 
   await expect(page.getByLabel("初始访问角色")).toBeDisabled();
   await expect(
     page.getByText("正在恢复可邀请角色目录；在目录可用前不会提交缺少访问角色的邀请。"),
   ).toBeVisible();
   await expect(
-    page.getByRole("button", { name: "加入白名单并发送" }),
+    page.getByRole("button", { name: "加入白名单并生成链接" }),
   ).toBeDisabled();
 });
 
@@ -1750,7 +1850,7 @@ test("a manager reviews a pending professional identity request through the orga
   await page.getByRole("button", { name: "批准身份申请 Agent 开发" }).click();
 });
 
-test("organization ownership transfer starts as a dual-confirmation request", async ({
+test("organization Owner can issue a manual reset link and start a dual-confirmation transfer", async ({
   page,
 }) => {
   await mockAuthenticatedWorkspace(page);
@@ -1871,12 +1971,43 @@ test("organization ownership transfer starts as a dual-confirmation request", as
       },
     });
   });
+  await page.route(
+    `**/api/organization/members/${managerId}/password-reset-link`,
+    async (route) => {
+      expect(route.request().method()).toBe("POST");
+      expect(route.request().postDataJSON()).toEqual({
+        password: "ChangeMe-OnlyForLocalDev-123!",
+      });
+      await route.fulfill({
+        status: 201,
+        json: {
+          manualLink:
+            "https://app.example.test/reset-password#token=manual-reset-test-token",
+          expiresAt: "2026-09-03T02:00:00.000Z",
+        },
+      });
+    },
+  );
   await page.goto("/login");
   await page.getByLabel("邮箱或手机号").fill("owner@example.test");
   await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
   await page.getByRole("button", { name: "登录", exact: true }).click();
   await page.goto("/organization");
   await page.getByRole("tab", { name: /成员/ }).click();
+  await page
+    .locator(".organization-member-row")
+    .filter({ hasText: "陈远航" })
+    .click();
+  await expect(page.getByText("手工密码重置链接", { exact: true })).toBeVisible();
+  await page
+    .getByLabel("当前 Owner 密码（二次验证）")
+    .fill("ChangeMe-OnlyForLocalDev-123!");
+  await page.getByRole("button", { name: "生成一次性重置链接" }).click();
+  await expect(page.getByText("一次性密码重置链接已生成")).toBeVisible();
+  await expect(page.getByLabel("密码重置一次性链接")).toHaveValue(
+    "https://app.example.test/reset-password#token=manual-reset-test-token",
+  );
+  await page.getByRole("button", { name: "关闭成员详情" }).click();
   await page
     .locator(".organization-member-row")
     .filter({ hasText: "林知夏" })
@@ -2166,7 +2297,7 @@ test("calendar exposes mini navigation and reserves drag scheduling for drafts",
 
 test("project workbench exposes versioned node editing instead of a visual-only canvas", async ({
   page,
-}) => {
+}, testInfo) => {
   await mockAuthenticatedWorkspace(page);
   await page.goto("/login");
   await page.getByLabel("邮箱或手机号").fill("owner@example.test");
@@ -2179,6 +2310,17 @@ test("project workbench exposes versioned node editing instead of a visual-only 
   await expect(
     page.getByRole("button", { name: "保存节点版本" }),
   ).toBeVisible();
+  if (testInfo.project.name.startsWith("mobile")) {
+    // The bottom-sheet inspector covers the backdrop's centre on a handset.
+    // Click a real uncovered point in the backdrop rather than forcing the
+    // event, so this verifies the same outside-dismiss path a person uses.
+    await page
+      .getByRole("button", { name: "关闭节点详情" })
+      .click({ position: { x: 8, y: 8 } });
+  } else {
+    await page.keyboard.press("Escape");
+  }
+  await expect(page.getByText("节点详情", { exact: true })).toHaveCount(0);
 });
 
 test("project relation, version history, and recycle recovery use real mutation contracts", async ({

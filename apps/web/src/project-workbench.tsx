@@ -23,7 +23,7 @@ import {
   UserPlus,
   UsersRound,
 } from "lucide-react";
-import { lazy, Suspense, useMemo, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { Badge, Button, Card, CardContent, cn } from "@workbench/ui";
 
@@ -1819,6 +1819,15 @@ export function ProjectDetailPage({ me }: { me: Me }) {
   );
   const selected = allNodes.find((node) => node.id === selectedNodeId) ?? null;
 
+  useEffect(() => {
+    if (!selectedNodeId) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setSelectedNodeId(null);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [selectedNodeId]);
+
   if (tree.isPending)
     return (
       <Card>
@@ -2642,18 +2651,26 @@ export function ProjectDetailPage({ me }: { me: Me }) {
           <ErrorMessage error={createBranch.error} />
         </main>
         {selected ? (
-          <NodeInspector
-            canManage={canManage}
-            node={selected}
-            nodes={allNodes}
-            assignees={assigneesByNodeId.get(selected.id) ?? []}
-            onClose={() => setSelectedNodeId(null)}
-            onOpenRecycle={() => {
-              setShowRecycle(true);
-              setSelectedNodeId(null);
-            }}
-            projectId={projectId}
-          />
+          <>
+            <button
+              aria-label="关闭节点详情"
+              className="project-node-inspector-backdrop"
+              onClick={() => setSelectedNodeId(null)}
+              type="button"
+            />
+            <NodeInspector
+              canManage={canManage}
+              node={selected}
+              nodes={allNodes}
+              assignees={assigneesByNodeId.get(selected.id) ?? []}
+              onClose={() => setSelectedNodeId(null)}
+              onOpenRecycle={() => {
+                setShowRecycle(true);
+                setSelectedNodeId(null);
+              }}
+              projectId={projectId}
+            />
+          </>
         ) : (
           <aside className="project-workbench-guide">
             <p className="app-section-label">项目视图</p>

@@ -26,16 +26,14 @@ import {
   Zap,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { CSSProperties } from "react";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { Button, cn } from "@workbench/ui";
 
 import { api, hasGrant, resetCsrfToken, type Me } from "./api.js";
-import {
-  accessibleAccent,
-  readableForeground,
-  sanitizeAccent,
-} from "./color.js";
+import { AccentPicker } from "./accent-picker.js";
+import { readableForeground, sanitizeAccent } from "./color.js";
 
 interface NavigationItem {
   label: string;
@@ -195,7 +193,7 @@ function CommandPalette({
         if (event.target === event.currentTarget) onClose();
       }}
     >
-      <div className="w-full max-w-xl overflow-hidden rounded-[22px] border border-[var(--border)] bg-[var(--surface-raised)] shadow-[var(--shadow-float)]">
+      <div className="app-command-palette w-full max-w-xl overflow-hidden rounded-[22px] border border-[var(--border)] bg-[var(--surface-raised)] shadow-[var(--shadow-float)]">
         <div className="flex items-center gap-3 border-b border-[var(--border)] px-4">
           <Search className="text-[var(--text-subtle)]" size={19} />
           <input
@@ -262,6 +260,12 @@ export function AppShell({ me }: { me: Me }) {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(
     () => localStorage.getItem("workbench-sidebar-collapsed") === "true",
   );
+  const [sidebarWidth, setSidebarWidth] = useState(() => {
+    const stored = Number(localStorage.getItem("workbench-sidebar-width"));
+    return Number.isFinite(stored) && stored >= 224 && stored <= 420
+      ? stored
+      : 272;
+  });
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [commandOpen, setCommandOpen] = useState(false);
@@ -283,9 +287,11 @@ export function AppShell({ me }: { me: Me }) {
       ? "#5b5ce2"
       : sanitizeAccent(storedAccent);
   });
-  const effectiveAccent = accessibleAccent(accent);
+  const selectedAccent = sanitizeAccent(accent);
   const queryClient = useQueryClient();
   const navigate = useNavigate();
+  const utilityMenuRef = useRef<HTMLDivElement>(null);
+  const contextPanelRef = useRef<HTMLElement>(null);
   const visibleNavigation = useMemo(
     () =>
       navigation.filter(
@@ -345,22 +351,28 @@ export function AppShell({ me }: { me: Me }) {
     );
   }, [sidebarCollapsed]);
   useEffect(() => {
+    localStorage.setItem("workbench-sidebar-width", String(sidebarWidth));
+  }, [sidebarWidth]);
+  useEffect(() => {
     const root = document.documentElement;
-    root.style.setProperty("--accent", effectiveAccent);
+    // The exact stored value is the exact visible accent. Contrast-sensitive
+    // foreground and derivative tokens are calculated separately, so a picker
+    // handle cannot drift away from the color used by the product.
+    root.style.setProperty("--accent", selectedAccent);
     root.style.setProperty(
       "--accent-strong",
-      "color-mix(in srgb, " + effectiveAccent + " 45%, var(--text))",
+      "color-mix(in srgb, " + selectedAccent + " 72%, var(--text))",
     );
     root.style.setProperty(
       "--accent-foreground",
-      readableForeground(effectiveAccent),
+      readableForeground(selectedAccent),
     );
     root.style.setProperty(
       "--accent-soft",
-      "color-mix(in srgb, " + effectiveAccent + " 13%, transparent)",
+      "color-mix(in srgb, " + selectedAccent + " 13%, transparent)",
     );
-    localStorage.setItem("workbench-accent", accent);
-  }, [accent, effectiveAccent]);
+    localStorage.setItem("workbench-accent", selectedAccent);
+  }, [selectedAccent]);
   useEffect(() => {
     const setStatus = () => setOnline(navigator.onLine);
     window.addEventListener("online", setStatus);
@@ -376,17 +388,51 @@ export function AppShell({ me }: { me: Me }) {
         event.preventDefault();
         setCommandOpen(true);
       }
-      if (event.key === "Escape") setCommandOpen(false);
+      if (event.key === "Escape") {
+        setCommandOpen(false);
+        setSettingsOpen(false);
+        setNotificationsOpen(false);
+        setContextOpen(false);
+        setSidebarOpen(false);
+      }
     };
     window.addEventListener("keydown", listener);
     return () => window.removeEventListener("keydown", listener);
   }, []);
+  useEffect(() => {
+    if (!settingsOpen && !notificationsOpen) return;
+    const closeUtilityMenus = (event: PointerEvent) => {
+      if (
+        utilityMenuRef.current?.contains(event.target as Node)
+      )
+        return;
+      setSettingsOpen(false);
+      setNotificationsOpen(false);
+    };
+    window.addEventListener("pointerdown", closeUtilityMenus);
+    return () => window.removeEventListener("pointerdown", closeUtilityMenus);
+  }, [notificationsOpen, settingsOpen]);
+  useEffect(() => {
+    if (!contextOpen) return;
+    const closeContext = (event: PointerEvent) => {
+      const target = event.target as Node;
+      if (
+        contextPanelRef.current?.contains(target) ||
+        utilityMenuRef.current?.contains(target)
+      )
+        return;
+      setContextOpen(false);
+    };
+    window.addEventListener("pointerdown", closeContext);
+    return () => window.removeEventListener("pointerdown", closeContext);
+  }, [contextOpen]);
   return (
     <div
       className={cn(
         "app-shell min-h-dvh bg-[var(--canvas)] text-[var(--text)]",
         sidebarCollapsed && "app-shell--sidebar-collapsed",
       )}
+      style={{ "--sidebar-width": `${sidebarWidth}px` } as CSSProperties}
     >
       <a className="skip-link" href="#main-content">
         跳到主要内容
@@ -400,7 +446,7 @@ export function AppShell({ me }: { me: Me }) {
       <aside
         aria-label="主导航"
         className={cn(
-          "app-sidebar fixed inset-y-0 left-0 z-40 flex w-[272px] flex-col border-r border-[var(--border)] backdrop-blur-xl transition-[transform,width] duration-300 lg:translate-x-0",
+          "app-sidebar fixed inset-y-0 left-0 z-40 flex w-[var(--sidebar-width)] flex-col border-r border-[var(--border)] backdrop-blur-xl transition-[transform,width] duration-300 lg:translate-x-0",
           sidebarCollapsed && "lg:w-[76px]",
           sidebarOpen ? "translate-x-0" : "-translate-x-full",
         )}
@@ -511,6 +557,58 @@ export function AppShell({ me }: { me: Me }) {
             退出登录
           </Button>
         </div>
+        {!sidebarCollapsed ? (
+          <div
+            aria-label="调整侧边栏宽度"
+            aria-orientation="vertical"
+            aria-valuemax={420}
+            aria-valuemin={224}
+            aria-valuenow={sidebarWidth}
+            className="app-sidebar-resize-handle"
+            onKeyDown={(event) => {
+              const increment = event.shiftKey ? 24 : 8;
+              if (event.key === "ArrowLeft") {
+                event.preventDefault();
+                setSidebarWidth((current) => Math.max(224, current - increment));
+              }
+              if (event.key === "ArrowRight") {
+                event.preventDefault();
+                setSidebarWidth((current) => Math.min(420, current + increment));
+              }
+              if (event.key === "Home") {
+                event.preventDefault();
+                setSidebarWidth(224);
+              }
+              if (event.key === "End") {
+                event.preventDefault();
+                setSidebarWidth(420);
+              }
+            }}
+            onPointerDown={(event) => {
+              const initialX = event.clientX;
+              const initialWidth = sidebarWidth;
+              event.currentTarget.setPointerCapture(event.pointerId);
+              const resize = (moveEvent: PointerEvent) => {
+                setSidebarWidth(
+                  Math.min(
+                    420,
+                    Math.max(224, initialWidth + moveEvent.clientX - initialX),
+                  ),
+                );
+              };
+              const stopResize = () => {
+                window.removeEventListener("pointermove", resize);
+                window.removeEventListener("pointerup", stopResize);
+                window.removeEventListener("pointercancel", stopResize);
+              };
+              window.addEventListener("pointermove", resize);
+              window.addEventListener("pointerup", stopResize);
+              window.addEventListener("pointercancel", stopResize);
+            }}
+            role="separator"
+            tabIndex={0}
+          />
+        ) : null}
       </aside>
       {sidebarOpen ? (
         <button
@@ -522,7 +620,7 @@ export function AppShell({ me }: { me: Me }) {
       ) : null}
       <div
         className={cn(
-          "min-h-dvh lg:pl-[272px]",
+          "min-h-dvh lg:pl-[var(--sidebar-width)]",
           sidebarCollapsed && "lg:pl-[76px]",
         )}
       >
@@ -566,7 +664,10 @@ export function AppShell({ me }: { me: Me }) {
               Ctrl K
             </kbd>
           </button>
-          <div className="relative ml-auto flex items-center gap-1.5">
+          <div
+            className="relative ml-auto flex items-center gap-1.5"
+            ref={utilityMenuRef}
+          >
             {pendingOwnershipTransfer.data?.transfer ? (
               <>
                 <Button
@@ -653,7 +754,7 @@ export function AppShell({ me }: { me: Me }) {
               <Settings size={18} />
             </Button>
             {notificationsOpen ? (
-              <div className="absolute right-0 top-12 z-50 max-h-[min(70vh,560px)] w-[min(92vw,380px)] overflow-y-auto rounded-[18px] border border-[var(--border)] bg-[var(--surface-raised)] p-3 shadow-[var(--shadow-float)]">
+              <div className="app-utility-popover absolute right-0 top-12 z-50 max-h-[min(70vh,560px)] w-[min(92vw,380px)] overflow-y-auto rounded-[18px] border border-[var(--border)] bg-[var(--surface-raised)] p-3 shadow-[var(--shadow-float)]">
                 <div className="flex items-center justify-between px-1 pb-2">
                   <p className="font-bold">通知中心</p>
                   <span className="text-xs text-[var(--text-muted)]">
@@ -725,7 +826,7 @@ export function AppShell({ me }: { me: Me }) {
               </div>
             ) : null}
             {settingsOpen ? (
-              <div className="absolute right-0 top-12 z-50 w-72 rounded-[18px] border border-[var(--border)] bg-[var(--surface-raised)] p-4 shadow-[var(--shadow-float)]">
+              <div className="app-utility-popover absolute right-0 top-12 z-50 w-[min(92vw,20rem)] rounded-[18px] border border-[var(--border)] bg-[var(--surface-raised)] p-4 shadow-[var(--shadow-float)]">
                 <p className="text-sm font-bold">外观设置</p>
                 <p className="mt-1 text-xs leading-5 text-[var(--text-muted)]">
                   强调色仅作用于导航与操作层，业务状态色保持清晰。
@@ -749,16 +850,20 @@ export function AppShell({ me }: { me: Me }) {
                     </Button>
                   ))}
                 </div>
-                <label className="mt-4 flex items-center justify-between text-xs font-semibold text-[var(--text-muted)]">
-                  强调色
-                  <input
-                    aria-label="自定义强调色"
-                    className="h-9 w-12 cursor-pointer rounded-lg border border-[var(--border)] bg-transparent p-1"
-                    onChange={(event) => setAccent(event.target.value)}
-                    type="color"
-                    value={accent}
-                  />
-                </label>
+                <div className="mt-4">
+                  <p className="text-xs font-semibold text-[var(--text-muted)]">
+                    强调色
+                  </p>
+                  <p className="mt-1 text-[11px] leading-4 text-[var(--text-subtle)]">
+                    取色器、HEX 值和实际主色始终完全一致。
+                  </p>
+                  <div className="mt-3">
+                    <AccentPicker
+                      onChange={setAccent}
+                      value={selectedAccent}
+                    />
+                  </div>
+                </div>
               </div>
             ) : null}
           </div>
@@ -771,9 +876,20 @@ export function AppShell({ me }: { me: Me }) {
         </main>
       </div>
       {contextOpen ? (
+        <button
+          aria-label="关闭 AI 上下文"
+          className="app-context-backdrop fixed inset-0 z-40"
+          onClick={() => setContextOpen(false)}
+          type="button"
+        />
+      ) : null}
+      {contextOpen ? (
         <aside
           aria-label="AI 上下文面板"
           className="app-context-panel fixed inset-x-0 bottom-0 top-[4.75rem] z-50 overflow-y-auto p-5 lg:inset-y-0 lg:left-auto lg:top-[76px] lg:w-[340px]"
+          ref={contextPanelRef}
+          role="dialog"
+          aria-modal="true"
         >
           <div className="flex items-start justify-between gap-4">
             <div>
