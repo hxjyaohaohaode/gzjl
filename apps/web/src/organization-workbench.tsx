@@ -23,7 +23,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { Badge, Button, Card, cn } from "@workbench/ui";
 
-import { api, type Me } from "./api.js";
+import { api, ApiError, type Me } from "./api.js";
 import {
   ErrorMessage,
   fieldClass,
@@ -145,6 +145,14 @@ interface InvitationResponse {
   delivery: InvitationDelivery;
   /** Present only for an authorized, explicitly requested manual delivery. */
   manualLink?: string;
+  /** Present when an attempted automatic delivery fell back safely to manual. */
+  deliveryWarning?: string;
+}
+
+interface InvitationDeliveryCapabilities {
+  manual: { available: true };
+  email: { available: boolean };
+  phone: { available: boolean };
 }
 
 function memberStatusTone(
@@ -1463,6 +1471,17 @@ function OrganizationSidebar({
   const [inviteFormError, setInviteFormError] = useState<string | null>(null);
   const [deliveryFeedback, setDeliveryFeedback] =
     useState<InvitationResponse | null>(null);
+  const deliveryCapabilities = useQuery({
+    queryKey: ["invitation-delivery-capabilities"],
+    queryFn: () =>
+      api<InvitationDeliveryCapabilities>(
+        "/api/organization/invitation-delivery-capabilities",
+      ),
+  });
+  const emailDeliveryAvailable =
+    deliveryCapabilities.data?.email.available === true;
+  const phoneDeliveryAvailable =
+    deliveryCapabilities.data?.phone.available === true;
   const selectedInviteRole =
     invitableRoles.find((role) => role.id === invite.roleId) ??
     invitableRoles.find((role) => role.kind === "member");
@@ -1472,6 +1491,10 @@ function OrganizationSidebar({
     invite.deliveryMode === "manual" ||
     (invite.deliveryMode === "email" && Boolean(invite.email.trim())) ||
     (invite.deliveryMode === "phone" && Boolean(invite.phone.trim()));
+  const selectedDeliveryIsAvailable =
+    invite.deliveryMode === "manual" ||
+    (invite.deliveryMode === "email" && emailDeliveryAvailable) ||
+    (invite.deliveryMode === "phone" && phoneDeliveryAvailable);
   // Keep the action available for local form validation so an Owner gets a
   // clear explanation for the at-least-one-contact rule. A missing role is
   // different: it must never submit and is therefore disabled outright.
@@ -1535,7 +1558,19 @@ function OrganizationSidebar({
     // An automatic delivery provider can fail after the server has already
     // created a pending white-list entry. Refresh so the manager sees that
     // entry and can generate a safe manual link instead of duplicating it.
-    onError: async () => {
+    onError: async (error) => {
+      if (
+        error instanceof ApiError &&
+        error.code === "delivery_unavailable"
+      ) {
+        // Do not leave a manager stuck retrying a known-unavailable provider.
+        // No manual link is generated here because an unavailable channel is
+        // rejected before the server creates a new pending identity.
+        setInvite((current) => ({ ...current, deliveryMode: "manual" }));
+        setInviteFormError(
+          "自动投递服务当前不可用，已切换为“手工复制一次性链接”。请再次提交，系统将只向你显示安全链接。",
+        );
+      }
       await refresh();
     },
   });
@@ -1773,6 +1808,14 @@ function OrganizationSidebar({
                 );
                 return;
               }
+              if (!selectedDeliveryIsAvailable) {
+                setInviteFormError(
+                  invite.deliveryMode === "email"
+                    ? "邮件自动投递尚未配置。请使用默认的手工一次性链接，或由 Owner 在 Render 配置完整 SMTP 后再选择邮件。"
+                    : "短信自动投递尚未配置。请使用默认的手工一次性链接，或由 Owner 在 Render 配置完整短信服务后再选择短信。",
+                );
+                return;
+              }
               if (!effectiveInviteRoleId) {
                 setInviteFormError("正在恢复可邀请角色目录，请稍候再试。");
                 return;
@@ -1842,9 +1885,32 @@ function OrganizationSidebar({
               value={invite.deliveryMode}
             >
               <option value="manual">手工复制一次性链接（推荐）</option>
-              <option value="email">通过邮件自动投递</option>
-              <option value="phone">通过短信自动投递</option>
+              <option disabled={!emailDeliveryAvailable} value="email">
+                {emailDeliveryAvailable
+                  ? "通过邮件自动投递"
+                  : "通过邮件自动投递（尚未配置）"}
+              </option>
+              <option disabled={!phoneDeliveryAvailable} value="phone">
+                {phoneDeliveryAvailable
+                  ? "通过短信自动投递"
+                  : "通过短信自动投递（尚未配置）"}
+              </option>
             </select>
+            <p
+              aria-live="polite"
+              className="text-xs leading-5 text-[var(--text-muted)]"
+            >
+              {deliveryCapabilities.isPending
+                ? "正在核验自动投递服务；手工链接现在就可用。"
+                : emailDeliveryAvailable || phoneDeliveryAvailable
+                  ? `可用自动渠道：${[
+                      emailDeliveryAvailable ? "邮件" : null,
+                      phoneDeliveryAvailable ? "短信" : null,
+                    ]
+                      .filter(Boolean)
+                      .join("、")}；未配置的渠道已禁用。`
+                  : "邮件和短信均未配置；默认手工链接可立即使用，不会尝试伪造投递。"}
+            </p>
             <input
               className={fieldClass}
               onChange={(event) =>
@@ -1918,11 +1984,21 @@ function OrganizationSidebar({
         {deliveryFeedback ? (
           deliveryFeedback.delivery.mode === "manual" &&
           deliveryFeedback.manualLink ? (
-            <ManualCapabilityLink
-              expiresAt={deliveryFeedback.delivery.expiresAt}
-              label="邀请"
-              link={deliveryFeedback.manualLink}
-            />
+            <div className="space-y-2">
+              {deliveryFeedback.deliveryWarning ? (
+                <p
+                  className="rounded-xl bg-[var(--warning-soft)] px-3 py-2 text-xs leading-5 text-[var(--warning)]"
+                  role="status"
+                >
+                  {deliveryFeedback.deliveryWarning}
+                </p>
+              ) : null}
+              <ManualCapabilityLink
+                expiresAt={deliveryFeedback.delivery.expiresAt}
+                label="邀请"
+                link={deliveryFeedback.manualLink}
+              />
+            </div>
           ) : (
             <div className="organization-delivery-feedback" role="status">
               <strong>投递已提交</strong>

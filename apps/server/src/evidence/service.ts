@@ -22,40 +22,28 @@ import { hasPermission } from "@workbench/shared";
 import type { AuthContext } from "../auth/service.js";
 import type { ServerConfig } from "../config.js";
 
-const allowedMimeTypes = new Set([
-  "application/pdf",
-  "application/json",
-  "application/xml",
-  "application/zip",
-  "application/gzip",
-  "application/x-7z-compressed",
-  "application/x-rar-compressed",
-  "application/vnd.rar",
-  "application/vnd.ms-excel",
-  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-  "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-  "image/jpeg",
-  "image/png",
-  "image/webp",
-  "image/gif",
-  "audio/mpeg",
-  "audio/ogg",
-  "audio/wav",
-  "video/mp4",
-  "video/quicktime",
-  "video/webm",
-  "text/plain",
-  "text/csv",
-  "text/css",
-  "text/html",
-  "text/javascript",
-  "text/markdown",
-  "text/xml",
-]);
-
 export type EvidenceVisibility = "private" | "management_only" | "project_visible";
 type Attachment = typeof attachments.$inferSelect;
+
+const genericBinaryMimeType = "application/octet-stream";
+
+/**
+ * Browsers often omit a MIME type for source code, uncommon office files, and
+ * specialized evidence. Store such files as opaque binary instead of
+ * mislabeling them as text/plain or rejecting them solely for being uncommon.
+ * The declared MIME type is still retained as metadata for people and future
+ * tooling, but downloads are always forced to binary attachments.
+ */
+function normalizeMimeType(value: string): string {
+  const normalized = value.trim().split(";", 1)[0]?.toLowerCase();
+  if (
+    !normalized ||
+    !/^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/i.test(normalized)
+  ) {
+    return genericBinaryMimeType;
+  }
+  return normalized;
+}
 
 export class EvidenceValidationError extends Error {
   constructor(message: string) {
@@ -85,6 +73,7 @@ interface ObjectStoreConfig {
   accessKeyId: string;
   secretAccessKey: string;
   forcePathStyle: boolean;
+  signedUrlTtlSeconds: number;
 }
 
 class ObjectStore {
@@ -104,7 +93,7 @@ class ObjectStore {
 
   async createUploadUrl(
     objectKey: string,
-    mimeType: string,
+    declaredMimeType: string,
     sizeBytes: number,
     sha256Hex: string,
   ) {
@@ -112,18 +101,29 @@ class ObjectStore {
     const command = new PutObjectCommand({
       Bucket: this.config.bucket,
       Key: objectKey,
-      ContentType: mimeType,
+      // Never allow an uploaded file to acquire an executable/renderable
+      // response type simply because its browser-provided MIME says HTML,
+      // SVG, JavaScript, or another active format. The original type remains
+      // available in authenticated metadata, while the object is opaque.
+      ContentType: genericBinaryMimeType,
       ContentLength: sizeBytes,
       ChecksumSHA256: checksum,
-      Metadata: { sha256: sha256Hex },
+      Metadata: { sha256: sha256Hex, "declared-mime": declaredMimeType },
     });
     return {
-      uploadUrl: await getSignedUrl(this.client, command, { expiresIn: 15 * 60 }),
+      uploadUrl: await getSignedUrl(this.client, command, {
+        expiresIn: this.config.signedUrlTtlSeconds,
+      }),
       requiredHeaders: {
-        "content-type": mimeType,
+        "content-type": genericBinaryMimeType,
         "x-amz-checksum-sha256": checksum,
+        // Metadata is part of the signed PutObject command. Returning every
+        // signed header is essential: omitting one lets some S3-compatible
+        // providers reject the browser PUT with SignatureDoesNotMatch.
+        "x-amz-meta-sha256": sha256Hex,
+        "x-amz-meta-declared-mime": declaredMimeType,
       },
-      expiresInSeconds: 15 * 60,
+      expiresInSeconds: this.config.signedUrlTtlSeconds,
     };
   }
 
@@ -140,18 +140,25 @@ class ObjectStore {
     }
   }
 
-  async createDownloadUrl(objectKey: string, originalName: string | null): Promise<string> {
-    return getSignedUrl(
-      this.client,
-      new GetObjectCommand({
-        Bucket: this.config.bucket,
-        Key: objectKey,
-        // Evidence is always an attachment; never let a browser execute or
-        // render an uploaded file in the application origin.
-        ResponseContentDisposition: `attachment; filename="${safeName(originalName ?? "evidence")}"`,
-      }),
-      { expiresIn: 5 * 60 },
-    );
+  async createDownloadUrl(objectKey: string, originalName: string | null) {
+    // Downloads only need a short capability. Keep them at five minutes or
+    // less even if a deployment chooses a longer upload retry window.
+    const expiresInSeconds = Math.min(this.config.signedUrlTtlSeconds, 5 * 60);
+    return {
+      url: await getSignedUrl(
+        this.client,
+        new GetObjectCommand({
+          Bucket: this.config.bucket,
+          Key: objectKey,
+          // Evidence is always an attachment; never let a browser execute or
+          // render an uploaded file in the application origin.
+          ResponseContentDisposition: `attachment; filename="${safeName(originalName ?? "evidence")}"`,
+          ResponseContentType: genericBinaryMimeType,
+        }),
+        { expiresIn: expiresInSeconds },
+      ),
+      expiresInSeconds,
+    };
   }
 }
 
@@ -167,13 +174,26 @@ function safeName(name: string): string {
 
 export class EvidenceService {
   private readonly store: ObjectStore | null;
+  private readonly storageUnavailableReason: string | null;
 
   constructor(
     private readonly db: Database,
     private readonly config: ServerConfig,
   ) {
-    const configured =
-      config.S3_BUCKET && config.S3_ACCESS_KEY_ID && config.S3_SECRET_ACCESS_KEY;
+    const hasStorageCredentials = Boolean(
+      config.S3_BUCKET && config.S3_ACCESS_KEY_ID && config.S3_SECRET_ACCESS_KEY,
+    );
+    // The PWA uploads direct to a pre-signed storage URL. Production CSP must
+    // know the exact public origin in advance; without it a partly configured
+    // bucket would look available in the UI but the browser would block PUT.
+    const hasBrowserUploadOrigin =
+      config.NODE_ENV !== "production" || Boolean(config.S3_BROWSER_ORIGIN);
+    const configured = hasStorageCredentials && hasBrowserUploadOrigin;
+    this.storageUnavailableReason = !hasStorageCredentials
+      ? "对象存储凭据尚未完整配置。"
+      : !hasBrowserUploadOrigin
+        ? "对象存储浏览器直传 origin 尚未配置。"
+        : null;
     this.store = configured
       ? new ObjectStore({
           ...(config.S3_ENDPOINT ? { endpoint: config.S3_ENDPOINT } : {}),
@@ -182,8 +202,26 @@ export class EvidenceService {
           accessKeyId: config.S3_ACCESS_KEY_ID!,
           secretAccessKey: config.S3_SECRET_ACCESS_KEY!,
           forcePathStyle: config.S3_FORCE_PATH_STYLE,
+          signedUrlTtlSeconds: config.SIGNED_URL_TTL_SECONDS,
         })
       : null;
+  }
+
+  capabilities() {
+    return {
+      fileUploads: {
+        available: Boolean(this.store),
+        maxBytes: this.config.ATTACHMENT_MAX_BYTES,
+        ...(this.store
+          ? {}
+          : { unavailableReason: this.storageUnavailableReason ?? "文件对象存储不可用。" }),
+        // File bytes are deliberately stored and downloaded as opaque binary;
+        // legitimate work artefacts therefore do not need to match a brittle
+        // front-end MIME whitelist.
+        acceptsArbitraryFormats: true,
+      },
+      references: { url: true, text: true },
+    };
   }
 
   private canManage(actor: AuthContext): boolean {
@@ -261,14 +299,12 @@ export class EvidenceService {
     if (session.membershipId !== actor.membershipId && !this.canManage(actor)) {
       throw new EvidenceForbiddenError("只能为自己的工时记录上传证据。");
     }
-    if (!allowedMimeTypes.has(input.mimeType)) {
-      throw new EvidenceValidationError("不支持该文件类型。可上传文档、图片、音视频、表格、压缩包和文本/代码证据。");
-    }
     if (input.sizeBytes > this.config.ATTACHMENT_MAX_BYTES) {
       throw new EvidenceValidationError(
         `文件不能超过 ${Math.floor(this.config.ATTACHMENT_MAX_BYTES / 1024 / 1024)} MB。`,
       );
     }
+    const mimeType = normalizeMimeType(input.mimeType);
     const objectKey = `${actor.organizationId}/${actor.membershipId}/${randomUUID()}/${safeName(input.originalName)}`;
     const attachment = await this.db.transaction(async (tx) => {
       const [created] = await tx
@@ -279,11 +315,15 @@ export class EvidenceService {
           kind: "file",
           objectKey,
           originalName: input.originalName,
-          mimeType: input.mimeType,
+          mimeType,
           sizeBytes: input.sizeBytes,
           sha256: input.sha256,
           visibility: input.visibility,
           note: input.note,
+          metadata: {
+            declaredMimeType: mimeType,
+            storageContentType: genericBinaryMimeType,
+          },
         })
         .returning();
       if (!created) throw new EvidenceValidationError("无法创建上传任务。");
@@ -302,7 +342,7 @@ export class EvidenceService {
         after: {
           sessionId,
           originalName: input.originalName,
-          mimeType: input.mimeType,
+          mimeType,
           sizeBytes: input.sizeBytes,
           sha256: input.sha256,
           visibility: input.visibility,
@@ -314,7 +354,7 @@ export class EvidenceService {
       attachment,
       ...(await this.store.createUploadUrl(
         objectKey,
-        input.mimeType,
+        mimeType,
         input.sizeBytes,
         input.sha256,
       )),
@@ -334,12 +374,10 @@ export class EvidenceService {
     },
   ) {
     if (!this.store) throw new EvidenceValidationError("对象存储尚未配置，暂时不能替换文件证据。");
-    if (!allowedMimeTypes.has(input.mimeType)) {
-      throw new EvidenceValidationError("不支持该文件类型。可上传文档、图片、音视频、表格、压缩包和文本/代码证据。");
-    }
     if (input.sizeBytes > this.config.ATTACHMENT_MAX_BYTES) {
       throw new EvidenceValidationError(`文件不能超过 ${Math.floor(this.config.ATTACHMENT_MAX_BYTES / 1024 / 1024)} MB。`);
     }
+    const mimeType = normalizeMimeType(input.mimeType);
     const row = await this.linkedAttachment(actor, attachmentId);
     if (row.attachment.kind !== "file") throw new EvidenceValidationError("只有文件证据可以替换；链接和文本请新增一条证据。");
     if (row.attachment.uploadedBy !== actor.membershipId && !this.canManage(actor)) throw new EvidenceForbiddenError();
@@ -358,10 +396,14 @@ export class EvidenceService {
         status: "pending_upload",
         originalName: input.originalName,
         objectKey,
-        mimeType: input.mimeType,
+        mimeType,
         sizeBytes: input.sizeBytes,
         sha256: input.sha256,
         note: input.note ?? row.attachment.note,
+        metadata: {
+          declaredMimeType: mimeType,
+          storageContentType: genericBinaryMimeType,
+        },
         uploadedBy: actor.membershipId,
         version: row.attachment.version + 1,
         updatedAt: new Date(),
@@ -379,7 +421,65 @@ export class EvidenceService {
       return updated;
     });
     if (!attachment) throw new EvidenceValidationError("无法创建证据替换任务。");
-    return { attachment, ...(await this.store.createUploadUrl(objectKey, input.mimeType, input.sizeBytes, input.sha256)) };
+    return { attachment, ...(await this.store.createUploadUrl(objectKey, mimeType, input.sizeBytes, input.sha256)) };
+  }
+
+  /**
+   * A browser can lose its network after the durable upload intent exists but
+   * before the direct PUT or completion confirmation succeeds. Reissuing a
+   * short-lived URL against that same attachment avoids duplicate evidence
+   * records and lets a user retry without weakening integrity verification.
+   */
+  async renewFileUploadUrl(actor: AuthContext, attachmentId: string) {
+    if (!this.store) {
+      throw new EvidenceValidationError("对象存储尚未配置，暂时不能继续上传文件证据。");
+    }
+    const row = await this.linkedAttachment(actor, attachmentId);
+    if (row.attachment.uploadedBy !== actor.membershipId && !this.canManage(actor)) {
+      throw new EvidenceForbiddenError();
+    }
+    const attachment = row.attachment;
+    if (
+      attachment.kind !== "file" ||
+      !attachment.objectKey ||
+      attachment.sizeBytes === null ||
+      !attachment.sha256 ||
+      !attachment.mimeType
+    ) {
+      throw new EvidenceValidationError("该证据没有可继续的文件上传任务。");
+    }
+    if (attachment.status === "available") {
+      throw new EvidenceValidationError("该文件已经完成并通过完整性校验，无需重新上传。");
+    }
+    if (attachment.status === "quarantined") {
+      throw new EvidenceValidationError("该文件未通过完整性校验，请使用“替换”重新提交并说明原因。");
+    }
+    if (attachment.status !== "pending_upload" && attachment.status !== "upload_failed") {
+      throw new EvidenceValidationError("该文件当前不能继续上传。");
+    }
+    const [updated] = await this.db
+      .update(attachments)
+      .set({ status: "pending_upload", updatedAt: new Date() })
+      .where(and(eq(attachments.id, attachmentId), isNull(attachments.deletedAt)))
+      .returning();
+    if (!updated) throw new EvidenceNotFoundError();
+    await this.db.insert(auditLogs).values({
+      organizationId: actor.organizationId,
+      actorMembershipId: actor.membershipId,
+      action: "evidence.upload_url_renewed",
+      entityType: "attachment",
+      entityId: attachmentId,
+      after: { version: updated.version, sha256: updated.sha256 },
+    });
+    return {
+      attachment: updated,
+      ...(await this.store.createUploadUrl(
+        updated.objectKey!,
+        updated.mimeType!,
+        updated.sizeBytes!,
+        updated.sha256!,
+      )),
+    };
   }
 
   private async linkedAttachment(actor: AuthContext, attachmentId: string) {
@@ -419,10 +519,17 @@ export class EvidenceService {
     try {
       await this.store.verify(attachment.objectKey, attachment.sizeBytes, attachment.sha256);
     } catch (error) {
-      await this.db
-        .update(attachments)
-        .set({ status: "quarantined", updatedAt: new Date() })
-        .where(eq(attachments.id, attachmentId));
+      // A verified checksum/size mismatch is a genuine integrity failure and
+      // must be quarantined. A transient S3 failure (including an object that
+      // has not become visible yet) is not evidence corruption: retain
+      // pending_upload so the browser can retry completion or renew its
+      // signed URL safely.
+      if (error instanceof EvidenceValidationError) {
+        await this.db
+          .update(attachments)
+          .set({ status: "quarantined", updatedAt: new Date() })
+          .where(eq(attachments.id, attachmentId));
+      }
       throw error;
     }
     const [updated] = await this.db
@@ -549,8 +656,10 @@ export class EvidenceService {
       throw new EvidenceValidationError("该证据没有可下载文件。");
     }
     return {
-      url: await this.store.createDownloadUrl(row.attachment.objectKey, row.attachment.originalName),
-      expiresInSeconds: 5 * 60,
+      ...(await this.store.createDownloadUrl(
+        row.attachment.objectKey,
+        row.attachment.originalName,
+      )),
       sha256: row.attachment.sha256,
       originalName: row.attachment.originalName,
     };

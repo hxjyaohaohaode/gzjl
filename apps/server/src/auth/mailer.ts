@@ -54,6 +54,23 @@ export class AuthMailer {
   constructor(private readonly config: ServerConfig) {}
 
   /**
+   * This is deliberately a capability probe rather than a delivery attempt.
+   * Managers need to know whether an automatic channel is selectable, while
+   * the browser must never receive SMTP/Twilio credentials or provider error
+   * details. Manual capability links are always available through the
+   * authenticated organization routes and therefore are not represented here.
+   */
+  isDeliveryConfigured(kind: CredentialDeliveryKind): boolean {
+    try {
+      this.assertDeliveryConfigured(kind);
+      return true;
+    } catch (error) {
+      if (error instanceof AuthDeliveryUnavailableError) return false;
+      throw error;
+    }
+  }
+
+  /**
    * A manual link is intentionally generated only by authenticated,
    * organization-admin routes. The fragment keeps the capability out of
    * request URLs and ordinary server/proxy logs.

@@ -14,7 +14,10 @@ const visibility = z.enum(["private", "management_only", "project_visible"]);
 const fileInput = z.object({
   originalName: z.string().trim().min(1).max(255),
   mimeType: z.string().trim().min(1).max(255),
-  sizeBytes: z.number().int().positive().max(100 * 1024 * 1024),
+  // The effective size limit comes from ATTACHMENT_MAX_BYTES in the service
+  // so the browser can receive one configuration-consistent error. This is a
+  // broad transport guard only; a direct signed S3 PUT cannot exceed 5 GiB.
+  sizeBytes: z.number().int().positive().max(5 * 1024 * 1024 * 1024),
   sha256: z
     .string()
     .regex(/^[a-f0-9]{64}$/i)
@@ -61,6 +64,11 @@ export async function registerEvidenceRoutes(
   service: EvidenceService,
   authenticate: preHandlerHookHandler,
 ) {
+  app.get(
+    "/api/evidence/capabilities",
+    { preHandler: authenticate },
+    async () => service.capabilities(),
+  );
   app.post(
     "/api/work-sessions/:sessionId/attachments/upload-intent",
     { preHandler: [app.csrfProtection, authenticate] },
@@ -83,6 +91,21 @@ export async function registerEvidenceRoutes(
       try {
         const { attachmentId } = attachmentParams.parse(request.params);
         return await service.completeFile(request.auth!, attachmentId);
+      } catch (error) {
+        return mapEvidenceError(error, reply);
+      }
+    },
+  );
+
+  app.post(
+    "/api/attachments/:attachmentId/upload-url",
+    { preHandler: [app.csrfProtection, authenticate] },
+    async (request, reply) => {
+      try {
+        const { attachmentId } = attachmentParams.parse(request.params);
+        return reply.code(201).send(
+          await service.renewFileUploadUrl(request.auth!, attachmentId),
+        );
       } catch (error) {
         return mapEvidenceError(error, reply);
       }

@@ -108,6 +108,17 @@ async function mockAuthenticatedWorkspace(page: Page): Promise<void> {
   await page.route("**/api/organization/identity-change-requests", (route) =>
     route.fulfill({ json: { items: [] } }),
   );
+  await page.route(
+    "**/api/organization/invitation-delivery-capabilities",
+    (route) =>
+      route.fulfill({
+        json: {
+          manual: { available: true },
+          email: { available: false },
+          phone: { available: false },
+        },
+      }),
+  );
   await page.route("**/api/approvals?**", (route) =>
     route.fulfill({ json: { items: [] } }),
   );
@@ -349,7 +360,7 @@ test("password reset requests a generic verified-channel delivery without exposi
       new URL(response.url()).pathname === "/api/auth/password-reset/request" &&
       response.request().method() === "POST",
   );
-  await page.getByRole("button", { name: "发送重置链接" }).click();
+  await page.getByRole("button", { name: "提交重置申请" }).click();
   expect((await deliveryResponse).status()).toBe(202);
   await expect(page.getByRole("status")).toHaveText(
     "若该邮箱或手机号对应有效账号，重置链接将通过已验证渠道发送。",
@@ -747,6 +758,211 @@ test("manual work recording persists primary and auxiliary project-node associat
     page.getByRole("button", { name: "保存真实工时草稿" }),
   ).toBeEnabled();
   await page.getByRole("button", { name: "保存真实工时草稿" }).click();
+});
+
+test("evidence uploads arbitrary file formats one by one and completes every selected file", async ({
+  page,
+}) => {
+  await mockAuthenticatedWorkspace(page);
+  const sessionId = "00000000-0000-4000-8000-000000000091";
+  const startedAt = new Date();
+  startedAt.setHours(9, 0, 0, 0);
+  const completedAttachmentIds: string[] = [];
+  const uploadIntents: Array<Record<string, unknown>> = [];
+  const session = {
+    id: sessionId,
+    startAt: startedAt.toISOString(),
+    endAt: new Date(startedAt.getTime() + 60 * 60_000).toISOString(),
+    timezone: "Asia/Shanghai",
+    netSeconds: 3600,
+    content: "多格式证据验收",
+    result: "",
+    blockers: "",
+    nextStep: "",
+    parallelWork: false,
+    primaryProjectNodeId: null,
+    projectLinks: [],
+    source: "manual",
+    recordKind: "fact",
+    submissionStatus: "draft",
+    approvalStatus: "not_requested",
+    version: 1,
+    visibility: "management_only",
+    breaks: [],
+  };
+  await page.route("**/api/work-sessions?**", (route) =>
+    route.fulfill({ json: { items: [session], nextCursor: null } }),
+  );
+  await page.route("**/api/evidence/capabilities", (route) =>
+    route.fulfill({
+      json: {
+        fileUploads: {
+          available: true,
+          maxBytes: 100 * 1024 * 1024,
+          acceptsArbitraryFormats: true,
+        },
+        references: { url: true, text: true },
+      },
+    }),
+  );
+  await page.route(`**/api/work-sessions/${sessionId}/attachments`, (route) =>
+    route.fulfill({ json: { items: [] } }),
+  );
+  await page.route(
+    `**/api/work-sessions/${sessionId}/attachments/upload-intent`,
+    async (route) => {
+      const input = route.request().postDataJSON() as Record<string, unknown>;
+      uploadIntents.push(input);
+      const id = `00000000-0000-4000-8000-${String(uploadIntents.length).padStart(12, "0")}`;
+      await route.fulfill({
+        status: 201,
+        json: {
+          attachment: { id },
+          uploadUrl: `https://object-storage.example.test/evidence/${id}`,
+          requiredHeaders: {
+            "content-type": "application/octet-stream",
+            "x-amz-checksum-sha256": "dGVzdC1jaGVja3N1bQ==",
+            "x-amz-meta-sha256": "a".repeat(64),
+            "x-amz-meta-declared-mime":
+              uploadIntents.at(-1)?.mimeType as string,
+          },
+        },
+      });
+    },
+  );
+  await page.route("https://object-storage.example.test/**", async (route) => {
+    expect(route.request().method()).toBe("PUT");
+    expect(route.request().headers()["content-type"]).toBe(
+      "application/octet-stream",
+    );
+    expect(route.request().headers()["x-amz-checksum-sha256"]).toBeTruthy();
+    expect(route.request().headers()["x-amz-meta-sha256"]).toMatch(
+      /^[a-f0-9]{64}$/,
+    );
+    expect(route.request().headers()["x-amz-meta-declared-mime"]).toBeTruthy();
+    await route.fulfill({
+      status: 200,
+      headers: { "access-control-allow-origin": "*" },
+    });
+  });
+  await page.route("**/api/attachments/*/complete", async (route) => {
+    completedAttachmentIds.push(route.request().url().split("/").at(-2)!);
+    await route.fulfill({ json: { attachment: { id: completedAttachmentIds.at(-1) } } });
+  });
+
+  await page.goto("/login");
+  await page.getByLabel("邮箱或手机号").fill("owner@example.test");
+  await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+  await page.goto("/work");
+  await page.getByRole("button", { name: "证据" }).click();
+  await page.getByLabel("选择工作证据文件").setInputFiles([
+    {
+      name: "现场采集.tracebundle",
+      mimeType: "",
+      buffer: Buffer.from("opaque trace evidence"),
+    },
+    {
+      name: "专项记录.acmeproof",
+      mimeType: "application/x-acme-work-proof",
+      buffer: Buffer.from("custom work evidence"),
+    },
+  ]);
+  await expect(page.getByText("现场采集.tracebundle", { exact: true })).toBeVisible();
+  await expect(page.getByText("专项记录.acmeproof", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "上传队列" }).click();
+  await expect.poll(() => completedAttachmentIds.length).toBe(2);
+  expect(uploadIntents).toHaveLength(2);
+  expect(uploadIntents[0]).toMatchObject({
+    originalName: "现场采集.tracebundle",
+    mimeType: "application/octet-stream",
+  });
+  expect(uploadIntents[1]).toMatchObject({
+    originalName: "专项记录.acmeproof",
+    mimeType: "application/x-acme-work-proof",
+  });
+  await expect(
+    page.getByText(/现场采集\.tracebundle.*已完成/),
+  ).toBeVisible();
+  await expect(
+    page.getByText(/专项记录\.acmeproof.*已完成/),
+  ).toBeVisible();
+});
+
+test("evidence keeps text references usable when private object storage is not configured", async ({
+  page,
+}) => {
+  await mockAuthenticatedWorkspace(page);
+  const sessionId = "00000000-0000-4000-8000-000000000092";
+  const startedAt = new Date();
+  startedAt.setHours(10, 0, 0, 0);
+  const session = {
+    id: sessionId,
+    startAt: startedAt.toISOString(),
+    endAt: new Date(startedAt.getTime() + 30 * 60_000).toISOString(),
+    timezone: "Asia/Shanghai",
+    netSeconds: 1800,
+    content: "无对象存储时的文字证据",
+    result: "",
+    blockers: "",
+    nextStep: "",
+    parallelWork: false,
+    primaryProjectNodeId: null,
+    projectLinks: [],
+    source: "manual",
+    recordKind: "fact",
+    submissionStatus: "draft",
+    approvalStatus: "not_requested",
+    version: 1,
+    visibility: "management_only",
+    breaks: [],
+  };
+  let textReferenceSaved = false;
+  await page.route("**/api/work-sessions?**", (route) =>
+    route.fulfill({ json: { items: [session], nextCursor: null } }),
+  );
+  await page.route("**/api/evidence/capabilities", (route) =>
+    route.fulfill({
+      json: {
+        fileUploads: {
+          available: false,
+          maxBytes: 100 * 1024 * 1024,
+          acceptsArbitraryFormats: true,
+        },
+        references: { url: true, text: true },
+      },
+    }),
+  );
+  await page.route(`**/api/work-sessions/${sessionId}/attachments`, (route) =>
+    route.fulfill({ json: { items: [] } }),
+  );
+  await page.route(
+    `**/api/work-sessions/${sessionId}/attachments/reference`,
+    async (route) => {
+      expect(route.request().postDataJSON()).toMatchObject({
+        kind: "text",
+        textContent: "会议纪要：已向客户演示并记录反馈。",
+      });
+      textReferenceSaved = true;
+      await route.fulfill({ status: 201, json: { attachment: { id: "text-proof" } } });
+    },
+  );
+
+  await page.goto("/login");
+  await page.getByLabel("邮箱或手机号").fill("owner@example.test");
+  await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+  await page.goto("/work");
+  await page.getByRole("button", { name: "证据" }).click();
+  await expect(
+    page.getByText(/系统不会假装上传成功，也不会把文件写进 Render 临时磁盘/),
+  ).toBeVisible();
+  await expect(page.getByLabel("选择工作证据文件")).toHaveCount(0);
+  await page
+    .getByPlaceholder("粘贴简短文字证据、会议纪要、命令输出或说明…")
+    .fill("会议纪要：已向客户演示并记录反馈。");
+  await page.getByRole("button", { name: "保存文字" }).click();
+  await expect.poll(() => textReferenceSaved).toBe(true);
 });
 
 test("future plan uses the isolated cloud-plan endpoint", async ({ page }) => {
@@ -1604,6 +1820,12 @@ test("an owner can white-list both contacts and copy a manual one-time invitatio
   await page.getByRole("button", { name: "登录", exact: true }).click();
   await page.goto("/organization");
   await page.getByText("添加成员并生成加入链接").click();
+  await expect(
+    page.getByRole("option", { name: "通过邮件自动投递（尚未配置）" }),
+  ).toBeDisabled();
+  await expect(
+    page.getByText("邮件和短信均未配置；默认手工链接可立即使用，不会尝试伪造投递。"),
+  ).toBeVisible();
   await page.getByPlaceholder("姓名").fill("新成员");
   await page.getByRole("button", { name: "加入白名单并生成链接" }).click();
   await expect(

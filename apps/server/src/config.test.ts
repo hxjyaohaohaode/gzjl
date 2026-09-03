@@ -22,6 +22,12 @@ describe("production public URLs", () => {
     ).toBe(86_400);
   });
 
+  it("uses a bounded signed-upload capability lifetime by default", () => {
+    expect(loadServerConfig(productionEnvironment).SIGNED_URL_TTL_SECONDS).toBe(
+      900,
+    );
+  });
+
   it("accepts matching HTTPS browser URLs", () => {
     expect(loadServerConfig(productionEnvironment).PUBLIC_APP_URL).toBe(
       "https://app.example.test",
@@ -42,6 +48,12 @@ describe("production public URLs", () => {
       loadServerConfig({
         ...productionEnvironment,
         ZHIPU_API_BASE_URL: "https://key:secret@provider.example.test/v1",
+      }),
+    ).toThrow();
+    expect(() =>
+      loadServerConfig({
+        ...productionEnvironment,
+        S3_BROWSER_ORIGIN: "https://storage.example.test/private-bucket",
       }),
     ).toThrow();
   });

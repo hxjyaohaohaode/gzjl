@@ -29,6 +29,7 @@ const config: ServerConfig = {
   AI_MAX_RETRIES: 3,
   S3_REGION: "auto",
   S3_FORCE_PATH_STYLE: false,
+  SIGNED_URL_TTL_SECONDS: 900,
   ATTACHMENT_MAX_BYTES: 20 * 1024 * 1024,
   SMTP_PORT: 587,
   SMTP_SECURE: false,
@@ -87,6 +88,7 @@ describe("service probes", () => {
         NODE_ENV: "production",
         WEB_ORIGIN: "https://app.example.test",
         PUBLIC_APP_URL: "https://app.example.test",
+        S3_BROWSER_ORIGIN: "https://private-evidence.storage.example.test",
         WEB_DIST_DIR: webRoot,
       },
       readiness: { check: async () => undefined },
@@ -131,6 +133,9 @@ describe("service probes", () => {
       expect(embeddedLogin.statusCode).toBe(200);
       expect(missingAsset.statusCode).toBe(404);
       expect(missingApi.statusCode).toBe(404);
+      expect(root.headers["content-security-policy"]).toContain(
+        "connect-src 'self' https://private-evidence.storage.example.test",
+      );
       expect(setup.body).toContain("Workbench");
       expect(embeddedLogin.body).toContain("Workbench");
     } finally {

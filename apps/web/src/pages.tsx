@@ -1793,7 +1793,7 @@ export function PasswordResetRequestPage() {
   return (
     <AuthFrame
       title="重置密码"
-      description="输入组织中登记的邮箱或手机号。无论该账号是否存在，系统都不会在此页面泄露账号状态。"
+      description="输入组织中登记的邮箱或手机号。无论该账号是否存在，系统都不会在此页面泄露账号状态；若组织已启用对应的真实投递渠道，链接会安全发送到已验证联系方式。"
     >
       <form
         className="space-y-4"
@@ -1824,12 +1824,15 @@ export function PasswordResetRequestPage() {
             {requestReset.data.message}
           </p>
         ) : null}
+        <p className="rounded-xl bg-[var(--surface-subtle)] px-3 py-2 text-xs leading-5 text-[var(--text-muted)]">
+          若公司未启用自动邮件或短信，请联系唯一 Owner。出于账号安全，公开找回页面不会直接显示重置链接；Owner 可在组织成员详情完成二次验证后生成一次性手工链接并私下交付。
+        </p>
         <Button
           className="w-full"
           disabled={requestReset.isPending}
           type="submit"
         >
-          {requestReset.isPending ? "正在提交…" : "发送重置链接"}
+          {requestReset.isPending ? "正在提交…" : "提交重置申请"}
         </Button>
         <p className="text-center text-sm">
           <Link
@@ -2466,6 +2469,74 @@ interface EvidenceAttachment {
   note: string | null;
   sha256: string | null;
   version: number;
+  uploadedAt: string;
+  updatedAt: string;
+}
+
+interface EvidenceCapabilities {
+  fileUploads: {
+    available: boolean;
+    maxBytes: number;
+    acceptsArbitraryFormats: boolean;
+    unavailableReason?: string;
+  };
+  references: { url: boolean; text: boolean };
+}
+
+interface EvidenceUploadIntent {
+  attachment: EvidenceAttachment;
+  uploadUrl: string;
+  requiredHeaders: Record<string, string>;
+}
+
+type EvidenceUploadState =
+  | "queued"
+  | "hashing"
+  | "uploading"
+  | "verifying"
+  | "complete"
+  | "failed";
+
+interface QueuedEvidenceFile {
+  id: string;
+  file: File;
+  state: EvidenceUploadState;
+  attachmentId?: string;
+  error?: string;
+}
+
+interface EvidenceVersion {
+  version: number;
+  sha256: string | null;
+  reason: string | null;
+  replacedBy: string;
+  createdAt: string;
+}
+
+function formatFileSize(sizeBytes: number | null): string {
+  if (sizeBytes === null) return "大小未知";
+  if (sizeBytes < 1024) return `${sizeBytes} B`;
+  if (sizeBytes < 1024 * 1024) return `${(sizeBytes / 1024).toFixed(1)} KB`;
+  if (sizeBytes < 1024 * 1024 * 1024)
+    return `${(sizeBytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(sizeBytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
+function evidenceUploadStateLabel(state: EvidenceUploadState): string {
+  switch (state) {
+    case "queued":
+      return "等待上传";
+    case "hashing":
+      return "正在校验文件";
+    case "uploading":
+      return "正在直传";
+    case "verifying":
+      return "正在核验";
+    case "complete":
+      return "已完成";
+    case "failed":
+      return "需要重试";
+  }
 }
 
 export function HomePage({ me }: { me: Me }) {
@@ -3032,10 +3103,16 @@ function WorkDayTimeline({
 function EvidencePanel({ sessionId }: { sessionId: string }) {
   const queryClient = useQueryClient();
   const [open, setOpen] = useState(false);
-  const [file, setFile] = useState<File | null>(null);
+  const [queuedFiles, setQueuedFiles] = useState<QueuedEvidenceFile[]>([]);
   const [reference, setReference] = useState("");
+  const [textReference, setTextReference] = useState("");
+  const [note, setNote] = useState("");
+  const [visibility, setVisibility] = useState<
+    "private" | "management_only" | "project_visible"
+  >("management_only");
   const [replacementFor, setReplacementFor] = useState<string | null>(null);
   const [replacementReason, setReplacementReason] = useState("");
+  const [versionsFor, setVersionsFor] = useState<string | null>(null);
   const evidence = useQuery({
     queryKey: ["evidence", sessionId],
     queryFn: () =>
@@ -3044,28 +3121,67 @@ function EvidencePanel({ sessionId }: { sessionId: string }) {
       ),
     enabled: open,
   });
+  const capabilities = useQuery({
+    queryKey: ["evidence-capabilities"],
+    queryFn: () => api<EvidenceCapabilities>("/api/evidence/capabilities"),
+    enabled: open,
+  });
+  const versionHistory = useQuery({
+    queryKey: ["evidence-versions", versionsFor],
+    queryFn: () =>
+      api<{ items: EvidenceVersion[] }>(
+        `/api/attachments/${versionsFor!}/versions`,
+      ),
+    enabled: Boolean(versionsFor),
+  });
   const refresh = async () => {
     await queryClient.invalidateQueries({ queryKey: ["evidence", sessionId] });
   };
-  const upload = useMutation({
-    mutationFn: async () => {
-      if (!file) throw new Error("请选择要上传的证据文件。");
-      const bytes = await file.arrayBuffer();
-      const digest = await crypto.subtle.digest("SHA-256", bytes);
-      const sha256 = Array.from(new Uint8Array(digest), (byte) =>
-        byte.toString(16).padStart(2, "0"),
-      ).join("");
-      const fileInput = {
-        originalName: file.name,
-        mimeType: file.type || "text/plain",
-        sizeBytes: file.size,
-        sha256,
-      };
-      const intent = await api<{
-        attachment: EvidenceAttachment;
-        uploadUrl: string;
-        requiredHeaders: Record<string, string>;
-      }>(
+  const updateQueuedFile = (
+    id: string,
+    update: Partial<QueuedEvidenceFile>,
+  ) => {
+    setQueuedFiles((current) =>
+      current.map((item) => (item.id === id ? { ...item, ...update } : item)),
+    );
+  };
+  const uploadOne = async (queued: QueuedEvidenceFile) => {
+    const fileUploads = capabilities.data?.fileUploads;
+    if (!fileUploads?.available) {
+      throw new Error(
+        "文件对象存储尚未配置。链接和文字证据仍可立即保存；请由 Owner 配置私有 S3 兼容存储后再上传文件。",
+      );
+    }
+    if (queued.file.size > fileUploads.maxBytes) {
+      throw new Error(
+        `“${queued.file.name}”超过单件 ${formatFileSize(fileUploads.maxBytes)} 的安全上限。`,
+      );
+    }
+    if (!crypto.subtle) {
+      throw new Error("当前浏览器不支持文件完整性校验，请使用受支持的现代浏览器。 ");
+    }
+    updateQueuedFile(queued.id, { state: "hashing" });
+    const bytes = await queued.file.arrayBuffer();
+    const digest = await crypto.subtle.digest("SHA-256", bytes);
+    const sha256 = Array.from(new Uint8Array(digest), (byte) =>
+      byte.toString(16).padStart(2, "0"),
+    ).join("");
+    const fileInput = {
+      originalName: queued.file.name,
+      // Empty browser types are common for code and specialized artefacts.
+      // The server stores every file as opaque binary for safe download.
+      mimeType: queued.file.type || "application/octet-stream",
+      sizeBytes: queued.file.size,
+      sha256,
+    };
+    let intent: EvidenceUploadIntent;
+    if (queued.attachmentId) {
+      intent = await api<EvidenceUploadIntent>(
+        `/api/attachments/${queued.attachmentId}/upload-url`,
+        { method: "POST" },
+      );
+    } else {
+      intent = await api<EvidenceUploadIntent>(
         replacementFor
           ? `/api/attachments/${replacementFor}/replacement-intent`
           : `/api/work-sessions/${sessionId}/attachments/upload-intent`,
@@ -3074,27 +3190,79 @@ function EvidencePanel({ sessionId }: { sessionId: string }) {
           body: replacementFor
             ? {
                 ...fileInput,
+                note: note.trim() || undefined,
                 reason: replacementReason.trim() || "在工作台替换文件证据",
               }
-            : { ...fileInput, visibility: "management_only" },
+            : {
+                ...fileInput,
+                visibility,
+                note: note.trim() || undefined,
+              },
         },
       );
-      const uploaded = await fetch(intent.uploadUrl, {
-        method: "PUT",
-        headers: intent.requiredHeaders,
-        body: file,
-      });
-      if (!uploaded.ok) throw new Error("文件未能上传到受保护的对象存储。");
-      await api(`/api/attachments/${intent.attachment.id}/complete`, {
-        method: "POST",
-      });
+    }
+    updateQueuedFile(queued.id, {
+      state: "uploading",
+      attachmentId: intent.attachment.id,
+    });
+    const uploaded = await fetch(intent.uploadUrl, {
+      method: "PUT",
+      headers: intent.requiredHeaders,
+      body: queued.file,
+    });
+    if (!uploaded.ok) {
+      throw new Error(
+        `“${queued.file.name}”未能上传到受保护的对象存储（HTTP ${uploaded.status}）。可直接重试。`,
+      );
+    }
+    updateQueuedFile(queued.id, { state: "verifying" });
+    await api(`/api/attachments/${intent.attachment.id}/complete`, {
+      method: "POST",
+    });
+    updateQueuedFile(queued.id, { state: "complete" });
+  };
+  const upload = useMutation({
+    mutationFn: async (onlyIds?: string[]) => {
+      const candidates = queuedFiles.filter(
+        (item) =>
+          (item.state === "queued" || item.state === "failed") &&
+          (!onlyIds || onlyIds.includes(item.id)),
+      );
+      if (!candidates.length) {
+        throw new Error("请先选择至少一个待上传或待重试的文件。 ");
+      }
+      let succeeded = 0;
+      let failed = 0;
+      // Sequential uploads deliberately keep browser memory/network pressure
+      // bounded. There is no application-level attachment-count cap, and one
+      // failed file never prevents the remaining selected files from running.
+      for (const queued of candidates) {
+        try {
+          await uploadOne(queued);
+          succeeded += 1;
+        } catch (error) {
+          failed += 1;
+          updateQueuedFile(queued.id, {
+            state: "failed",
+            error:
+              error instanceof Error ? error.message : "文件上传失败，请重试。",
+          });
+        }
+      }
+      if (failed) {
+        throw new Error(
+          `${succeeded} 个文件已完成，${failed} 个文件未完成。失败项可单独或批量重试，不会重复创建证据。`,
+        );
+      }
+      return { succeeded };
     },
-    onSuccess: async () => {
-      setFile(null);
-      setReplacementFor(null);
-      setReplacementReason("");
-      await refresh();
+    onSuccess: () => {
+      if (replacementFor) {
+        setReplacementFor(null);
+        setReplacementReason("");
+      }
     },
+    onSettled: refresh,
   });
   const addUrl = useMutation({
     mutationFn: () =>
@@ -3103,11 +3271,28 @@ function EvidencePanel({ sessionId }: { sessionId: string }) {
         body: {
           kind: "url",
           externalUrl: reference,
-          visibility: "management_only",
+          visibility,
+          note: note.trim() || undefined,
         },
       }),
     onSuccess: async () => {
       setReference("");
+      await refresh();
+    },
+  });
+  const addText = useMutation({
+    mutationFn: () =>
+      api(`/api/work-sessions/${sessionId}/attachments/reference`, {
+        method: "POST",
+        body: {
+          kind: "text",
+          textContent: textReference,
+          visibility,
+          note: note.trim() || undefined,
+        },
+      }),
+    onSuccess: async () => {
+      setTextReference("");
       await refresh();
     },
   });
@@ -3124,9 +3309,11 @@ function EvidencePanel({ sessionId }: { sessionId: string }) {
       }),
     onSuccess: refresh,
   });
+  const fileUploads = capabilities.data?.fileUploads;
   return (
-    <div className="mt-3 rounded-xl border border-[var(--border)] bg-[var(--surface-subtle)] p-3">
+    <div className="mt-3 rounded-2xl bg-[var(--surface-subtle)] p-3">
       <Button
+        aria-expanded={open}
         onClick={() => setOpen((value) => !value)}
         size="compact"
         variant="secondary"
@@ -3137,30 +3324,73 @@ function EvidencePanel({ sessionId }: { sessionId: string }) {
       {open ? (
         <div className="mt-3 space-y-3">
           <p className="text-xs leading-5 text-[var(--text-muted)]">
-            文件直传对象存储后会核验
-            SHA-256；替换会保留不可篡改的版本链，下载强制作为附件处理。仅显示你有权查看的证据。
+            文件逐件直传私有对象存储后会核验 SHA-256；替换会保留版本链，下载始终强制为二进制附件。可一次选择任意多件文件，单件失败不影响其他项；总数量不设应用层上限，但受公司对象存储配额约束。
           </p>
-          <div className="flex flex-col gap-2 sm:flex-row">
-            <input
-              accept="application/pdf,application/json,application/zip,application/gzip,image/*,audio/*,video/*,text/*,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.7z,.rar"
-              className="block min-w-0 flex-1 text-sm"
-              onChange={(event) => setFile(event.target.files?.[0] ?? null)}
-              type="file"
-            />
-            <Button
-              disabled={!file || upload.isPending}
-              onClick={() => upload.mutate()}
-              size="compact"
+          {capabilities.isPending ? (
+            <p className="text-xs text-[var(--text-muted)]">
+              正在确认文件存储能力；链接和文字证据不受影响。
+            </p>
+          ) : fileUploads?.available ? (
+            <>
+              <div className="flex flex-col gap-2 sm:flex-row">
+                <input
+                  aria-label={replacementFor ? "选择替换文件" : "选择工作证据文件"}
+                  className="block min-w-0 flex-1 text-sm"
+                  multiple={!replacementFor}
+                  onChange={(event) => {
+                    const selected = Array.from(event.currentTarget.files ?? []);
+                    if (!selected.length) return;
+                    const files = replacementFor ? selected.slice(0, 1) : selected;
+                    setQueuedFiles((current) =>
+                      replacementFor
+                        ? files.map((file) => ({
+                            id: crypto.randomUUID(),
+                            file,
+                            state: "queued" as const,
+                          }))
+                        : [
+                            ...current,
+                            ...files.map((file) => ({
+                              id: crypto.randomUUID(),
+                              file,
+                              state: "queued" as const,
+                            })),
+                          ],
+                    );
+                    event.currentTarget.value = "";
+                  }}
+                  type="file"
+                />
+                <Button
+                  disabled={
+                    !queuedFiles.some(
+                      (item) => item.state === "queued" || item.state === "failed",
+                    ) || upload.isPending
+                  }
+                  onClick={() => upload.mutate()}
+                  size="compact"
+                >
+                  {upload.isPending
+                    ? "上传中…"
+                    : replacementFor
+                      ? "确认替换"
+                      : "上传队列"}
+                </Button>
+              </div>
+              <p className="text-xs leading-5 text-[var(--text-muted)]">
+                支持文档、图片、音视频、压缩包、代码、日志及其他工作文件；系统把字节安全地作为下载附件保存。单件上限 {formatFileSize(fileUploads.maxBytes)}。
+              </p>
+            </>
+          ) : (
+            <div
+              className="rounded-xl bg-[var(--warning-soft)] px-3 py-2 text-xs leading-5 text-[var(--warning)]"
+              role="status"
             >
-              {upload.isPending
-                ? "上传中…"
-                : replacementFor
-                  ? "确认替换"
-                  : "上传文件"}
-            </Button>
-          </div>
+              {fileUploads?.unavailableReason ?? "文件对象存储尚未配置。"} 因此系统不会假装上传成功，也不会把文件写进 Render 临时磁盘。你现在仍可保存外部链接和文字证据；Owner 配置私有 S3 兼容存储和浏览器直传 origin 后，此处会自动启用批量文件上传。
+            </div>
+          )}
           {replacementFor ? (
-            <div className="flex gap-2">
+            <div className="flex flex-col gap-2 sm:flex-row">
               <input
                 className={fieldClass}
                 maxLength={1000}
@@ -3172,6 +3402,7 @@ function EvidencePanel({ sessionId }: { sessionId: string }) {
                 onClick={() => {
                   setReplacementFor(null);
                   setReplacementReason("");
+                  setQueuedFiles([]);
                 }}
                 size="compact"
                 variant="secondary"
@@ -3180,7 +3411,87 @@ function EvidencePanel({ sessionId }: { sessionId: string }) {
               </Button>
             </div>
           ) : null}
-          <div className="flex gap-2">
+          <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
+            <input
+              className={fieldClass}
+              maxLength={2000}
+              onChange={(event) => setNote(event.target.value)}
+              placeholder="证据备注（可选，适用于本次文件/链接/文字）"
+              value={note}
+            />
+            <select
+              aria-label="证据可见范围"
+              className={fieldClass}
+              onChange={(event) =>
+                setVisibility(
+                  event.target.value as
+                    | "private"
+                    | "management_only"
+                    | "project_visible",
+                )
+              }
+              value={visibility}
+            >
+              <option value="private">仅本人</option>
+              <option value="management_only">管理可见</option>
+              <option value="project_visible">关联项目可见</option>
+            </select>
+          </div>
+          {queuedFiles.length ? (
+            <div className="space-y-1" role="status">
+              {queuedFiles.map((queued) => (
+                <div
+                  className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-[var(--surface)] px-3 py-2 text-xs"
+                  key={queued.id}
+                >
+                  <span className="min-w-0 flex-1 truncate">
+                    <strong>{queued.file.name}</strong> · {formatFileSize(queued.file.size)} · {evidenceUploadStateLabel(queued.state)}
+                    {queued.error ? `：${queued.error}` : ""}
+                  </span>
+                  <span className="flex shrink-0 gap-1">
+                    {queued.state === "failed" ? (
+                      <Button
+                        disabled={upload.isPending}
+                        onClick={() => upload.mutate([queued.id])}
+                        size="compact"
+                        variant="secondary"
+                      >
+                        重试
+                      </Button>
+                    ) : null}
+                    {queued.state === "queued" || queued.state === "failed" ? (
+                      <Button
+                        disabled={upload.isPending}
+                        onClick={() =>
+                          setQueuedFiles((current) =>
+                            current.filter((item) => item.id !== queued.id),
+                          )
+                        }
+                        size="compact"
+                        variant="ghost"
+                      >
+                        移除
+                      </Button>
+                    ) : null}
+                  </span>
+                </div>
+              ))}
+              {queuedFiles.some((item) => item.state === "complete") ? (
+                <Button
+                  onClick={() =>
+                    setQueuedFiles((current) =>
+                      current.filter((item) => item.state !== "complete"),
+                    )
+                  }
+                  size="compact"
+                  variant="ghost"
+                >
+                  清除已完成项
+                </Button>
+              ) : null}
+            </div>
+          ) : null}
+          <div className="flex flex-col gap-2 sm:flex-row">
             <input
               className={fieldClass}
               onChange={(event) => setReference(event.target.value)}
@@ -3189,7 +3500,7 @@ function EvidencePanel({ sessionId }: { sessionId: string }) {
               value={reference}
             />
             <Button
-              disabled={!reference || addUrl.isPending}
+              disabled={!reference.trim() || addUrl.isPending}
               onClick={() => addUrl.mutate()}
               size="compact"
               variant="secondary"
@@ -3197,13 +3508,33 @@ function EvidencePanel({ sessionId }: { sessionId: string }) {
               添加链接
             </Button>
           </div>
+          <div className="flex flex-col gap-2 sm:flex-row">
+            <textarea
+              className={`${textAreaClass} min-h-20`}
+              maxLength={20000}
+              onChange={(event) => setTextReference(event.target.value)}
+              placeholder="粘贴简短文字证据、会议纪要、命令输出或说明…"
+              value={textReference}
+            />
+            <Button
+              disabled={!textReference.trim() || addText.isPending}
+              onClick={() => addText.mutate()}
+              size="compact"
+              variant="secondary"
+            >
+              保存文字
+            </Button>
+          </div>
           <ErrorMessage
             error={
               upload.error ??
               addUrl.error ??
+              addText.error ??
               download.error ??
               remove.error ??
-              evidence.error
+              evidence.error ??
+              capabilities.error ??
+              versionHistory.error
             }
           />
           {evidence.isPending ? (
@@ -3212,67 +3543,119 @@ function EvidencePanel({ sessionId }: { sessionId: string }) {
             <ul className="space-y-2">
               {evidence.data.items.map((item) => (
                 <li
-                  className="flex items-center justify-between gap-3 rounded-lg bg-[var(--surface)] px-3 py-2 text-sm"
+                  className="rounded-xl bg-[var(--surface)] px-3 py-2 text-sm"
                   key={item.id}
                 >
-                  <span className="min-w-0 truncate">
-                    {item.kind === "file"
-                      ? item.originalName
-                      : item.kind === "url"
-                        ? item.externalUrl
-                        : item.textContent?.slice(0, 80)}{" "}
-                    <span className="ml-1 text-xs text-[var(--text-subtle)]">
-                      {item.status} · v{item.version}
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <span className="min-w-0 flex-1">
+                      <strong className="block truncate">
+                        {item.kind === "file"
+                          ? item.originalName
+                          : item.kind === "url"
+                            ? item.externalUrl
+                            : item.textContent?.slice(0, 140)}
+                      </strong>
+                      <span className="mt-1 block text-xs leading-5 text-[var(--text-subtle)]">
+                        {item.kind === "file"
+                          ? `${formatFileSize(item.sizeBytes)} · ${item.mimeType ?? "二进制文件"}`
+                          : item.kind === "text"
+                            ? "文字证据"
+                            : "外部链接"}
+                        {" · "}
+                        {item.visibility === "private"
+                          ? "仅本人"
+                          : item.visibility === "project_visible"
+                            ? "关联项目可见"
+                            : "管理可见"}
+                        {" · "}
+                        {item.status === "available"
+                          ? "已通过核验"
+                          : item.status === "pending_upload"
+                            ? "待完成上传"
+                            : item.status === "quarantined"
+                              ? "已隔离"
+                              : item.status}
+                        {` · v${item.version}`}
+                        {item.note ? ` · ${item.note}` : ""}
+                      </span>
                     </span>
-                  </span>
-                  <span className="flex shrink-0 gap-1">
-                    {item.kind === "file" ? (
-                      <>
-                        <Button
-                          disabled={
-                            download.isPending || item.status !== "available"
-                          }
-                          onClick={() => download.mutate(item.id)}
-                          size="compact"
-                          variant="secondary"
+                    <span className="flex shrink-0 flex-wrap gap-1">
+                      {item.kind === "file" ? (
+                        <>
+                          <Button
+                            disabled={
+                              download.isPending || item.status !== "available"
+                            }
+                            onClick={() => download.mutate(item.id)}
+                            size="compact"
+                            variant="secondary"
+                          >
+                            <FileText size={14} />
+                            下载
+                          </Button>
+                          <Button
+                            onClick={() => {
+                              setReplacementFor(item.id);
+                              setQueuedFiles([]);
+                            }}
+                            size="compact"
+                            variant="secondary"
+                          >
+                            替换
+                          </Button>
+                          <Button
+                            onClick={() =>
+                              setVersionsFor((current) =>
+                                current === item.id ? null : item.id,
+                              )
+                            }
+                            size="compact"
+                            variant="ghost"
+                          >
+                            历史
+                          </Button>
+                        </>
+                      ) : item.kind === "url" && item.externalUrl ? (
+                        <a
+                          aria-label="打开外部证据"
+                          className="inline-flex items-center px-2 text-[var(--accent-strong)]"
+                          href={item.externalUrl}
+                          rel="noreferrer"
+                          target="_blank"
                         >
-                          <FileText size={14} />
-                          下载
-                        </Button>
-                        <Button
-                          onClick={() => {
-                            setReplacementFor(item.id);
-                            setFile(null);
-                          }}
-                          size="compact"
-                          variant="secondary"
-                        >
-                          替换
-                        </Button>
-                      </>
-                    ) : item.kind === "url" && item.externalUrl ? (
-                      <a
-                        aria-label="打开外部证据"
-                        className="text-[var(--accent-strong)]"
-                        href={item.externalUrl}
-                        rel="noreferrer"
-                        target="_blank"
+                          <ExternalLink size={16} />
+                        </a>
+                      ) : null}
+                      <Button
+                        disabled={remove.isPending}
+                        onClick={() => {
+                          if (window.confirm("删除后将保留审计记录，确定继续？"))
+                            remove.mutate(item.id);
+                        }}
+                        size="compact"
+                        variant="ghost"
                       >
-                        <ExternalLink size={16} />
-                      </a>
-                    ) : null}
-                    <Button
-                      disabled={remove.isPending}
-                      onClick={() => {
-                        if (window.confirm("删除后将保留审计记录，确定继续？"))
-                          remove.mutate(item.id);
-                      }}
-                      size="compact"
-                      variant="secondary"
-                    >
-                      删除
-                    </Button>
-                  </span>
+                        删除
+                      </Button>
+                    </span>
+                  </div>
+                  {versionsFor === item.id ? (
+                    <div className="mt-2 rounded-lg bg-[var(--surface-subtle)] px-3 py-2 text-xs text-[var(--text-muted)]">
+                      {versionHistory.isPending ? (
+                        "正在读取版本链…"
+                      ) : versionHistory.data?.items.length ? (
+                        <ul className="space-y-1">
+                          {versionHistory.data.items.map((version) => (
+                            <li key={version.version}>
+                              v{version.version} · {version.reason || "原始版本"} · {new Date(version.createdAt).toLocaleString("zh-CN")}
+                            </li>
+                          ))}
+                        </ul>
+                      ) : (
+                        "当前文件尚无历史版本。"
+                      )}
+                    </div>
+                  ) : null}
                 </li>
               ))}
             </ul>

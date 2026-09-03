@@ -25,6 +25,7 @@ const baseConfig: ServerConfig = {
   AI_MAX_RETRIES: 2,
   S3_REGION: "auto",
   S3_FORCE_PATH_STYLE: false,
+  SIGNED_URL_TTL_SECONDS: 900,
   ATTACHMENT_MAX_BYTES: 20 * 1024 * 1024,
   SMTP_PORT: 587,
   SMTP_SECURE: false,
@@ -64,6 +65,8 @@ describe("credential-delivery configuration", () => {
     expect(() => mailer.assertDeliveryConfigured("phone")).toThrow(
       AuthDeliveryUnavailableError,
     );
+    expect(mailer.isDeliveryConfigured("email")).toBe(false);
+    expect(mailer.isDeliveryConfigured("phone")).toBe(false);
   });
 
   it("accepts complete SMTP or Twilio configuration but rejects half SMTP credentials", () => {
@@ -94,5 +97,12 @@ describe("credential-delivery configuration", () => {
           TWILIO_FROM: "+8613812345678",
         }).assertDeliveryConfigured("phone"),
     ).not.toThrow();
+    expect(
+      new AuthMailer({
+        ...baseConfig,
+        SMTP_HOST: "smtp.example.test",
+        SMTP_FROM: "noreply@example.test",
+      }).isDeliveryConfigured("email"),
+    ).toBe(true);
   });
 });

@@ -98,7 +98,11 @@ export async function buildApp({
             directives: {
               connectSrc: [
                 "'self'",
-                ...(config.S3_ENDPOINT ? [new URL(config.S3_ENDPOINT).origin] : []),
+                // This must be the actual browser-facing signed-PUT origin,
+                // which may differ from a virtual-hosted S3 SDK endpoint.
+                ...(config.S3_BROWSER_ORIGIN
+                  ? [new URL(config.S3_BROWSER_ORIGIN).origin]
+                  : []),
               ],
             },
           },

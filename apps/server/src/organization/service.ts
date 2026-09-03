@@ -29,9 +29,10 @@ import {
   hashPassword,
   normalizeLoginIdentifier,
 } from "../auth/security.js";
-import type {
-  AuthMailer,
-  CredentialDeliveryKind,
+import {
+  AuthDeliveryUnavailableError,
+  type AuthMailer,
+  type CredentialDeliveryKind,
 } from "../auth/mailer.js";
 
 export interface OrganizationActor {
@@ -64,6 +65,14 @@ export class OrganizationService {
     private readonly db: Database,
     private readonly mailer: AuthMailer,
   ) {}
+
+  invitationDeliveryCapabilities() {
+    return {
+      manual: { available: true },
+      email: { available: this.mailer.isDeliveryConfigured("email") },
+      phone: { available: this.mailer.isDeliveryConfigured("phone") },
+    };
+  }
 
   /**
    * Build a reset URL only after AuthService has created a short-lived token
@@ -1766,6 +1775,7 @@ export class OrganizationService {
   }
 
   async deliverInvitation(
+    actor: OrganizationActor,
     invitation: Awaited<ReturnType<OrganizationService["invite"]>>,
     displayName: string,
     deliveryMode: InvitationDeliveryMode,
@@ -1783,13 +1793,47 @@ export class OrganizationService {
         manualLink: this.mailer.invitationUrl(invitation.invitationToken),
       };
     }
-    await this.mailer.sendInvitation({
-      displayName,
-      identifier: invitation.deliveryCredential.normalizedIdentifier,
-      kind: invitation.deliveryCredential.kind,
-      token: invitation.invitationToken,
-      expiresAt: invitation.expiresAt,
-    });
+    try {
+      await this.mailer.sendInvitation({
+        displayName,
+        identifier: invitation.deliveryCredential.normalizedIdentifier,
+        kind: invitation.deliveryCredential.kind,
+        token: invitation.invitationToken,
+        expiresAt: invitation.expiresAt,
+      });
+    } catch (error) {
+      if (!(error instanceof AuthDeliveryUnavailableError)) throw error;
+      // The pending whitelist identity is already durable. Do not strand the
+      // member merely because an external provider timed out or rejected the
+      // send: return the same one-time capability only to this authorized
+      // manager, and make the fallback auditable. It is still safe if the
+      // provider delivered after a timeout because the token is single-use.
+      await this.db.insert(auditLogs).values({
+        organizationId: actor.organizationId,
+        actorMembershipId: actor.membershipId,
+        action: "member.invitation_delivery_fallback",
+        entityType: "org_membership",
+        entityId: invitation.membership.id,
+        after: {
+          requestedMode: deliveryMode,
+          fallbackMode: "manual",
+          credentialKind: invitation.deliveryCredential.kind,
+        },
+        reason: error.message,
+      });
+      return {
+        membership: invitation.membership,
+        delivery: {
+          mode: "manual" as const,
+          expiresAt: invitation.expiresAt,
+          credentialKinds: invitation.credentialKinds,
+          fallbackFrom: deliveryMode,
+        },
+        manualLink: this.mailer.invitationUrl(invitation.invitationToken),
+        deliveryWarning:
+          "自动投递未能确认完成，已改为仅向你显示的一次性手工链接。请复制后通过私密渠道发送。",
+      };
+    }
     return {
       membership: invitation.membership,
       delivery: {
@@ -1897,13 +1941,42 @@ export class OrganizationService {
         manualLink: this.mailer.invitationUrl(result.invitationToken),
       };
     }
-    await this.mailer.sendInvitation({
-      displayName: result.record.user.displayName,
-      identifier: result.credential.normalizedIdentifier,
-      kind: result.credential.kind,
-      token: result.invitationToken,
-      expiresAt: result.expiresAt,
-    });
+    try {
+      await this.mailer.sendInvitation({
+        displayName: result.record.user.displayName,
+        identifier: result.credential.normalizedIdentifier,
+        kind: result.credential.kind,
+        token: result.invitationToken,
+        expiresAt: result.expiresAt,
+      });
+    } catch (error) {
+      if (!(error instanceof AuthDeliveryUnavailableError)) throw error;
+      await this.db.insert(auditLogs).values({
+        organizationId: actor.organizationId,
+        actorMembershipId: actor.membershipId,
+        action: "member.invitation_delivery_fallback",
+        entityType: "org_membership",
+        entityId: membershipId,
+        after: {
+          requestedMode: deliveryMode,
+          fallbackMode: "manual",
+          credentialKind: result.credential.kind,
+        },
+        reason: error.message,
+      });
+      return {
+        membership: result.record.membership,
+        delivery: {
+          mode: "manual" as const,
+          expiresAt: result.expiresAt,
+          credentialKinds: result.credentials.map((credential) => credential.kind),
+          fallbackFrom: deliveryMode,
+        },
+        manualLink: this.mailer.invitationUrl(result.invitationToken),
+        deliveryWarning:
+          "自动投递未能确认完成，已改为仅向你显示的一次性手工链接。请复制后通过私密渠道发送。",
+      };
+    }
     return {
       membership: result.record.membership,
       delivery: {

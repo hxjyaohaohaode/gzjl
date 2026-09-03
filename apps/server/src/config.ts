@@ -45,12 +45,28 @@ const serverConfigSchema = z.object({
    */
   AI_CONFIG_ENCRYPTION_KEY: z.string().min(32).optional(),
   S3_ENDPOINT: z.url().optional(),
+  /**
+   * Exact origin used by the browser's pre-signed direct PUT requests. It is
+   * separate from an SDK endpoint because virtual-hosted S3 URLs can use a
+   * bucket subdomain that differs from the signing endpoint.
+   */
+  S3_BROWSER_ORIGIN: z.url().optional(),
   S3_REGION: z.string().min(1).default("auto"),
   S3_BUCKET: z.string().min(1).optional(),
   S3_ACCESS_KEY_ID: z.string().min(1).optional(),
   S3_SECRET_ACCESS_KEY: z.string().min(1).optional(),
   S3_FORCE_PATH_STYLE: booleanString.default(false),
-  ATTACHMENT_MAX_BYTES: z.coerce.number().int().positive().max(100 * 1024 * 1024).default(20 * 1024 * 1024),
+  SIGNED_URL_TTL_SECONDS: z.coerce.number().int().min(60).max(3_600).default(900),
+  // Single-part presigned S3 PUT supports up to 5 GiB. Deployments may set a
+  // lower organization-wide ceiling for cost and device constraints; the
+  // default is deliberately practical for document, image, audio and short
+  // video evidence while attachment count itself is not capped.
+  ATTACHMENT_MAX_BYTES: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(5 * 1024 * 1024 * 1024)
+    .default(100 * 1024 * 1024),
   SMTP_HOST: z.string().min(1).optional(),
   SMTP_PORT: z.coerce.number().int().min(1).max(65_535).default(587),
   SMTP_SECURE: booleanString.default(false),
@@ -79,6 +95,25 @@ const serverConfigSchema = z.object({
   assertPublicHttps("WEB_ORIGIN");
   assertPublicHttps("PUBLIC_APP_URL");
   assertPublicHttps("ZHIPU_API_BASE_URL");
+  if (value.S3_BROWSER_ORIGIN) {
+    const url = new URL(value.S3_BROWSER_ORIGIN);
+    if (url.protocol !== "https:" || url.username || url.password) {
+      context.addIssue({
+        code: "custom",
+        path: ["S3_BROWSER_ORIGIN"],
+        message:
+          "S3_BROWSER_ORIGIN 在生产环境必须是不含账号信息的 HTTPS origin。",
+      });
+    }
+    if (url.pathname !== "/" || url.search || url.hash) {
+      context.addIssue({
+        code: "custom",
+        path: ["S3_BROWSER_ORIGIN"],
+        message:
+          "S3_BROWSER_ORIGIN 必须只包含预签名直传地址的 origin，不能包含路径、查询参数或 fragment。",
+      });
+    }
+  }
 
   // This deployment serves the PWA and API together. Keeping the trusted
   // CORS/WebSocket origin identical to the URL placed in invitations and

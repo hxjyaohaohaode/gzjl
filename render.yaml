@@ -75,6 +75,13 @@ services:
         value: auto
       - key: S3_FORCE_PATH_STYLE
         value: "false"
+      # The object store remains optional until its own private bucket
+      # credentials are supplied. When it is configured, evidence supports an
+      # arbitrary number of files; this is only the per-file safety ceiling.
+      - key: ATTACHMENT_MAX_BYTES
+        value: "104857600"
+      - key: SIGNED_URL_TTL_SECONDS
+        value: "900"
       - key: SMTP_PORT
         value: "587"
       - key: SMTP_SECURE

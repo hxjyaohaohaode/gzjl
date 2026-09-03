@@ -238,6 +238,11 @@ export async function registerOrganizationRoutes(
     { preHandler: [authenticate, manageMembers] },
     async (request) => service.overview(request.auth!),
   );
+  app.get(
+    "/api/organization/invitation-delivery-capabilities",
+    { preHandler: [authenticate, manageMembers] },
+    async () => service.invitationDeliveryCapabilities(),
+  );
   app.post(
     "/api/organization/units",
     { preHandler: [app.csrfProtection, authenticate, manageOrg] },
@@ -448,6 +453,7 @@ export async function registerOrganizationRoutes(
           .code(201)
           .send(
             await service.deliverInvitation(
+              request.auth!,
               invitation,
               input.displayName,
               input.deliveryMode,
