@@ -404,6 +404,10 @@ test("initial Owner setup submits an optional E.164 phone as pending alongside t
   await page.route("**/api/setup/status", (route) =>
     route.fulfill({ json: { completed: false, setupAvailable: true } }),
   );
+  // The setup page deliberately adopts the browser's IANA time zone. Resolve
+  // it from the same page context instead of making this request-contract test
+  // depend on the machine where Playwright happens to run.
+  let browserTimezone = "Asia/Shanghai";
   await page.route("**/api/setup/initial-owner", async (route) => {
     expect(route.request().headers()["x-setup-token"]).toBe(setupToken);
     expect(route.request().postDataJSON()).toEqual({
@@ -412,7 +416,7 @@ test("initial Owner setup submits an optional E.164 phone as pending alongside t
       email: "owner@example.test",
       phone: "+8613812345678",
       password: "ChangeMe-OnlyForLocalDev-123!",
-      timezone: "Asia/Shanghai",
+      timezone: browserTimezone,
     });
     await route.fulfill({
       status: 201,
@@ -426,6 +430,9 @@ test("initial Owner setup submits an optional E.164 phone as pending alongside t
   });
 
   await page.goto("/setup");
+  browserTimezone = await page.evaluate(
+    () => Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Shanghai",
+  );
   await page.getByLabel("组织名称").fill("示例工作室");
   await page.getByLabel("Owner 姓名").fill("林知夏");
   await page.getByLabel("Owner 邮箱").fill("owner@example.test");

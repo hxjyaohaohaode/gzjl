@@ -2,6 +2,13 @@ import { defineConfig, devices } from "@playwright/test";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 
+// Calendar fixtures are intentionally created relative to "today". Fix both
+// the Playwright worker and browser context to the same organization timezone
+// so a GitHub UTC runner cannot turn a cross-midnight fixture into a different
+// local calendar date than a developer machine in Shanghai.
+const e2eTimezone = "Asia/Shanghai";
+process.env.TZ = e2eTimezone;
+
 // CI always installs the Playwright-pinned browser. On a Windows developer machine,
 // an already-installed Playwright Chromium is a safe fallback when a CDN is blocked.
 const localChromium = process.env.CI || !process.env.LOCALAPPDATA
@@ -23,6 +30,7 @@ export default defineConfig({
   reporter: process.env.CI ? "github" : "list",
   use: {
     baseURL: "http://127.0.0.1:5173",
+    timezoneId: e2eTimezone,
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
   },
