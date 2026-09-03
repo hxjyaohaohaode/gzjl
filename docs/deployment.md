@@ -1,16 +1,27 @@
-# Render 部署
+# Render：一次 Blueprint 创建
 
-仓库根目录的 `render.yaml` 是 Blueprint：创建 PostgreSQL、Web API/PWA 和 Worker，使用同一私有数据库连接；Web 在启动前执行 `pnpm db:migrate`，健康检查为 `/healthz`，自动部署仅在 GitHub checks 通过后触发。Blueprint 的运行时、预部署命令、健康检查和数据库 connection string 引用均遵循 Render 的当前 Blueprint 规范。[Render Blueprint specification](https://render.com/docs/blueprint-spec)
+仓库根目录的 `render.yaml` 会一次创建 PostgreSQL、Web API/PWA 和 Worker。Web 在启动前自动执行 `pnpm db:migrate`，健康检查为 `/healthz`。配置遵循 [Render Blueprint specification](https://render.com/docs/blueprint-spec)。
 
-1. 本地执行 `pnpm check`、`pnpm test:e2e` 和 `git diff --check`；确认 `.env`、用户附件、数据库导出和任何真实个人数据均未被 Git 跟踪。仓库不包含 demo 用户、工时、项目或 AI 报告。
-2. 将经检查的仓库推送到 GitHub 的 `main` 分支，再在 Render 选择 **New + → Blueprint** 并确认 `render.yaml`。
-3. 初次同步时填写 `WEB_ORIGIN`、`PUBLIC_APP_URL`（同一个 Web 的最终 HTTPS origin）、生产 S3 兼容对象存储变量，以及 `SMTP_HOST`/`SMTP_FROM`（需要认证时再填 `SMTP_USER`/`SMTP_PASSWORD`）。生产启动会拒绝 HTTP、含账号信息或两者 origin 不一致的配置；`S3_ENDPOINT` 必须是浏览器可访问的 HTTPS origin；bucket 不可公开。
-4. 生成三个不同的 32+ byte 随机值（例如 `node -e "console.log(require('node:crypto').randomBytes(32).toString('base64url'))"`），分别存入 `SESSION_SECRET`、`SETUP_TOKEN` 和 `AI_CONFIG_ENCRYPTION_KEY`。**API 服务和 Worker 的 `AI_CONFIG_ENCRYPTION_KEY` 必须完全相同**；否则 Worker 无法解密 Owner 保存的组织 AI Key。不要在 GitHub、截图或日志中记录这些值。
-5. 如果要使用组织级 AI，Owner 登录后在 **工作智能 → 组织 AI 配置** 输入供应商的 HTTPS OpenAI-compatible Base URL、模型与 Key；系统强制每日/月度请求上限和输出 token 上限。也可保留部署级 `ZHIPU_API_KEY` 作为未设置组织配置时的回退。智谱 OpenAI-compatible 端点的当前基址为 `https://open.bigmodel.cn/api/paas/v4`，聊天路径为 `/chat/completions`。[官方兼容接口说明](https://docs.bigmodel.cn/cn/guide/develop/openai/introduction)
-6. 如需邮箱邀请/重置，配置真实 SMTP；如需短信，设置 `SMS_PROVIDER=twilio` 与 `TWILIO_ACCOUNT_SID`、`TWILIO_AUTH_TOKEN`、`TWILIO_FROM`。Owner 发起或重发白名单邀请时，未配置通道会明确失败且不会先创建/废弃令牌；公共密码重置端点始终返回同一句通用回执以防枚举账号，并且对明显未配置的通道不会落库重置令牌。两种情况都不能用 mock 代替。先向测试号码发送一次邀请与一次密码重置，验证链接的最终域名和 TLS。
-7. 等 Web 健康检查通过后，用 `SETUP_TOKEN` 仅一次创建 Owner，随后轮换或移除该变量。Owner 建立团队时应通过邮箱或 E.164 手机号创建白名单邀请，不应共享账号。
-8. 在 Render 中配置数据库备份/PITR、告警和服务日志保留；执行一次独立恢复演练，并验证新建/编辑工时、云端计划的跨浏览器同步与到期转换、邀请、AI 任务、附件直传与跨浏览器实时同步。
+## 第一次创建只需四步
 
-数据库和服务采用当前 Compute plan ID，分别为 `0.1c-256mb` 与 `0.5c-512mb`；实际生产容量应按成员数量、并发计时和保留期上调。[Render compute plans](https://render.com/docs/compute-plans)
+1. 将仓库的 `main` 分支连接到 Render，选择 **New + → Blueprint**，确认根目录的 `render.yaml`。
+2. 审核 Render 展示的 `gzjl-hxjyaohaohaode-postgres`、`gzjl-hxjyaohaohaode-web` 和 `gzjl-hxjyaohaohaode-worker` 的区域与价格，随后点击创建。初次创建不需要手填域名、数据库 URL、会话密钥、初始化令牌或 AI 加密密钥：Blueprint 会自动生成或在 Render 内部引用它们。
+3. 等 Web Service 显示 Live 后打开 `https://你的服务.onrender.com/healthz`，确认返回 HTTP 200。
+4. 在 Web Service 的 Environment 页面查看 Render 自动生成的 `SETUP_TOKEN`，访问 `https://你的服务.onrender.com/setup`，用该值创建唯一的首位 Owner。完成后移除或轮换 `SETUP_TOKEN`。
 
-对象存储还必须允许来自 `WEB_ORIGIN` 的受限 CORS `PUT/GET`，并允许 `content-type`、`x-amz-checksum-sha256` 与签名请求头；具体边界见 [security.md](./security.md)。
+Render 的 `RENDER_EXTERNAL_URL` 会自动提供 Web Service 的 `onrender.com` HTTPS 地址；Blueprint 将它用于 `WEB_ORIGIN` 和 `PUBLIC_APP_URL`。Render 也会自动生成 `SESSION_SECRET` 与 API 服务的 `AI_CONFIG_ENCRYPTION_KEY`，Worker 通过 Render 私有引用获得同一把 AI 加密密钥。因此，初次 Blueprint 创建不会要求人工复制密钥。[Render default environment variables](https://render.com/docs/environment-variables)
+
+## 后续按需开启外部能力
+
+系统的核心账号、组织、工时、项目、审批、薪资、审计、实时同步和 Owner 级 AI 配置页面可先上线。下列能力依赖公司自己的第三方账号，初次部署不要求提供它们；准备好后再到 **Render → 对应服务 → Environment** 添加真实值：
+
+| 能力 | 服务 | 变量 |
+| --- | --- | --- |
+| 文件证据上传和下载 | Web | `S3_ENDPOINT`、`S3_BUCKET`、`S3_ACCESS_KEY_ID`、`S3_SECRET_ACCESS_KEY`；保持私有桶和精确域名 CORS |
+| 邮箱邀请和找回密码 | Web | `SMTP_HOST`、`SMTP_USER`、`SMTP_PASSWORD`、`SMTP_FROM` |
+| 短信邀请和找回密码 | Web | `SMS_PROVIDER=twilio`、`TWILIO_ACCOUNT_SID`、`TWILIO_AUTH_TOKEN`、`TWILIO_FROM` |
+| 部署级 AI 回退 | Web 和 Worker | 两边都添加相同的 `ZHIPU_API_KEY` |
+
+没有配置外部服务时，应用会明确告知“尚未配置”，不会伪造文件上传、邮件、短信或 AI 已完成。老板也可以在系统的 **工作智能 → 组织 AI 配置** 中填写组织级 HTTPS OpenAI-compatible Base URL、模型与 Key；密钥只以密文保存在服务端，员工与浏览器不能读取。
+
+以后若绑定自定义域名，应将 `WEB_ORIGIN` 和 `PUBLIC_APP_URL` 改为该域名的同一 HTTPS origin，并在对象存储 CORS 中替换为该精确域名。不要在证书生效前修改它们。

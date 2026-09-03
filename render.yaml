@@ -1,5 +1,5 @@
 databases:
-  - name: workbench-postgres
+  - name: gzjl-hxjyaohaohaode-postgres
     databaseName: workbench
     user: workbench
     plan: 0.1c-256mb
@@ -7,7 +7,7 @@ databases:
 
 services:
   - type: web
-    name: work-intelligence-workbench
+    name: gzjl-hxjyaohaohaode-web
     runtime: node
     plan: 0.5c-512mb
     region: singapore
@@ -28,16 +28,16 @@ services:
         value: 0.0.0.0
       - key: DATABASE_URL
         fromDatabase:
-          name: workbench-postgres
+          name: gzjl-hxjyaohaohaode-postgres
           property: connectionString
       - key: DATABASE_SSL
         value: "false"
       - key: AI_ENABLED
         value: "true"
-      # Enter the same generated 32+ byte value on both services. Render cannot
-      # safely generate and share one secret between separate service entries.
+      # Render creates this once. The Worker below receives the same value over
+      # Render's private service reference, so no human has to copy a secret.
       - key: AI_CONFIG_ENCRYPTION_KEY
-        sync: false
+        generateValue: true
       - key: AI_REQUEST_TIMEOUT_MS
         value: "60000"
       - key: AI_MAX_RETRIES
@@ -48,51 +48,41 @@ services:
         generateValue: true
       - key: SETUP_TOKEN
         generateValue: true
+      # Self-reference Render's auto-assigned public HTTPS URL. This keeps the
+      # initial Blueprint creation free of manual domain fields.
       - key: WEB_ORIGIN
-        sync: false
+        fromService:
+          name: gzjl-hxjyaohaohaode-web
+          type: web
+          envVarKey: RENDER_EXTERNAL_URL
       - key: PUBLIC_APP_URL
-        sync: false
-      - key: S3_ENDPOINT
-        sync: false
+        fromService:
+          name: gzjl-hxjyaohaohaode-web
+          type: web
+          envVarKey: RENDER_EXTERNAL_URL
+      # Optional integrations deliberately have no sync:false placeholder.
+      # A first deployment therefore needs no third-party credentials. Add
+      # these values later in Render > Web service > Environment when the
+      # organization is ready to enable file uploads, email, SMS, or fallback
+      # AI. The application reports an unconfigured integration explicitly;
+      # it never pretends a file, message, or AI answer was delivered.
       - key: S3_REGION
         value: auto
       - key: S3_FORCE_PATH_STYLE
         value: "false"
-      - key: S3_BUCKET
-        sync: false
-      - key: S3_ACCESS_KEY_ID
-        sync: false
-      - key: S3_SECRET_ACCESS_KEY
-        sync: false
-      - key: SMTP_HOST
-        sync: false
       - key: SMTP_PORT
         value: "587"
       - key: SMTP_SECURE
         value: "false"
-      - key: SMTP_USER
-        sync: false
-      - key: SMTP_PASSWORD
-        sync: false
-      - key: SMTP_FROM
-        sync: false
       - key: SMS_PROVIDER
         value: disabled
-      - key: TWILIO_ACCOUNT_SID
-        sync: false
-      - key: TWILIO_AUTH_TOKEN
-        sync: false
-      - key: TWILIO_FROM
-        sync: false
-      - key: ZHIPU_API_KEY
-        sync: false
       - key: ZHIPU_API_BASE_URL
         value: https://open.bigmodel.cn/api/paas/v4
       - key: ZHIPU_MODEL
         value: glm-4.7-flash
 
   - type: worker
-    name: work-intelligence-worker
+    name: gzjl-hxjyaohaohaode-worker
     runtime: node
     plan: 0.5c-512mb
     region: singapore
@@ -109,7 +99,7 @@ services:
         value: production
       - key: DATABASE_URL
         fromDatabase:
-          name: workbench-postgres
+          name: gzjl-hxjyaohaohaode-postgres
           property: connectionString
       - key: DATABASE_SSL
         value: "false"
@@ -117,13 +107,18 @@ services:
         value: "5"
       - key: AI_ENABLED
         value: "true"
-      # Must exactly match the web/API service value above.
+      # Read the generated API/Web value directly. Do not replace this with a
+      # manually typed secret, otherwise saved organization AI credentials
+      # cannot be decrypted consistently by the Worker.
       - key: AI_CONFIG_ENCRYPTION_KEY
-        sync: false
+        fromService:
+          name: gzjl-hxjyaohaohaode-web
+          type: web
+          envVarKey: AI_CONFIG_ENCRYPTION_KEY
       - key: AI_REQUEST_TIMEOUT_MS
         value: "60000"
-      - key: ZHIPU_API_KEY
-        sync: false
+      - key: AI_MAX_RETRIES
+        value: "2"
       - key: ZHIPU_API_BASE_URL
         value: https://open.bigmodel.cn/api/paas/v4
       - key: ZHIPU_MODEL
