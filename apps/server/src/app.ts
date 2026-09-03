@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { extname, resolve } from "node:path";
 
 import cookie from "@fastify/cookie";
 import cors from "@fastify/cors";
@@ -289,11 +289,16 @@ export async function buildApp({
       maxAge: "1 year",
     });
     app.setNotFoundHandler((request, reply) => {
-      if (
+      const pathname = request.url.split("?", 1)[0] ?? request.url;
+      const isClientRoute =
         request.method === "GET" &&
-        !request.url.startsWith("/api/") &&
-        request.headers.accept?.includes("text/html")
-      ) {
+        !pathname.startsWith("/api/") &&
+        // Existing files are served by @fastify/static before this handler.
+        // Keep a missing JS/CSS/image request as a real 404, but return the
+        // SPA shell for every route-style navigation even when an embedded
+        // browser sends Accept: */* instead of text/html.
+        extname(pathname) === "";
+      if (isClientRoute) {
         return reply.header("cache-control", "no-cache").sendFile("index.html");
       }
       return reply.code(404).send({

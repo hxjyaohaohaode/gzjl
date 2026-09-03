@@ -1508,10 +1508,76 @@ test("an owner sends a phone white-list invitation without receiving its token",
   await page.getByPlaceholder("姓名").fill("新成员");
   await page.getByLabel("白名单手机号").fill("+8613812345678");
   await page.getByPlaceholder("岗位（可选）").fill("");
-  await page.getByLabel("初始访问角色").selectOption(roleId);
+  await expect(page.getByLabel("初始访问角色")).toHaveValue(roleId);
+  await expect(page.getByText("默认已选“成员”")).toBeVisible();
   await page.getByRole("button", { name: "加入白名单并发送" }).click();
   await expect(page.getByRole("status")).toContainText("手机号白名单");
   await expect(page.getByRole("status")).toContainText("管理端不显示任何令牌");
+});
+
+test("white-list invitation never submits a required role select with no assignable role", async ({
+  page,
+}) => {
+  await mockAuthenticatedWorkspace(page);
+  const ownerMembershipId = "00000000-0000-4000-8000-000000000002";
+  await page.route("**/api/organization", (route) =>
+    route.fulfill({
+      json: {
+        organization: {
+          id: "00000000-0000-4000-8000-000000000003",
+          name: "顺势而为",
+          timezone: "Asia/Shanghai",
+        },
+        ownerMembershipId,
+        ownershipTransfer: null,
+        units: [],
+        roles: [
+          {
+            id: "00000000-0000-4000-8000-000000000072",
+            name: "Owner",
+            kind: "owner",
+            description: "唯一组织所有者",
+            isSystem: true,
+          },
+        ],
+        professionalIdentities: [],
+        members: [
+          {
+            membership: {
+              id: ownerMembershipId,
+              status: "active",
+              positionTitle: "组织负责人",
+              orgUnitId: null,
+            },
+            user: { displayName: "林知夏" },
+            positionTitle: "组织负责人",
+            unitName: null,
+            isOwner: true,
+            accessRoles: [],
+            professionalIdentities: [],
+          },
+        ],
+      },
+    }),
+  );
+  await page.route("**/api/projects", (route) =>
+    route.fulfill({ json: { items: [] } }),
+  );
+
+  await page.goto("/login");
+  await page.getByLabel("邮箱或手机号").fill("owner@example.test");
+  await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+  await page.goto("/organization");
+  await page.getByText("添加成员并发送加入链接").click();
+
+  await expect(page.getByLabel("初始访问角色")).toBeDisabled();
+  await expect(
+    page.getByText("正在恢复可邀请角色目录；在目录可用前不会提交缺少访问角色的邀请。"),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "加入白名单并发送" }),
+  ).toBeDisabled();
 });
 
 test("an employee submits a professional identity request from personal security without gaining management access", async ({

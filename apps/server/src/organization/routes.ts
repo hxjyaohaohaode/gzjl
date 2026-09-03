@@ -44,7 +44,10 @@ const inviteBaseSchema = z.object({
   displayName: z.string().trim().min(2).max(80),
   positionTitle: z.string().trim().max(120).optional(),
   orgUnitId: nullableUuid.default(null),
-  roleId: z.uuid(),
+  // A current client always submits the selected role. Keeping this optional
+  // lets a stale client fail safely to the least-privileged Member role after
+  // the server has reconciled the system role catalog.
+  roleId: z.uuid().optional(),
 });
 const inviteSchema = z.discriminatedUnion("kind", [
   inviteBaseSchema.extend({

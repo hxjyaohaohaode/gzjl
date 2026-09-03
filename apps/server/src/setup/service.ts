@@ -12,7 +12,7 @@ import {
   userCredentials,
   users,
 } from "@workbench/db/schema";
-import { permissions } from "@workbench/shared";
+import { permissions, systemAccessRolePresets } from "@workbench/shared";
 
 import {
   hashOpaqueToken,
@@ -136,18 +136,6 @@ export class SetupService {
         .returning({ id: orgMemberships.id });
       if (!membership) throw new Error("Failed to create owner membership");
 
-      const [ownerRole] = await tx
-        .insert(accessRoles)
-        .values({
-          organizationId: organization.id,
-          name: "Owner",
-          kind: "owner",
-          description: "唯一组织所有者，拥有组织级完整权限",
-          isSystem: true,
-        })
-        .returning({ id: accessRoles.id });
-      if (!ownerRole) throw new Error("Failed to create owner role");
-
       await tx
         .insert(permissionDefinitions)
         .values(
@@ -159,15 +147,44 @@ export class SetupService {
           })),
         )
         .onConflictDoNothing();
-      await tx.insert(rolePermissions).values(
-        permissions.map((permissionCode) => ({
-          roleId: ownerRole.id,
-          permissionCode,
-        })),
+
+      const createdRoles: Array<{ id: string; kind: string }> = [];
+      for (const preset of systemAccessRolePresets) {
+        const [role] = await tx
+          .insert(accessRoles)
+          .values({
+            organizationId: organization.id,
+            name: preset.name,
+            kind: preset.kind,
+            description: preset.description,
+            isSystem: true,
+          })
+          .returning({ id: accessRoles.id, kind: accessRoles.kind });
+        if (!role) throw new Error(`Failed to create ${preset.kind} role`);
+        createdRoles.push(role);
+      }
+      const roleIdByKind = new Map(
+        createdRoles.map((role) => [role.kind, role.id]),
       );
+      const ownerRoleId = roleIdByKind.get("owner");
+      if (!ownerRoleId) throw new Error("Failed to create owner role");
+      await tx
+        .insert(rolePermissions)
+        .values(
+          systemAccessRolePresets.flatMap((preset) => {
+            const roleId = roleIdByKind.get(preset.kind);
+            if (!roleId)
+              throw new Error(`Failed to resolve ${preset.kind} role`);
+            return preset.permissions.map((permissionCode) => ({
+              roleId,
+              permissionCode,
+            }));
+          }),
+        )
+        .onConflictDoNothing();
       await tx.insert(memberRoles).values({
         membershipId: membership.id,
-        roleId: ownerRole.id,
+        roleId: ownerRoleId,
         scopeKind: "organization",
         scopeId: null,
         grantedBy: membership.id,

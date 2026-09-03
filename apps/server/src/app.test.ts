@@ -109,11 +109,30 @@ describe("service probes", () => {
         url: "/verify-contact",
         headers: { accept: "text/html" },
       });
+      const embeddedLogin = await app.inject({
+        method: "GET",
+        url: "/login",
+        headers: { accept: "*/*" },
+      });
+      const missingAsset = await app.inject({
+        method: "GET",
+        url: "/assets/not-present.js",
+        headers: { accept: "text/html" },
+      });
+      const missingApi = await app.inject({
+        method: "GET",
+        url: "/api/not-present",
+        headers: { accept: "text/html" },
+      });
 
       expect(root.statusCode).toBe(200);
       expect(setup.statusCode).toBe(200);
       expect(verifyContact.statusCode).toBe(200);
+      expect(embeddedLogin.statusCode).toBe(200);
+      expect(missingAsset.statusCode).toBe(404);
+      expect(missingApi.statusCode).toBe(404);
       expect(setup.body).toContain("Workbench");
+      expect(embeddedLogin.body).toContain("Workbench");
     } finally {
       rmSync(webRoot, { force: true, recursive: true });
     }

@@ -550,6 +550,21 @@ function MemberInspector({
     !mfaStatus.isError &&
     Boolean(ownershipPassword) &&
     (!mfaStatus.data?.enabled || /^\d{6}$/.test(ownershipTotpCode));
+  const hasInvalidRoleScope = grants.some((grant) => {
+    if (grant.scopeKind === "org_unit") {
+      return (
+        !grant.scopeId ||
+        !overview.units.some((unit) => unit.id === grant.scopeId)
+      );
+    }
+    if (grant.scopeKind === "project") {
+      return (
+        !grant.scopeId ||
+        !projects.some((project) => project.id === grant.scopeId)
+      );
+    }
+    return grant.scopeKind === "self" && grant.scopeId !== member.membership.id;
+  });
 
   return (
     <aside
@@ -704,6 +719,14 @@ function MemberInspector({
                             disabled={role.kind === "member"}
                             onChange={(event) => {
                               const scopeKind = event.target.value as ScopeKind;
+                              if (
+                                (scopeKind === "org_unit" &&
+                                  overview.units.length === 0) ||
+                                (scopeKind === "project" &&
+                                  projects.length === 0)
+                              ) {
+                                return;
+                              }
                               updateGrant(role.id, {
                                 scopeKind,
                                 scopeId:
@@ -721,8 +744,22 @@ function MemberInspector({
                             value={grant.scopeKind}
                           >
                             <option value="organization">全组织范围</option>
-                            <option value="org_unit">组织单元范围</option>
-                            <option value="project">项目范围</option>
+                            <option
+                              disabled={overview.units.length === 0}
+                              value="org_unit"
+                            >
+                              {overview.units.length
+                                ? "组织单元范围"
+                                : "组织单元范围（暂无可用单元）"}
+                            </option>
+                            <option
+                              disabled={projects.length === 0}
+                              value="project"
+                            >
+                              {projects.length
+                                ? "项目范围"
+                                : "项目范围（暂无可用项目）"}
+                            </option>
                             <option value="self">仅本人范围</option>
                           </select>
                           {grant.scopeKind === "org_unit" ? (
@@ -765,12 +802,20 @@ function MemberInspector({
                       ) : null}
                     </div>
                   );
-                })}
+              })}
             </div>
           )}{" "}
+          {hasInvalidRoleScope ? (
+            <p
+              className="mt-3 text-xs leading-5 text-[var(--danger)]"
+              role="status"
+            >
+              当前有访问角色缺少有效的组织单元或项目范围。请选择可用范围后再保存，避免产生无法执行的授权。
+            </p>
+          ) : null}
           {!member.isOwner ? (
             <Button
-              disabled={rolesMutation.isPending}
+              disabled={rolesMutation.isPending || hasInvalidRoleScope}
               onClick={() => rolesMutation.mutate()}
               size="compact"
               variant="secondary"
@@ -1195,6 +1240,10 @@ function OrganizationSidebar({
   onSelectMember: (member: OrganizationMember | null) => void;
 }) {
   const queryClient = useQueryClient();
+  const invitableRoles = useMemo(
+    () => overview.roles.filter((role) => role.kind !== "owner"),
+    [overview.roles],
+  );
   const [newUnitName, setNewUnitName] = useState("");
   const [identityName, setIdentityName] = useState("");
   const [identityDescription, setIdentityDescription] = useState("");
@@ -1210,6 +1259,11 @@ function OrganizationSidebar({
     kind: "email" | "phone";
     expiresAt: string;
   } | null>(null);
+  const selectedInviteRole =
+    invitableRoles.find((role) => role.id === invite.roleId) ??
+    invitableRoles.find((role) => role.kind === "member");
+  const effectiveInviteRoleId = selectedInviteRole?.id ?? "";
+  const canSubmitInvite = Boolean(effectiveInviteRoleId);
   const refresh = () =>
     queryClient.invalidateQueries({ queryKey: ["organization"] });
   const createUnit = useMutation({
@@ -1250,7 +1304,7 @@ function OrganizationSidebar({
           kind: invite.kind,
           positionTitle: invite.positionTitle || undefined,
           orgUnitId: invite.orgUnitId || null,
-          roleId: invite.roleId,
+          roleId: effectiveInviteRoleId,
         },
       }),
     onSuccess: async (result) => {
@@ -1494,6 +1548,7 @@ function OrganizationSidebar({
             className="mt-2 grid gap-2"
             onSubmit={(event) => {
               event.preventDefault();
+              if (!canSubmitInvite) return;
               inviteMember.mutate();
             }}
           >
@@ -1561,29 +1616,42 @@ function OrganizationSidebar({
             </select>
             <select
               aria-label="初始访问角色"
+              aria-describedby="initial-access-role-help"
               className={fieldClass}
+              disabled={inviteMember.isPending || invitableRoles.length === 0}
               onChange={(event) =>
                 setInvite({ ...invite, roleId: event.target.value })
               }
-              required
-              value={invite.roleId}
+              required={invitableRoles.length > 0}
+              value={effectiveInviteRoleId}
             >
-              <option value="">选择初始访问角色</option>
-              {overview.roles
-                .filter((role) => role.kind !== "owner")
-                .map((role) => (
-                  <option key={role.id} value={role.id}>
-                    {role.name}
-                  </option>
-                ))}
+              <option value="">
+                {invitableRoles.length
+                  ? "选择初始访问角色"
+                  : "正在同步可邀请角色…"}
+              </option>
+              {invitableRoles.map((role) => (
+                <option key={role.id} value={role.id}>
+                  {role.name}
+                </option>
+              ))}
             </select>
+            <p
+              aria-live="polite"
+              className="text-xs leading-5 text-[var(--text-muted)]"
+              id="initial-access-role-help"
+            >
+              {selectedInviteRole
+                ? `默认已选“${selectedInviteRole.name}”。可在发送前改为其他已配置的访问角色。`
+                : "正在恢复可邀请角色目录；在目录可用前不会提交缺少访问角色的邀请。"}
+            </p>
             <Button
-              disabled={inviteMember.isPending}
+              disabled={inviteMember.isPending || !canSubmitInvite}
               size="compact"
               type="submit"
             >
               <UserRound size={15} />
-              加入白名单并发送
+              {inviteMember.isPending ? "正在发送…" : "加入白名单并发送"}
             </Button>
           </form>
         </details>
@@ -1602,12 +1670,12 @@ function OrganizationSidebar({
             </small>
           </div>
         ) : null}
+        {inviteMember.error ? <ErrorMessage error={inviteMember.error} /> : null}
       </section>
       <ErrorMessage
         error={
           createUnit.error ??
           createIdentity.error ??
-          inviteMember.error ??
           identityRequests.error ??
           reviewIdentityRequest.error
         }

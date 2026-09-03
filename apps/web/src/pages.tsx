@@ -7487,6 +7487,13 @@ export function LegacyOrganizationPage() {
     queryKey: ["organization"],
     queryFn: () => api<OrganizationOverview>("/api/organization"),
   });
+  const invitableRoles = useMemo(
+    () =>
+      (organization.data?.roles ?? []).filter(
+        (role) => role.kind !== "owner",
+      ),
+    [organization.data?.roles],
+  );
   const [unitName, setUnitName] = useState("");
   const [invite, setInvite] = useState({
     displayName: "",
@@ -7499,6 +7506,11 @@ export function LegacyOrganizationPage() {
     kind: "email" | "phone";
     expiresAt: string;
   } | null>(null);
+  const selectedInviteRole =
+    invitableRoles.find((role) => role.id === invite.roleId) ??
+    invitableRoles.find((role) => role.kind === "member");
+  const effectiveInviteRoleId = selectedInviteRole?.id ?? "";
+  const canSubmitInvite = Boolean(effectiveInviteRoleId);
   const createUnit = useMutation({
     mutationFn: () =>
       api("/api/organization/units", {
@@ -7522,7 +7534,7 @@ export function LegacyOrganizationPage() {
           kind: "email",
           positionTitle: invite.positionTitle || undefined,
           orgUnitId: invite.orgUnitId || null,
-          roleId: invite.roleId,
+          roleId: effectiveInviteRoleId,
         },
       }),
     onSuccess: async (data) => {
@@ -7677,6 +7689,7 @@ export function LegacyOrganizationPage() {
                 className="space-y-4"
                 onSubmit={(event) => {
                   event.preventDefault();
+                  if (!canSubmitInvite) return;
                   inviteMember.mutate();
                 }}
               >
@@ -7732,25 +7745,35 @@ export function LegacyOrganizationPage() {
                 <Field label="访问角色">
                   <select
                     className={fieldClass}
+                    disabled={
+                      inviteMember.isPending || invitableRoles.length === 0
+                    }
                     onChange={(event) =>
                       setInvite({ ...invite, roleId: event.target.value })
                     }
-                    required
-                    value={invite.roleId}
+                    required={invitableRoles.length > 0}
+                    value={effectiveInviteRoleId}
                   >
-                    <option value="">请选择</option>
-                    {organization.data.roles
-                      .filter((role) => role.kind !== "owner")
-                      .map((role) => (
-                        <option key={role.id} value={role.id}>
-                          {role.name}
-                        </option>
-                      ))}
+                    <option value="">
+                      {invitableRoles.length
+                        ? "请选择"
+                        : "正在同步可邀请角色…"}
+                    </option>
+                    {invitableRoles.map((role) => (
+                      <option key={role.id} value={role.id}>
+                        {role.name}
+                      </option>
+                    ))}
                   </select>
                 </Field>
+                {!canSubmitInvite ? (
+                  <p className="text-xs leading-5 text-[var(--text-muted)]" role="status">
+                    正在恢复可邀请角色目录；目录可用前不会发送缺少访问角色的邀请。
+                  </p>
+                ) : null}
                 <Button
                   className="w-full"
-                  disabled={inviteMember.isPending}
+                  disabled={inviteMember.isPending || !canSubmitInvite}
                   type="submit"
                 >
                   发送邀请

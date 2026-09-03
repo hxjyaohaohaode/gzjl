@@ -572,6 +572,7 @@ function ProjectTeamPanel({
   const availableCandidates = (candidates.data?.items ?? []).filter(
     (candidate) => !currentMemberIds.has(candidate.membershipId),
   );
+  const hasAvailableCandidates = availableCandidates.length > 0;
 
   return (
     <Card className="project-team-panel">
@@ -670,7 +671,13 @@ function ProjectTeamPanel({
           className="project-team-add-form"
           onSubmit={(event) => {
             event.preventDefault();
-            if (!membershipId) return;
+            if (
+              !membershipId ||
+              !availableCandidates.some(
+                (candidate) => candidate.membershipId === membershipId,
+              )
+            )
+              return;
             saveMember.mutate({
               targetMembershipId: membershipId,
               nextRole: role,
@@ -681,11 +688,18 @@ function ProjectTeamPanel({
           <Field label="加入组织成员">
             <select
               className={fieldClass}
+              disabled={candidates.isPending || !hasAvailableCandidates}
               onChange={(event) => setMembershipId(event.target.value)}
-              required
+              required={hasAvailableCandidates}
               value={membershipId}
             >
-              <option value="">选择成员</option>
+              <option value="">
+                {candidates.isPending
+                  ? "正在读取可加入成员…"
+                  : hasAvailableCandidates
+                    ? "选择成员"
+                    : "暂无可加入成员"}
+              </option>
               {availableCandidates.map((candidate) => (
                 <option key={candidate.membershipId} value={candidate.membershipId}>
                   {candidate.displayName}
@@ -693,6 +707,13 @@ function ProjectTeamPanel({
               ))}
             </select>
           </Field>
+          {!candidates.isPending &&
+          !candidates.isError &&
+          !hasAvailableCandidates ? (
+            <p className="text-xs leading-5 text-[var(--text-muted)]" role="status">
+              当前组织中没有可加入该项目的成员；现有成员已经全部加入，或请先在组织页完成白名单邀请。
+            </p>
+          ) : null}
           <Field label="项目角色">
             <select
               className={fieldClass}
@@ -715,7 +736,9 @@ function ProjectTeamPanel({
             <span>允许同项目成员看到公开工作动态</span>
           </label>
           <Button
-            disabled={saveMember.isPending || !membershipId}
+            disabled={
+              saveMember.isPending || !membershipId || !hasAvailableCandidates
+            }
             size="compact"
             type="submit"
           >

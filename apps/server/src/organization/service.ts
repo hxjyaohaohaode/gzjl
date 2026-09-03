@@ -12,13 +12,16 @@ import {
   orgMemberships,
   orgUnits,
   outboxEvents,
+  permissionDefinitions,
   professionalIdentities,
   projects,
+  rolePermissions,
   sessions,
   userCredentials,
   users,
   verificationTokens,
 } from "@workbench/db/schema";
+import { permissions, systemAccessRolePresets } from "@workbench/shared";
 
 import {
   createOpaqueToken,
@@ -51,7 +54,115 @@ export class OrganizationService {
     private readonly mailer: AuthMailer,
   ) {}
 
+  /**
+   * Organizations created before the system-role catalog existed can contain
+   * only Owner. Owner may never be assigned through an invitation, which used
+   * to leave the invite form with a required select and zero valid options.
+   *
+   * Reconcile this small, immutable catalog idempotently. Custom roles are
+   * retained as-is; existing system roles only receive missing permissions.
+   * The method is called before role-dependent reads and writes so an older
+   * deployed organization repairs itself without a manual database operation.
+   */
+  private async ensureSystemAccessRoles(organizationId: string): Promise<void> {
+    await this.db.transaction(async (tx) => {
+      await tx
+        .insert(permissionDefinitions)
+        .values(
+          permissions.map((code) => ({
+            code,
+            description: code,
+            sensitivity:
+              code.startsWith("payroll") || code === "roles.manage"
+                ? "high"
+                : "normal",
+          })),
+        )
+        .onConflictDoNothing();
+
+      const knownRoles = await tx
+        .select()
+        .from(accessRoles)
+        .where(eq(accessRoles.organizationId, organizationId))
+        .for("update");
+      const roleByKind = new Map(
+        knownRoles.map((role) => [role.kind, role]),
+      );
+      const usedNames = new Set(knownRoles.map((role) => role.name));
+
+      for (const preset of systemAccessRolePresets) {
+        if (roleByKind.has(preset.kind)) continue;
+
+        let created = false;
+        for (let suffix = 1; !created; suffix += 1) {
+          const name =
+            suffix === 1 ? preset.name : `${preset.name} (${suffix})`;
+          if (usedNames.has(name)) continue;
+          const [role] = await tx
+            .insert(accessRoles)
+            .values({
+              organizationId,
+              name,
+              kind: preset.kind,
+              description: preset.description,
+              isSystem: true,
+            })
+            .onConflictDoNothing()
+            .returning();
+          if (role) {
+            roleByKind.set(role.kind, role);
+            usedNames.add(role.name);
+            created = true;
+            continue;
+          }
+
+          // Another request may have created the same role while this request
+          // waited on the unique index. Re-read by kind before trying a safe
+          // alternate name.
+          const [concurrentRole] = await tx
+            .select()
+            .from(accessRoles)
+            .where(
+              and(
+                eq(accessRoles.organizationId, organizationId),
+                eq(accessRoles.kind, preset.kind),
+              ),
+            )
+            .limit(1);
+          if (concurrentRole) {
+            roleByKind.set(concurrentRole.kind, concurrentRole);
+            usedNames.add(concurrentRole.name);
+            created = true;
+          } else {
+            usedNames.add(name);
+          }
+        }
+        if (!roleByKind.has(preset.kind)) {
+          throw new Error(`Unable to reconcile ${preset.kind} system role`);
+        }
+      }
+
+      const permissionGrants = systemAccessRolePresets.flatMap((preset) => {
+        const role = roleByKind.get(preset.kind);
+        // A user-defined role whose kind pre-dates this catalog remains under
+        // that owner's control. Only platform-owned roles are reconciled.
+        if (!role?.isSystem) return [];
+        return preset.permissions.map((permissionCode) => ({
+          roleId: role.id,
+          permissionCode,
+        }));
+      });
+      if (permissionGrants.length) {
+        await tx
+          .insert(rolePermissions)
+          .values(permissionGrants)
+          .onConflictDoNothing();
+      }
+    });
+  }
+
   async overview(actor: OrganizationActor) {
+    await this.ensureSystemAccessRoles(actor.organizationId);
     const [organization] = await this.db
       .select()
       .from(organizations)
@@ -774,6 +885,7 @@ export class OrganizationService {
       scopeId: string | null;
     }>,
   ) {
+    await this.ensureSystemAccessRoles(actor.organizationId);
     if (membershipId === actor.membershipId)
       throw new OrganizationConflictError(
         "为避免误锁定当前会话，请由另一位有管理权限的成员调整自己的访问角色。",
@@ -1444,9 +1556,10 @@ export class OrganizationService {
       kind: CredentialDeliveryKind;
       positionTitle?: string | undefined;
       orgUnitId: string | null;
-      roleId: string;
+      roleId?: string | undefined;
     },
   ) {
+    await this.ensureSystemAccessRoles(actor.organizationId);
     const normalizedIdentifier = normalizeLoginIdentifier(input.identifier);
     const [existing] = await this.db
       .select({ id: userCredentials.id })
@@ -1458,10 +1571,15 @@ export class OrganizationService {
       .select()
       .from(accessRoles)
       .where(
-        and(
-          eq(accessRoles.id, input.roleId),
-          eq(accessRoles.organizationId, actor.organizationId),
-        ),
+        input.roleId
+          ? and(
+              eq(accessRoles.id, input.roleId),
+              eq(accessRoles.organizationId, actor.organizationId),
+            )
+          : and(
+              eq(accessRoles.kind, "member"),
+              eq(accessRoles.organizationId, actor.organizationId),
+            ),
       )
       .limit(1);
     if (!role || role.kind === "owner")
