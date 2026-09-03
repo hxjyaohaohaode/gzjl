@@ -760,9 +760,10 @@ test("manual work recording persists primary and auxiliary project-node associat
   await page.getByRole("button", { name: "保存真实工时草稿" }).click();
 });
 
-test("evidence uploads arbitrary file formats one by one and completes every selected file", async ({
-  page,
-}) => {
+test("evidence uploads arbitrary file formats one by one and completes every selected file", async (
+  { page },
+  testInfo,
+) => {
   await mockAuthenticatedWorkspace(page);
   const sessionId = "00000000-0000-4000-8000-000000000091";
   const startedAt = new Date();
@@ -870,7 +871,24 @@ test("evidence uploads arbitrary file formats one by one and completes every sel
   ]);
   await expect(page.getByText("现场采集.tracebundle", { exact: true })).toBeVisible();
   await expect(page.getByText("专项记录.acmeproof", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "上传队列" }).click();
+  const uploadQueueButton = page.getByRole("button", { name: "上传队列" });
+  if (testInfo.project.name.startsWith("mobile")) {
+    // The bottom navigation is fixed.  A control scrolled into view must keep
+    // a real tap clearance above it instead of merely being present in the
+    // DOM underneath the navigation's pointer target.
+    await uploadQueueButton.scrollIntoViewIfNeeded();
+    const navigationClearance = await uploadQueueButton.evaluate((element) => {
+      const navigation = document.querySelector('[aria-label="移动端主导航"]');
+      if (!navigation) return null;
+      return (
+        navigation.getBoundingClientRect().top -
+        element.getBoundingClientRect().bottom
+      );
+    });
+    expect(navigationClearance).not.toBeNull();
+    expect(navigationClearance!).toBeGreaterThanOrEqual(8);
+  }
+  await uploadQueueButton.click();
   await expect.poll(() => completedAttachmentIds.length).toBe(2);
   expect(uploadIntents).toHaveLength(2);
   expect(uploadIntents[0]).toMatchObject({

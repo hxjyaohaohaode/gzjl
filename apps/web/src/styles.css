@@ -274,8 +274,28 @@ input[type="file"]::file-selector-button {
 }
 
 @media (max-width: 1023px) {
+  html {
+    /*
+     * The mobile navigation is fixed above the viewport edge.  A plain
+     * content bottom-padding only protects the end of a page: when a browser
+     * or keyboard scrolls an intermediate control into view, it may still
+     * land underneath the navigation and become impossible to tap.  Teach
+     * native scroll-into-view (including focus and accessibility navigation)
+     * about that persistent obstruction as well.
+     */
+    scroll-padding-bottom: calc(8.5rem + env(safe-area-inset-bottom));
+  }
+
   main {
-    padding-bottom: calc(6rem + env(safe-area-inset-bottom));
+    padding-bottom: calc(8.5rem + env(safe-area-inset-bottom));
+  }
+
+  /* Keep every interactive control in the routed workspace clear of the
+   * fixed bottom navigation after keyboard focus or programmatic scrolling.
+   * This is deliberately scoped to the main content so the nav items
+   * themselves retain their compact fixed layout. */
+  .app-main :is(button, input, select, textarea, summary, [tabindex]) {
+    scroll-margin-bottom: calc(8.5rem + env(safe-area-inset-bottom));
   }
 }
 
