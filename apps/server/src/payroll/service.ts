@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import { and, desc, eq, gt, inArray, isNull, lt, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import type { Database } from "@workbench/db";
 import {
   auditLogs,
@@ -14,6 +14,8 @@ import {
   payPeriods,
   payslips,
   rateRules,
+  orgMemberships,
+  users,
   workBreaks,
   workSessionProjectLinks,
   workSessions,
@@ -22,7 +24,9 @@ import {
 import {
   addDecimalAmounts,
   calculateHourlyPayroll,
+  localDateKeysForIntervals,
   multiplyDecimalAmount,
+  prorateDecimalAmount,
   type PayableInterval,
   type PayrollRateRule,
 } from "@workbench/shared";
@@ -30,6 +34,42 @@ import {
 export interface PayrollActor {
   organizationId: string;
   membershipId: string;
+}
+
+export type CompensationPlanType =
+  | "hourly"
+  | "daily"
+  | "monthly"
+  | "fixed_period"
+  | "project_based"
+  | "hybrid";
+
+export interface ConfigureCompensationPlanInput {
+  membershipId: string;
+  name: string;
+  type: CompensationPlanType;
+  currency: string;
+  baseAmount: string;
+  effectiveFrom: Date;
+  pendingReviewCountsInEstimate: boolean;
+  fixedAmount?: string | undefined;
+  rules: Array<{
+    type: "weekday" | "weekend" | "holiday" | "night_window" | "overtime";
+    priority: number;
+    multiplier: string;
+    startHour?: number | undefined;
+    endHour?: number | undefined;
+    thresholdSeconds?: number | undefined;
+    holidayDates?: string[] | undefined;
+  }>;
+}
+
+export interface CreatePayPeriodInput {
+  name: string;
+  timezone: string;
+  startsAt: Date;
+  endsAt: Date;
+  cutoffAt: Date;
 }
 
 export class PayrollNotFoundError extends Error {
@@ -48,15 +88,6 @@ export class PayrollConflictError extends Error {
 
 function sha256(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
-}
-
-function localDate(at: Date, timezone: string): string {
-  return new Intl.DateTimeFormat("en-CA", {
-    timeZone: timezone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(at);
 }
 
 function parseRule(row: typeof rateRules.$inferSelect): PayrollRateRule | null {
@@ -136,8 +167,296 @@ function payableIntervals(
   return result;
 }
 
+function clipPayableIntervals(
+  intervals: PayableInterval[],
+  startsAt: Date,
+  endsAt: Date,
+): PayableInterval[] {
+  return intervals.flatMap((interval) => {
+    const startAt = interval.startAt < startsAt ? startsAt : interval.startAt;
+    const endAt = interval.endAt > endsAt ? endsAt : interval.endAt;
+    return endAt > startAt ? [{ ...interval, startAt, endAt }] : [];
+  });
+}
+
 export class PayrollService {
   constructor(private readonly db: Database) {}
+
+  async managementOverview(actor: PayrollActor) {
+    const [members, planRows, periods, runs] = await Promise.all([
+      this.db
+        .select({
+          membershipId: orgMemberships.id,
+          displayName: users.displayName,
+          status: orgMemberships.status,
+        })
+        .from(orgMemberships)
+        .innerJoin(users, eq(users.id, orgMemberships.userId))
+        .where(eq(orgMemberships.organizationId, actor.organizationId))
+        .orderBy(asc(users.displayName)),
+      this.db
+        .select({ plan: compensationPlans, version: compensationPlanVersions })
+        .from(compensationPlans)
+        .innerJoin(
+          compensationPlanVersions,
+          and(
+            eq(compensationPlanVersions.compensationPlanId, compensationPlans.id),
+            eq(compensationPlanVersions.version, compensationPlans.activeVersion),
+          ),
+        )
+        .where(
+          and(
+            eq(compensationPlans.organizationId, actor.organizationId),
+            isNull(compensationPlans.archivedAt),
+          ),
+        )
+        .orderBy(asc(compensationPlans.createdAt)),
+      this.db
+        .select()
+        .from(payPeriods)
+        .where(eq(payPeriods.organizationId, actor.organizationId))
+        .orderBy(desc(payPeriods.startsAt)),
+      this.db
+        .select({ run: payrollRuns, period: payPeriods })
+        .from(payrollRuns)
+        .innerJoin(payPeriods, eq(payPeriods.id, payrollRuns.payPeriodId))
+        .where(eq(payPeriods.organizationId, actor.organizationId))
+        .orderBy(desc(payrollRuns.createdAt)),
+    ]);
+    const activeVersionIds = planRows.map((row) => row.version.id);
+    const activeRuleRows =
+      activeVersionIds.length > 0
+        ? await this.db
+            .select()
+            .from(rateRules)
+            .where(inArray(rateRules.compensationPlanVersionId, activeVersionIds))
+            .orderBy(asc(rateRules.priority))
+        : [];
+    const rulesByVersion = new Map<string, PayrollRateRule[]>();
+    for (const row of activeRuleRows) {
+      const rule = parseRule(row);
+      if (!rule) continue;
+      rulesByVersion.set(row.compensationPlanVersionId, [
+        ...(rulesByVersion.get(row.compensationPlanVersionId) ?? []),
+        rule,
+      ]);
+    }
+    const plansByMember = new Map(
+      planRows.map((row) => [
+        row.plan.membershipId,
+        { ...row, rules: rulesByVersion.get(row.version.id) ?? [] },
+      ] as const),
+    );
+    return {
+      members: members.map((member) => ({
+        ...member,
+        plan: plansByMember.get(member.membershipId) ?? null,
+      })),
+      periods,
+      runs,
+    };
+  }
+
+  async configurePlan(
+    actor: PayrollActor,
+    input: ConfigureCompensationPlanInput,
+  ) {
+    return this.db.transaction(async (tx) => {
+      const [member] = await tx
+        .select({ id: orgMemberships.id, status: orgMemberships.status })
+        .from(orgMemberships)
+        .where(
+          and(
+            eq(orgMemberships.id, input.membershipId),
+            eq(orgMemberships.organizationId, actor.organizationId),
+          ),
+        )
+        .for("update")
+        .limit(1);
+      if (!member || member.status === "invited") {
+        throw new PayrollNotFoundError();
+      }
+
+      const existingPlans = await tx
+        .select()
+        .from(compensationPlans)
+        .where(
+          and(
+            eq(compensationPlans.organizationId, actor.organizationId),
+            eq(compensationPlans.membershipId, input.membershipId),
+            isNull(compensationPlans.archivedAt),
+          ),
+        )
+        .for("update");
+      if (existingPlans.length > 1) {
+        throw new PayrollConflictError(
+          "该成员存在多份未归档薪资方案，请先由管理员清理历史冲突。",
+        );
+      }
+
+      const baseUnit: Record<CompensationPlanType, string> = {
+        hourly: "hour",
+        daily: "day",
+        monthly: "month",
+        fixed_period: "period",
+        project_based: "project",
+        hybrid: "hour",
+      };
+      const versionConfig =
+        input.type === "hybrid" && input.fixedAmount
+          ? { fixedAmount: input.fixedAmount }
+          : {};
+      const existing = existingPlans[0];
+      let plan: typeof compensationPlans.$inferSelect;
+      let versionNumber = 1;
+      let previousVersion: typeof compensationPlanVersions.$inferSelect | undefined;
+
+      if (existing) {
+        [previousVersion] = await tx
+          .select()
+          .from(compensationPlanVersions)
+          .where(
+            and(
+              eq(compensationPlanVersions.compensationPlanId, existing.id),
+              eq(compensationPlanVersions.version, existing.activeVersion),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (!previousVersion) throw new PayrollConflictError("当前薪资方案版本缺失。");
+        if (input.effectiveFrom <= previousVersion.effectiveFrom) {
+          throw new PayrollConflictError(
+            "新版本生效时间必须晚于当前版本；历史错误请通过审计更正流程处理。",
+          );
+        }
+        versionNumber = existing.activeVersion + 1;
+        await tx
+          .update(compensationPlanVersions)
+          .set({ effectiveTo: input.effectiveFrom })
+          .where(eq(compensationPlanVersions.id, previousVersion.id));
+        const [updated] = await tx
+          .update(compensationPlans)
+          .set({
+            name: input.name,
+            type: input.type,
+            currency: input.currency,
+            activeVersion: versionNumber,
+            updatedAt: new Date(),
+          })
+          .where(eq(compensationPlans.id, existing.id))
+          .returning();
+        if (!updated) throw new Error("Failed to update compensation plan");
+        plan = updated;
+      } else {
+        const [created] = await tx
+          .insert(compensationPlans)
+          .values({
+            organizationId: actor.organizationId,
+            membershipId: input.membershipId,
+            name: input.name,
+            type: input.type,
+            currency: input.currency,
+            activeVersion: 1,
+            createdBy: actor.membershipId,
+          })
+          .returning();
+        if (!created) throw new Error("Failed to create compensation plan");
+        plan = created;
+      }
+
+      const [version] = await tx
+        .insert(compensationPlanVersions)
+        .values({
+          compensationPlanId: plan.id,
+          version: versionNumber,
+          type: input.type,
+          baseAmount: input.baseAmount,
+          baseUnit: baseUnit[input.type],
+          config: versionConfig,
+          pendingReviewCountsInEstimate: input.pendingReviewCountsInEstimate,
+          effectiveFrom: input.effectiveFrom,
+          createdBy: actor.membershipId,
+        })
+        .returning();
+      if (!version) throw new Error("Failed to create compensation plan version");
+      if (input.rules.length > 0) {
+        await tx.insert(rateRules).values(
+          input.rules.map((rule) => ({
+            compensationPlanVersionId: version.id,
+            type: rule.type,
+            priority: rule.priority,
+            conditions:
+              rule.type === "night_window"
+                ? { start: `${rule.startHour ?? 22}:00`, end: `${rule.endHour ?? 6}:00` }
+                : rule.type === "overtime"
+                  ? { thresholdSeconds: rule.thresholdSeconds ?? 28_800 }
+                  : rule.type === "holiday"
+                    ? { dates: rule.holidayDates ?? [] }
+                    : {},
+            calculation: { multiplier: rule.multiplier, stack: false },
+          })),
+        );
+      }
+      await tx.insert(auditLogs).values({
+        organizationId: actor.organizationId,
+        actorMembershipId: actor.membershipId,
+        action: existing ? "payroll.plan_version_created" : "payroll.plan_created",
+        entityType: "compensation_plan",
+        entityId: plan.id,
+        before: previousVersion
+          ? {
+              version: previousVersion.version,
+              type: previousVersion.type,
+              baseAmount: previousVersion.baseAmount,
+              effectiveFrom: previousVersion.effectiveFrom,
+              effectiveTo: input.effectiveFrom,
+            }
+          : null,
+        after: {
+          version: version.version,
+          type: version.type,
+          baseAmount: version.baseAmount,
+          effectiveFrom: version.effectiveFrom,
+          ruleCount: input.rules.length,
+        },
+      });
+      return { plan, version };
+    });
+  }
+
+  async createPeriod(actor: PayrollActor, input: CreatePayPeriodInput) {
+    if (input.endsAt <= input.startsAt) {
+      throw new PayrollConflictError("结算周期结束时间必须晚于开始时间。");
+    }
+    const [overlap] = await this.db
+      .select({ id: payPeriods.id })
+      .from(payPeriods)
+      .where(
+        and(
+          eq(payPeriods.organizationId, actor.organizationId),
+          lt(payPeriods.startsAt, input.endsAt),
+          gt(payPeriods.endsAt, input.startsAt),
+        ),
+      )
+      .limit(1);
+    if (overlap) throw new PayrollConflictError("该时间范围与已有薪资周期重叠。");
+    return this.db.transaction(async (tx) => {
+      const [period] = await tx
+        .insert(payPeriods)
+        .values({ organizationId: actor.organizationId, ...input })
+        .returning();
+      if (!period) throw new Error("Failed to create pay period");
+      await tx.insert(auditLogs).values({
+        organizationId: actor.organizationId,
+        actorMembershipId: actor.membershipId,
+        action: "payroll.period_created",
+        entityType: "pay_period",
+        entityId: period.id,
+        after: period,
+      });
+      return period;
+    });
+  }
 
   async calculate(actor: PayrollActor, payPeriodId: string) {
     const [period] = await this.db
@@ -160,10 +479,7 @@ export class PayrollService {
       .from(compensationPlans)
       .innerJoin(
         compensationPlanVersions,
-        and(
-          eq(compensationPlanVersions.compensationPlanId, compensationPlans.id),
-          eq(compensationPlanVersions.version, compensationPlans.activeVersion),
-        ),
+        eq(compensationPlanVersions.compensationPlanId, compensationPlans.id),
       )
       .where(
         and(
@@ -175,6 +491,10 @@ export class PayrollService {
             gt(compensationPlanVersions.effectiveTo, period.startsAt),
           ),
         ),
+      )
+      .orderBy(
+        asc(compensationPlans.membershipId),
+        asc(compensationPlanVersions.effectiveFrom),
       );
     if (planRows.length === 0) throw new PayrollConflictError("当前周期没有生效的薪资方案。")
 
@@ -231,12 +551,42 @@ export class PayrollService {
         ),
       );
 
-    const calculatedItems = planRows.map(({ plan, version }) => {
+    const groupedPlans = new Map<
+      string,
+      {
+        plan: (typeof planRows)[number]["plan"];
+        versions: Array<(typeof planRows)[number]["version"]>;
+      }
+    >();
+    for (const row of planRows) {
+      const group = groupedPlans.get(row.plan.id) ?? {
+        plan: row.plan,
+        versions: [],
+      };
+      group.versions.push(row.version);
+      groupedPlans.set(row.plan.id, group);
+    }
+    const planByMember = new Map<string, string>();
+    for (const { plan } of groupedPlans.values()) {
+      const existingPlanId = planByMember.get(plan.membershipId);
+      if (existingPlanId && existingPlanId !== plan.id) {
+        throw new PayrollConflictError(
+          `成员 ${plan.membershipId} 在当前周期存在多份生效薪资方案。`,
+        );
+      }
+      planByMember.set(plan.membershipId, plan.id);
+    }
+
+    const calculatedItems = [...groupedPlans.values()].map(({ plan, versions }) => {
       const memberSessions = sessions.filter(
         (session) => session.membershipId === plan.membershipId,
       );
-      const intervals = memberSessions.flatMap((session) =>
-        payableIntervals(session, breaksBySession.get(session.id) ?? []),
+      const intervals = clipPayableIntervals(
+        memberSessions.flatMap((session) =>
+          payableIntervals(session, breaksBySession.get(session.id) ?? []),
+        ),
+        period.startsAt,
+        period.endsAt,
       );
       const approvedSeconds = intervals
         .filter((interval) => interval.approvalStatus === "approved")
@@ -253,86 +603,165 @@ export class PayrollService {
           0,
         );
 
-      let grossAmount: string;
+      let grossAmount = "0.000000";
       let estimate = false;
       let needsReview = false;
-      let components: Array<{
+      const components: Array<{
         type: "base" | "weekday" | "weekend" | "holiday" | "night" | "overtime" | "project";
         label: string;
         amount: string;
+        planVersionId: string;
+        planVersion: number;
         quantity?: string;
         unit?: string;
         rate?: string;
         multiplier?: string;
         trace: unknown;
-      }>;
+      }> = [];
+      const orderedVersions = [...versions].sort(
+        (left, right) => left.effectiveFrom.getTime() - right.effectiveFrom.getTime(),
+      );
+      const latestVersion = orderedVersions.at(-1)!;
+      const periodSeconds = Math.floor(
+        (period.endsAt.getTime() - period.startsAt.getTime()) / 1_000,
+      );
 
-      if (version.type === "hourly" || version.type === "hybrid") {
-        const hourly = calculateHourlyPayroll({
-          hourlyRate: version.baseAmount,
-          timezone: period.timezone,
+      for (const version of orderedVersions) {
+        const segmentStart =
+          version.effectiveFrom > period.startsAt
+            ? version.effectiveFrom
+            : period.startsAt;
+        const segmentEnd =
+          version.effectiveTo && version.effectiveTo < period.endsAt
+            ? version.effectiveTo
+            : period.endsAt;
+        if (segmentEnd <= segmentStart) continue;
+        const versionIntervals = clipPayableIntervals(
           intervals,
-          rules: rulesByVersion.get(version.id) ?? [],
-          includePendingAsEstimate: version.pendingReviewCountsInEstimate,
-        });
-        grossAmount = hourly.grossAmount;
-        estimate = hourly.estimate;
-        components = hourly.components.map((component) => ({
-          type: component.type === "night_window" ? "night" : component.type,
-          label: component.label,
-          amount: component.amount,
-          quantity: String(component.seconds),
-          unit: "second",
-          rate: component.hourlyRate,
-          multiplier: component.multiplier,
-          trace: { ...component.trace, sourceIds: component.sourceIds, estimate: component.estimate },
-        }));
-        if (version.type === "hybrid") {
-          const config = version.config as Record<string, unknown>;
-          if (typeof config.fixedAmount === "string") {
-            grossAmount = addDecimalAmounts(grossAmount, config.fixedAmount);
-            components.push({
-              type: "base",
-              label: "混合方案固定部分",
-              amount: config.fixedAmount,
-              quantity: "1",
-              unit: "period",
-              trace: { planVersionId: version.id },
-            });
+          segmentStart,
+          segmentEnd,
+        );
+
+        if (version.type === "hourly" || version.type === "hybrid") {
+          const hourly = calculateHourlyPayroll({
+            hourlyRate: version.baseAmount,
+            timezone: period.timezone,
+            intervals: versionIntervals,
+            rules: rulesByVersion.get(version.id) ?? [],
+            includePendingAsEstimate: version.pendingReviewCountsInEstimate,
+          });
+          grossAmount = addDecimalAmounts(grossAmount, hourly.grossAmount);
+          estimate ||= hourly.estimate;
+          components.push(
+            ...hourly.components.map((component) => ({
+              type: component.type === "night_window" ? "night" as const : component.type,
+              label: component.label,
+              amount: component.amount,
+              planVersionId: version.id,
+              planVersion: version.version,
+              quantity: String(component.seconds),
+              unit: "second",
+              rate: component.hourlyRate,
+              multiplier: component.multiplier,
+              trace: {
+                ...component.trace,
+                sourceIds: component.sourceIds,
+                estimate: component.estimate,
+                effectiveFrom: segmentStart,
+                effectiveTo: segmentEnd,
+              },
+            })),
+          );
+          if (version.type === "hybrid") {
+            const config = version.config as Record<string, unknown>;
+            if (typeof config.fixedAmount === "string") {
+              const segmentSeconds = Math.floor(
+                (segmentEnd.getTime() - segmentStart.getTime()) / 1_000,
+              );
+              const fixedAmount = prorateDecimalAmount(
+                config.fixedAmount,
+                segmentSeconds,
+                periodSeconds,
+              );
+              grossAmount = addDecimalAmounts(grossAmount, fixedAmount);
+              components.push({
+                type: "base",
+                label: "混合方案固定部分（按生效区间折算）",
+                amount: fixedAmount,
+                planVersionId: version.id,
+                planVersion: version.version,
+                quantity: String(segmentSeconds),
+                unit: "period_second",
+                trace: { effectiveFrom: segmentStart, effectiveTo: segmentEnd },
+              });
+            }
           }
-        }
-      } else if (version.type === "daily") {
-        const dates = new Set(
-          intervals
-            .filter(
+        } else if (version.type === "daily") {
+          const dates = localDateKeysForIntervals(
+            versionIntervals.filter(
               (interval) =>
                 interval.approvalStatus === "approved" ||
                 version.pendingReviewCountsInEstimate,
-            )
-            .map((interval) => localDate(interval.startAt, period.timezone)),
-        );
-        grossAmount = multiplyDecimalAmount(version.baseAmount, dates.size);
-        estimate = pendingSeconds > 0 && version.pendingReviewCountsInEstimate;
-        components = [{
-          type: "base",
-          label: "按工作日计薪",
-          amount: grossAmount,
-          quantity: String(dates.size),
-          unit: "day",
-          rate: version.baseAmount,
-          trace: { dates: [...dates] },
-        }];
-      } else {
-        grossAmount = version.baseAmount;
-        needsReview = version.type === "project_based";
-        components = [{
-          type: version.type === "project_based" ? "project" : "base",
-          label: version.type === "monthly" ? "月度固定薪资" : version.type === "fixed_period" ? "周期固定薪资" : "项目制金额",
-          amount: grossAmount,
-          quantity: "1",
-          unit: version.baseUnit,
-          trace: { planVersionId: version.id },
-        }];
+            ),
+            period.timezone,
+          );
+          const amount = multiplyDecimalAmount(version.baseAmount, dates.length);
+          grossAmount = addDecimalAmounts(grossAmount, amount);
+          estimate ||=
+            versionIntervals.some(
+              (interval) => interval.approvalStatus === "pending_review",
+            ) && version.pendingReviewCountsInEstimate;
+          components.push({
+            type: "base",
+            label: "按工作日计薪",
+            amount,
+            planVersionId: version.id,
+            planVersion: version.version,
+            quantity: String(dates.length),
+            unit: "day",
+            rate: version.baseAmount,
+            trace: { dates, effectiveFrom: segmentStart, effectiveTo: segmentEnd },
+          });
+        } else if (version.type === "project_based") {
+          // A project amount is not time-proportional. Only the newest version
+          // in the period is proposed and it always requires human review.
+          if (version.id !== latestVersion.id) continue;
+          grossAmount = addDecimalAmounts(grossAmount, version.baseAmount);
+          needsReview = true;
+          components.push({
+            type: "project",
+            label: "项目制金额（待人工确认项目范围）",
+            amount: version.baseAmount,
+            planVersionId: version.id,
+            planVersion: version.version,
+            quantity: "1",
+            unit: version.baseUnit,
+            trace: { effectiveFrom: segmentStart, effectiveTo: segmentEnd },
+          });
+        } else {
+          const segmentSeconds = Math.floor(
+            (segmentEnd.getTime() - segmentStart.getTime()) / 1_000,
+          );
+          const amount = prorateDecimalAmount(
+            version.baseAmount,
+            segmentSeconds,
+            periodSeconds,
+          );
+          grossAmount = addDecimalAmounts(grossAmount, amount);
+          components.push({
+            type: "base",
+            label:
+              version.type === "monthly"
+                ? "月度固定薪资（按生效区间折算）"
+                : "周期固定薪资（按生效区间折算）",
+            amount,
+            planVersionId: version.id,
+            planVersion: version.version,
+            quantity: String(segmentSeconds),
+            unit: "period_second",
+            trace: { effectiveFrom: segmentStart, effectiveTo: segmentEnd },
+          });
+        }
       }
 
       const memberAdjustments = adjustments.filter(
@@ -344,7 +773,7 @@ export class PayrollService {
       );
       return {
         membershipId: plan.membershipId,
-        planVersionId: version.id,
+        planVersionId: latestVersion.id,
         currency: plan.currency,
         approvedSeconds,
         pendingSeconds,
@@ -426,6 +855,9 @@ export class PayrollService {
               payrollItemId: payrollItem.id,
               type: component.type,
               label: component.label,
+              sourceEntityType: "compensation_plan_version",
+              sourceEntityId: component.planVersionId,
+              sourceVersion: String(component.planVersion),
               quantity: component.quantity,
               unit: component.unit,
               rate: component.rate,

@@ -4,8 +4,10 @@ import {
   createOpaqueToken,
   hashOpaqueToken,
   hashPassword,
+  isE164PhoneIdentifier,
   maskCredentialIdentifier,
   normalizeLoginIdentifier,
+  normalizePhoneIdentifier,
   verifyPassword,
 } from "./security.js";
 
@@ -30,6 +32,11 @@ describe("authentication security", () => {
   it("normalizes email and phone identifiers without conflating credentials", () => {
     expect(normalizeLoginIdentifier(" Owner@Example.TEST ")).toBe("owner@example.test");
     expect(normalizeLoginIdentifier("+86 (138) 0000-0000")).toBe("+8613800000000");
+    expect(normalizeLoginIdentifier("138 0000 0000")).toBe("+8613800000000");
+    expect(normalizeLoginIdentifier("86-138-0000-0000")).toBe("+8613800000000");
+    expect(normalizePhoneIdentifier("0044 7700 900123")).toBe("+447700900123");
+    expect(isE164PhoneIdentifier(normalizePhoneIdentifier("13800000000"))).toBe(true);
+    expect(isE164PhoneIdentifier(normalizePhoneIdentifier("12345"))).toBe(false);
   });
 
   it("only exposes masked recovery identifiers to a signed-in browser", () => {

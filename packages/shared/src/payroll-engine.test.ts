@@ -1,8 +1,44 @@
 import { describe, expect, it } from "vitest";
 
-import { calculateHourlyPayroll } from "./payroll-engine.js";
+import {
+  calculateHourlyPayroll,
+  localDateKeysForIntervals,
+  prorateDecimalAmount,
+} from "./payroll-engine.js";
 
 describe("calculateHourlyPayroll", () => {
+  it("prorates fixed money with deterministic six-decimal rounding", () => {
+    expect(prorateDecimalAmount("10000", 10, 30)).toBe("3333.333333");
+    expect(prorateDecimalAmount("10000", 20, 30)).toBe("6666.666667");
+  });
+
+  it("counts every local work date for a cross-midnight daily plan", () => {
+    expect(
+      localDateKeysForIntervals(
+        [
+          {
+            startAt: new Date("2026-09-04T15:30:00.000Z"),
+            endAt: new Date("2026-09-05T01:30:00.000Z"),
+          },
+        ],
+        "Asia/Shanghai",
+      ),
+    ).toEqual(["2026-09-04", "2026-09-05"]);
+  });
+
+  it("treats interval ends as exclusive at local midnight", () => {
+    expect(
+      localDateKeysForIntervals(
+        [
+          {
+            startAt: new Date("2026-09-04T14:00:00.000Z"),
+            endAt: new Date("2026-09-04T16:00:00.000Z"),
+          },
+        ],
+        "Asia/Shanghai",
+      ),
+    ).toEqual(["2026-09-04"]);
+  });
   it("calculates ordinary approved hourly work with fixed six-decimal precision", () => {
     const result = calculateHourlyPayroll({
       hourlyRate: "100.00",

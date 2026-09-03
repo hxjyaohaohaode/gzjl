@@ -14,7 +14,12 @@ import {
   TotpSetupError,
 } from "./service.js";
 import type { AuthService, CredentialDelivery } from "./service.js";
-import { SESSION_COOKIE_DEV, SESSION_COOKIE_PROD } from "./security.js";
+import {
+  isE164PhoneIdentifier,
+  normalizePhoneIdentifier,
+  SESSION_COOKIE_DEV,
+  SESSION_COOKIE_PROD,
+} from "./security.js";
 
 declare module "fastify" {
   interface FastifyRequest {
@@ -28,6 +33,13 @@ const loginSchema = z.object({
 });
 const passwordResetRequestSchema = z.object({ identifier: z.string().trim().min(3).max(320) });
 const strongPassword = z.string().min(12).max(1_024).regex(/[a-z]/, "密码须包含小写字母。").regex(/[A-Z]/, "密码须包含大写字母。").regex(/\d/, "密码须包含数字。").regex(/[^A-Za-z0-9]/, "密码须包含特殊字符。");
+const phoneIdentifierSchema = z
+  .string()
+  .trim()
+  .transform(normalizePhoneIdentifier)
+  .refine(isE164PhoneIdentifier, {
+    message: "请输入 11 位中国大陆手机号，或带国家区号的国际手机号。",
+  });
 const passwordResetSchema = z.object({ token: z.string().min(32).max(512), password: strongPassword });
 const totpCode = z.string().regex(/^\d{6}$/, "请输入 6 位动态验证码。");
 const totpLoginSchema = z.object({ challengeToken: z.string().min(32).max(512), code: totpCode });
@@ -43,9 +55,7 @@ const credentialBindingSchema = z.discriminatedUnion("kind", [
   }),
   sensitiveCredentialActionSchema.extend({
     kind: z.literal("phone"),
-    identifier: z
-      .string()
-      .regex(/^\+[1-9]\d{7,14}$/, "手机号须使用 E.164 格式，例如 +8613812345678。"),
+    identifier: phoneIdentifierSchema,
   }),
 ]);
 const credentialParams = z.object({ credentialId: z.uuid() });

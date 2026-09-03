@@ -32,6 +32,7 @@ import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { Button, cn } from "@workbench/ui";
 
 import { api, hasGrant, resetCsrfToken, type Me } from "./api.js";
+import type { RealtimeSyncStatus } from "./realtime.js";
 import { AccentPicker } from "./accent-picker.js";
 import { readableForeground, sanitizeAccent } from "./color.js";
 
@@ -255,7 +256,39 @@ function CommandPalette({
   );
 }
 
-export function AppShell({ me }: { me: Me }) {
+const syncStatusPresentation: Record<
+  RealtimeSyncStatus,
+  { compact: string; detailed: string; tone: "positive" | "warning" }
+> = {
+  offline: {
+    compact: "离线",
+    detailed: "离线，恢复后自动同步",
+    tone: "warning",
+  },
+  connecting: {
+    compact: "连接中",
+    detailed: "正在连接同步服务",
+    tone: "warning",
+  },
+  connected: {
+    compact: "已同步",
+    detailed: "数据实时同步中",
+    tone: "positive",
+  },
+  reconnecting: {
+    compact: "重连中",
+    detailed: "同步中断，正在自动恢复",
+    tone: "warning",
+  },
+};
+
+export function AppShell({
+  me,
+  syncStatus,
+}: {
+  me: Me;
+  syncStatus: RealtimeSyncStatus;
+}) {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(
     () => localStorage.getItem("workbench-sidebar-collapsed") === "true",
@@ -339,6 +372,8 @@ export function AppShell({ me }: { me: Me }) {
   });
   const unreadCount =
     notifications.data?.items.filter((item) => !item.readAt).length ?? 0;
+  const displayedSyncStatus = online ? syncStatus : "offline";
+  const syncPresentation = syncStatusPresentation[displayedSyncStatus];
   useEffect(() => {
     const root = document.documentElement;
     root.dataset.theme = theme;
@@ -539,10 +574,12 @@ export function AppShell({ me }: { me: Me }) {
                 <span
                   className={cn(
                     "size-1.5 rounded-full",
-                    online ? "bg-[var(--positive)]" : "bg-[var(--warning)]",
+                    syncPresentation.tone === "positive"
+                      ? "bg-[var(--positive)]"
+                      : "bg-[var(--warning)]",
                   )}
                 />
-                {online ? "网络可用" : "离线队列中"}
+                {syncPresentation.detailed}
               </span>
             </span>
           </div>
@@ -695,10 +732,12 @@ export function AppShell({ me }: { me: Me }) {
               <Zap
                 size={13}
                 className={
-                  online ? "text-[var(--positive)]" : "text-[var(--warning)]"
+                  syncPresentation.tone === "positive"
+                    ? "text-[var(--positive)]"
+                    : "text-[var(--warning)]"
                 }
               />
-              {online ? "网络可用" : "离线"}
+              {syncPresentation.compact}
             </span>
             <Button
               aria-label="快速记录工作"

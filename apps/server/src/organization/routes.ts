@@ -3,6 +3,10 @@ import { z } from "zod";
 
 import { requirePermission } from "../auth/authorization.js";
 import {
+  isE164PhoneIdentifier,
+  normalizePhoneIdentifier,
+} from "../auth/security.js";
+import {
   CredentialConflictError,
   InvalidCredentialsError,
   TotpCodeError,
@@ -41,6 +45,13 @@ const unitPatchSchema = z
 const versionSchema = z.object({
   expectedVersion: z.number().int().positive(),
 });
+const phoneIdentifierSchema = z
+  .string()
+  .trim()
+  .transform(normalizePhoneIdentifier)
+  .refine(isE164PhoneIdentifier, {
+    message: "请输入 11 位中国大陆手机号，或带国家区号的国际手机号。",
+  });
 const inviteBaseSchema = z.object({
   displayName: z.string().trim().min(2).max(80),
   positionTitle: z.string().trim().max(120).optional(),
@@ -53,14 +64,7 @@ const inviteBaseSchema = z.object({
 const manualInviteSchema = inviteBaseSchema
   .extend({
     email: z.string().trim().email().max(320).optional(),
-    phone: z
-      .string()
-      .trim()
-      .regex(
-        /^\+[1-9]\d{7,14}$/,
-        "手机号须使用 E.164 格式，例如 +8613812345678。",
-      )
-      .optional(),
+    phone: phoneIdentifierSchema.optional(),
     deliveryMode: z.enum(["manual", "email", "phone"]).default("manual"),
   })
   .superRefine((input, context) => {
@@ -95,12 +99,7 @@ const legacyInviteSchema = z.discriminatedUnion("kind", [
   }),
   inviteBaseSchema.extend({
     kind: z.literal("phone"),
-    identifier: z
-      .string()
-      .regex(
-        /^\+[1-9]\d{7,14}$/,
-        "手机号须使用 E.164 格式，例如 +8613812345678。",
-      ),
+    identifier: phoneIdentifierSchema,
   }),
 ]);
 const inviteSchema = z

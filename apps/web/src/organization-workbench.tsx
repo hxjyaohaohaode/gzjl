@@ -30,6 +30,7 @@ import {
   Field,
   LoadingBlock,
   PageHeader,
+  PasswordInput,
   textAreaClass,
 } from "./pages.js";
 
@@ -1018,11 +1019,10 @@ function MemberInspector({
                   </select>
                 </Field>
                 <Field label="当前密码（发起转移二次验证）">
-                  <input
+                  <PasswordInput
                     autoComplete="current-password"
-                    className={fieldClass}
+                    inputLabel="当前密码（发起转移二次验证）"
                     onChange={(event) => setOwnershipPassword(event.target.value)}
-                    type="password"
                     value={ownershipPassword}
                   />
                 </Field>
@@ -1085,11 +1085,10 @@ function MemberInspector({
             </p>
             <div className="mt-3 grid gap-3">
               <Field label="当前密码（确认接任二次验证）">
-                <input
+                <PasswordInput
                   autoComplete="current-password"
-                  className={fieldClass}
+                  inputLabel="当前密码（确认接任二次验证）"
                   onChange={(event) => setOwnershipPassword(event.target.value)}
-                  type="password"
                   value={ownershipPassword}
                 />
               </Field>
@@ -1199,11 +1198,10 @@ function MemberInspector({
             </p>
             <div className="mt-3 grid gap-3">
               <Field label="当前 Owner 密码（二次验证）">
-                <input
+                <PasswordInput
                   autoComplete="current-password"
-                  className={fieldClass}
+                  inputLabel="当前 Owner 密码（二次验证）"
                   onChange={(event) => setResetPassword(event.target.value)}
-                  type="password"
                   value={resetPassword}
                 />
               </Field>
@@ -1861,7 +1859,7 @@ function OrganizationSidebar({
                   onChange={(event) =>
                     setInvite({ ...invite, phone: event.target.value })
                   }
-                  placeholder="+8613812345678"
+                  placeholder="13812345678"
                   type="tel"
                   value={invite.phone}
                 />

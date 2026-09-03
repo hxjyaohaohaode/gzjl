@@ -79,6 +79,25 @@ export function multiplyDecimalAmount(value: string, quantity: number): string {
   return formatDecimal(parseDecimal(value) * BigInt(quantity));
 }
 
+export function prorateDecimalAmount(
+  value: string,
+  numerator: number,
+  denominator: number,
+): string {
+  if (
+    !Number.isInteger(numerator) ||
+    !Number.isInteger(denominator) ||
+    numerator < 0 ||
+    denominator <= 0 ||
+    numerator > denominator
+  ) {
+    throw new TypeError("Proration requires integer 0 <= numerator <= denominator");
+  }
+  return formatDecimal(
+    divideRounded(parseDecimal(value) * BigInt(numerator), BigInt(denominator)),
+  );
+}
+
 function divideRounded(numerator: bigint, denominator: bigint): bigint {
   const negative = numerator < 0;
   const absolute = negative ? -numerator : numerator;
@@ -110,6 +129,34 @@ function localParts(at: Date, timezone: string) {
     hour: Number(parts.hour),
     weekday: parts.weekday,
   };
+}
+
+/**
+ * Returns every local calendar date touched by positive, end-exclusive work
+ * intervals. Six-hour sampling is shorter than the shortest civil day, so a
+ * cross-midnight or daylight-saving transition cannot silently collapse into
+ * the start date only.
+ */
+export function localDateKeysForIntervals(
+  intervals: readonly Pick<PayableInterval, "startAt" | "endAt">[],
+  timezone: string,
+): string[] {
+  // Validate the IANA zone even when no payable interval exists.
+  localParts(new Date(0), timezone);
+  const dates = new Set<string>();
+  for (const interval of intervals) {
+    if (interval.endAt <= interval.startAt) {
+      throw new RangeError("Payroll intervals must have a positive duration");
+    }
+    const lastIncludedMs = interval.endAt.getTime() - 1;
+    let cursorMs = interval.startAt.getTime();
+    while (cursorMs <= lastIncludedMs) {
+      dates.add(localParts(new Date(cursorMs), timezone).date);
+      if (cursorMs === lastIncludedMs) break;
+      cursorMs = Math.min(lastIncludedMs, cursorMs + 6 * 60 * 60 * 1_000);
+    }
+  }
+  return [...dates];
 }
 
 function isNight(hour: number, startHour: number, endHour: number): boolean {

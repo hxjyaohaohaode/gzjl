@@ -4,7 +4,11 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 
 import type { ServerConfig } from "../config.js";
-import { hashOpaqueToken } from "../auth/security.js";
+import {
+  hashOpaqueToken,
+  isE164PhoneIdentifier,
+  normalizePhoneIdentifier,
+} from "../auth/security.js";
 import { SetupAlreadyCompletedError, type SetupService } from "./service.js";
 
 const initialOwnerSchema = z.object({
@@ -14,7 +18,10 @@ const initialOwnerSchema = z.object({
   phone: z
     .string()
     .trim()
-    .regex(/^\+[1-9]\d{7,14}$/, "手机号须使用 E.164 格式，例如 +8613812345678。")
+    .transform(normalizePhoneIdentifier)
+    .refine(isE164PhoneIdentifier, {
+      message: "请输入 11 位中国大陆手机号，或带国家区号的国际手机号。",
+    })
     .optional(),
   password: z
     .string()

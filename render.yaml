@@ -75,6 +75,20 @@ services:
         value: auto
       - key: S3_FORCE_PATH_STYLE
         value: "false"
+      # File attachments are a core production capability. On a new Blueprint,
+      # Render asks for these private object-storage values instead of putting
+      # placeholders or secrets in Git. For an existing service, add the same
+      # keys under Web service > Environment, then redeploy.
+      - key: S3_ENDPOINT
+        sync: false
+      - key: S3_BROWSER_ORIGIN
+        sync: false
+      - key: S3_BUCKET
+        sync: false
+      - key: S3_ACCESS_KEY_ID
+        sync: false
+      - key: S3_SECRET_ACCESS_KEY
+        sync: false
       # The object store remains optional until its own private bucket
       # credentials are supplied. When it is configured, evidence supports an
       # arbitrary number of files; this is only the per-file safety ceiling.

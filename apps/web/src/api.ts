@@ -1,5 +1,57 @@
 let csrfToken: string | null = null;
 
+const RETRYABLE_READ_STATUSES = new Set([429, 502, 503, 504]);
+
+function retryDelay(response: Response | null, attempt: number): number {
+  const retryAfter = response?.headers.get("retry-after");
+  if (retryAfter) {
+    const seconds = Number(retryAfter);
+    if (Number.isFinite(seconds)) return Math.min(10_000, Math.max(0, seconds * 1_000));
+    const at = Date.parse(retryAfter);
+    if (Number.isFinite(at)) return Math.min(10_000, Math.max(0, at - Date.now()));
+  }
+  const base = [500, 1_500, 3_500][attempt] ?? 5_000;
+  return base + Math.floor(Math.random() * 350);
+}
+
+async function sleep(ms: number, signal?: AbortSignal | null): Promise<void> {
+  if (signal?.aborted) throw signal.reason;
+  await new Promise<void>((resolve, reject) => {
+    const timer = window.setTimeout(resolve, ms);
+    signal?.addEventListener(
+      "abort",
+      () => {
+        window.clearTimeout(timer);
+        reject(signal.reason);
+      },
+      { once: true },
+    );
+  });
+}
+
+async function fetchReadWithRecovery(
+  path: string,
+  init: RequestInit,
+): Promise<Response> {
+  let lastNetworkError: unknown;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const response = await fetch(path, init);
+      if (!RETRYABLE_READ_STATUSES.has(response.status) || attempt === 2) {
+        return response;
+      }
+      await response.body?.cancel().catch(() => undefined);
+      await sleep(retryDelay(response, attempt), init.signal);
+    } catch (error) {
+      if (init.signal?.aborted) throw error;
+      lastNetworkError = error;
+      if (attempt === 2) throw error;
+      await sleep(retryDelay(null, attempt), init.signal);
+    }
+  }
+  throw lastNetworkError;
+}
+
 export class ApiError extends Error {
   constructor(
     public readonly status: number,
@@ -31,13 +83,19 @@ export async function api<T>(
   const headers = new Headers(options.headers);
   if (writes) headers.set("x-csrf-token", await getCsrfToken());
   if (body !== undefined) headers.set("content-type", "application/json");
-  const response = await fetch(path, {
+  const init: RequestInit = {
     ...requestOptions,
     method,
     headers,
     credentials: "include",
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-  });
+  };
+  // Mutations are never retried automatically because the client cannot know
+  // whether a disconnected response was committed. Safe reads absorb short
+  // Render wake-ups, gateway resets and Retry-After rate-limit windows.
+  const response = writes
+    ? await fetch(path, init)
+    : await fetchReadWithRecovery(path, init);
   if (response.status === 204) return undefined as T;
   const payload = (await response.json().catch(() => ({}))) as Record<string, unknown>;
   if (!response.ok) {

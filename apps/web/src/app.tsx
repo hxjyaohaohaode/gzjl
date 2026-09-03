@@ -113,7 +113,7 @@ export function App() {
       ) && failureCount < 3,
     retryDelay: (attempt) => [1_000, 3_000, 6_000][attempt] ?? 8_000,
   });
-  useRealtimeSync(Boolean(meQuery.data));
+  const syncStatus = useRealtimeSync(Boolean(meQuery.data));
   if (meQuery.isPending)
     return <AppConnectionState retryAttempt={meQuery.failureCount} />;
   if (meQuery.isError)
@@ -138,7 +138,7 @@ export function App() {
       />
       <Route
         path="/reset-password"
-        element={me ? <Navigate replace to="/" /> : <PasswordResetPage />}
+        element={<PasswordResetPage currentSession={me} />}
       />
       <Route path="/verify-contact" element={<VerifyContactPage />} />
       <Route
@@ -147,10 +147,16 @@ export function App() {
       />
       <Route
         path="/invite"
-        element={me ? <Navigate replace to="/" /> : <InvitationPage />}
+        element={<InvitationPage currentSession={me} />}
       />
       <Route
-        element={me ? <AppShell me={me} /> : <Navigate replace to="/login" />}
+        element={
+          me ? (
+            <AppShell me={me} syncStatus={syncStatus} />
+          ) : (
+            <Navigate replace to="/login" />
+          )
+        }
       >
         <Route index element={<HomePage me={me!} />} />
         <Route path="work" element={<WorkPage />} />
@@ -162,7 +168,7 @@ export function App() {
         />
         <Route path="team" element={<TeamPage />} />
         <Route path="analytics" element={<AnalyticsPage me={me!} />} />
-        <Route path="payroll" element={<PayrollPage />} />
+        <Route path="payroll" element={<PayrollPage me={me!} />} />
         <Route path="ai" element={<AiPage me={me!} />} />
         <Route path="approvals" element={<ApprovalsPage />} />
         <Route path="organization" element={<OrganizationPage me={me!} />} />

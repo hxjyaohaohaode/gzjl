@@ -1,9 +1,15 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 
 interface RealtimeMessage {
   type?: unknown;
 }
+
+export type RealtimeSyncStatus =
+  | "offline"
+  | "connecting"
+  | "connected"
+  | "reconnecting";
 
 function websocketUrl(): string {
   const scheme = window.location.protocol === "https:" ? "wss:" : "ws:";
@@ -26,23 +32,46 @@ function parseMessage(value: unknown): RealtimeMessage | null {
  * a signal merely invalidates React Query and each endpoint re-applies its
  * server-side permission scope on refetch.
  */
-export function useRealtimeSync(enabled: boolean): void {
+export function useRealtimeSync(enabled: boolean): RealtimeSyncStatus {
   const queryClient = useQueryClient();
+  const [status, setStatus] = useState<RealtimeSyncStatus>(() =>
+    navigator.onLine && typeof WebSocket !== "undefined"
+      ? "connecting"
+      : "offline",
+  );
 
   useEffect(() => {
     if (!enabled || typeof WebSocket === "undefined") return;
 
     let disposed = false;
     let reconnectTimer: number | undefined;
+    let invalidateTimer: number | undefined;
     let reconnectAttempt = 0;
     let socket: WebSocket | undefined;
 
     const invalidate = () => {
-      void queryClient.invalidateQueries();
+      if (invalidateTimer !== undefined) return;
+      invalidateTimer = window.setTimeout(() => {
+        invalidateTimer = undefined;
+        // Refetch only data observed by the current screen. Inactive screens
+        // will fetch on navigation, so one organization event cannot fan out
+        // into dozens of requests in every open tab.
+        void queryClient.invalidateQueries({
+          type: "active",
+          refetchType: "active",
+        });
+      }, 600);
     };
     const scheduleReconnect = () => {
       if (disposed || reconnectTimer !== undefined) return;
-      const delay = Math.min(30_000, 1_000 * 2 ** reconnectAttempt);
+      if (!navigator.onLine) {
+        setStatus("offline");
+        return;
+      }
+      setStatus("reconnecting");
+      const delay =
+        Math.min(30_000, 1_000 * 2 ** reconnectAttempt) +
+        Math.floor(Math.random() * 500);
       reconnectAttempt = Math.min(reconnectAttempt + 1, 5);
       reconnectTimer = window.setTimeout(() => {
         reconnectTimer = undefined;
@@ -50,6 +79,10 @@ export function useRealtimeSync(enabled: boolean): void {
       }, delay);
     };
     const connect = () => {
+      if (!navigator.onLine) {
+        setStatus("offline");
+        return;
+      }
       if (
         disposed ||
         socket?.readyState === WebSocket.OPEN ||
@@ -57,6 +90,7 @@ export function useRealtimeSync(enabled: boolean): void {
       ) {
         return;
       }
+      setStatus(reconnectAttempt ? "reconnecting" : "connecting");
       try {
         socket = new WebSocket(websocketUrl());
       } catch {
@@ -65,6 +99,10 @@ export function useRealtimeSync(enabled: boolean): void {
       }
       socket.addEventListener("open", () => {
         reconnectAttempt = 0;
+        setStatus("connected");
+        // A device can miss changes while suspended or offline. Reconcile the
+        // data currently visible as soon as the realtime channel is restored.
+        invalidate();
       });
       socket.addEventListener("message", (event) => {
         const message = parseMessage(event.data);
@@ -77,6 +115,7 @@ export function useRealtimeSync(enabled: boolean): void {
       socket.addEventListener("close", (event) => {
         if (disposed) return;
         if (event.code === 4_401) {
+          setStatus("reconnecting");
           void queryClient.invalidateQueries({ queryKey: ["me"] });
           return;
         }
@@ -90,14 +129,27 @@ export function useRealtimeSync(enabled: boolean): void {
     const onOnline = () => {
       if (socket?.readyState !== WebSocket.OPEN) connect();
     };
+    const onOffline = () => {
+      setStatus("offline");
+      if (reconnectTimer !== undefined) {
+        window.clearTimeout(reconnectTimer);
+        reconnectTimer = undefined;
+      }
+      socket?.close(1_000, "device offline");
+    };
     window.addEventListener("online", onOnline);
+    window.addEventListener("offline", onOffline);
     connect();
 
     return () => {
       disposed = true;
       if (reconnectTimer !== undefined) window.clearTimeout(reconnectTimer);
+      if (invalidateTimer !== undefined) window.clearTimeout(invalidateTimer);
       window.removeEventListener("online", onOnline);
+      window.removeEventListener("offline", onOffline);
       socket?.close(1_000, "client cleanup");
     };
   }, [enabled, queryClient]);
+
+  return status;
 }

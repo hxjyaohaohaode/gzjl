@@ -12,6 +12,8 @@ import {
   Clock3,
   Crown,
   ExternalLink,
+  Eye,
+  EyeOff,
   FileCheck2,
   FileText,
   FolderKanban,
@@ -35,18 +37,56 @@ import {
   useEffect,
   useMemo,
   useState,
+  type InputHTMLAttributes,
   type ReactNode,
 } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { Badge, Button, Card, CardContent, CardHeader } from "@workbench/ui";
 
-import { api, hasGrant, type Me } from "./api.js";
+import { api, hasGrant, resetCsrfToken, type Me } from "./api.js";
 import { readableForeground } from "./color.js";
 import { sendQueueableTimerEvent } from "./offline.js";
 
 export const fieldClass =
   "min-h-11 w-full rounded-xl border border-transparent bg-[var(--surface-subtle)] px-3 text-sm text-[var(--text)] outline-none transition focus:border-[var(--accent)] focus:bg-[var(--surface)] focus:ring-2 focus:ring-[var(--accent-soft)]";
 export const textAreaClass = `${fieldClass} min-h-28 py-3`;
+
+export function PasswordInput({
+  className = fieldClass,
+  inputLabel,
+  ...props
+}: Omit<InputHTMLAttributes<HTMLInputElement>, "type"> & {
+  inputLabel: string;
+}) {
+  const [visible, setVisible] = useState(false);
+  return (
+    <div className="relative">
+      <input
+        {...props}
+        aria-label={inputLabel}
+        className={`${className} pr-12`}
+        type={visible ? "text" : "password"}
+      />
+      <span
+        aria-label={visible ? "隐藏输入内容" : "显示输入内容"}
+        className="absolute inset-y-0 right-1 grid w-10 place-items-center rounded-lg text-[var(--text-muted)] transition hover:bg-[var(--surface)] hover:text-[var(--text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
+        onClick={(event) => {
+          event.preventDefault();
+          setVisible((current) => !current);
+        }}
+        onKeyDown={(event) => {
+          if (event.key !== "Enter" && event.key !== " ") return;
+          event.preventDefault();
+          setVisible((current) => !current);
+        }}
+        role="button"
+        tabIndex={0}
+      >
+        {visible ? <EyeOff size={17} /> : <Eye size={17} />}
+      </span>
+    </div>
+  );
+}
 const timezone =
   Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Shanghai";
 const AnalyticsChartLazy = lazy(() => import("./analytics-chart.js"));
@@ -359,19 +399,20 @@ export function LoginPage() {
           <input
             autoComplete="username"
             className={fieldClass}
+            name="username"
             onChange={(event) => setIdentifier(event.target.value)}
             required
             value={identifier}
           />
         </Field>
         <Field label="密码">
-          <input
+          <PasswordInput
             autoComplete="current-password"
-            className={fieldClass}
+            inputLabel="密码"
             minLength={8}
+            name="password"
             onChange={(event) => setPassword(event.target.value)}
             required
-            type="password"
             value={password}
           />
         </Field>
@@ -825,7 +866,7 @@ export function SecurityPage() {
               <div className="md:col-span-2">
                 <p className="text-sm font-semibold">新增登录与恢复方式</p>
                 <p className="mt-1 text-xs leading-5 text-[var(--text-muted)]">
-                  邮箱需要已配置 SMTP；手机号需要已配置 Twilio，并须填写国际 E.164 格式。未配置渠道时系统会明确拒绝，不会伪造“已发送”。
+                  邮箱需要已配置 SMTP；手机号需要已配置 Twilio。中国大陆手机号可直接填写 11 位，系统会在服务端统一规范化；国际号码可填写国家区号。未配置渠道时系统会明确拒绝，不会伪造“已发送”。
                 </p>
               </div>
               <Field label="新联系方式类型">
@@ -846,7 +887,7 @@ export function SecurityPage() {
               <Field
                 hint={
                   credentialKind === "phone"
-                    ? "例如 +8613812345678"
+                    ? "例如 13812345678"
                     : "将收到一次性验证链接"
                 }
                 label={credentialKind === "email" ? "新邮箱" : "新手机号"}
@@ -861,7 +902,7 @@ export function SecurityPage() {
                   placeholder={
                     credentialKind === "email"
                       ? "name@example.com"
-                      : "+8613812345678"
+                      : "13812345678"
                   }
                   required
                   type={credentialKind === "email" ? "email" : "tel"}
@@ -869,12 +910,11 @@ export function SecurityPage() {
                 />
               </Field>
               <Field label="当前账户密码（用于联系方式操作）">
-                <input
+                <PasswordInput
                   autoComplete="current-password"
-                  className={fieldClass}
+                  inputLabel="当前账户密码（用于联系方式操作）"
                   onChange={(event) => setCredentialPassword(event.target.value)}
                   required
-                  type="password"
                   value={credentialPassword}
                 />
               </Field>
@@ -968,11 +1008,10 @@ export function SecurityPage() {
               </p>
               <div className="mt-4 grid max-w-xl gap-3 sm:grid-cols-2">
                 <Field label="当前密码（用于二次验证）">
-                  <input
+                  <PasswordInput
                     autoComplete="current-password"
-                    className={fieldClass}
+                    inputLabel="当前密码（用于二次验证）"
                     onChange={(event) => setOwnershipPassword(event.target.value)}
-                    type="password"
                     value={ownershipPassword}
                   />
                 </Field>
@@ -1356,12 +1395,11 @@ export function SecurityPage() {
                   这是敏感操作：需要当前密码和当前动态验证码。成功后，其它会话不会自动被撤销。
                 </p>
                 <Field label="当前密码">
-                  <input
+                  <PasswordInput
                     autoComplete="current-password"
-                    className={fieldClass}
+                    inputLabel="当前密码"
                     onChange={(event) => setDisablePassword(event.target.value)}
                     required
-                    type="password"
                     value={disablePassword}
                   />
                 </Field>
@@ -1810,7 +1848,7 @@ export function PasswordResetRequestPage() {
             autoComplete="username"
             className={fieldClass}
             name="identifier"
-            placeholder="邮箱或 +8613812345678"
+            placeholder="邮箱、13812345678 或国际手机号"
             required
             type="text"
           />
@@ -1847,7 +1885,64 @@ export function PasswordResetRequestPage() {
   );
 }
 
-export function PasswordResetPage() {
+function ExistingSessionHandoff({
+  currentSession,
+  purpose,
+}: {
+  currentSession: Me | null;
+  purpose: "接受邀请" | "重置密码";
+}) {
+  const navigate = useNavigate();
+  const queryClient = useQueryClient();
+  const logout = useMutation({
+    mutationFn: () => api<void>("/api/auth/logout", { method: "POST" }),
+    onSuccess: () => {
+      resetCsrfToken();
+      queryClient.removeQueries({
+        predicate: (query) => query.queryKey[0] !== "me",
+      });
+      queryClient.setQueryData(["me"], null);
+    },
+  });
+  if (!currentSession) return null;
+  return (
+    <div className="space-y-4" role="status">
+      <div className="rounded-2xl bg-[var(--warning-soft)] p-4 text-sm leading-6 text-[var(--text)]">
+        <p className="font-bold">当前浏览器已登录其他账号</p>
+        <p className="mt-1 text-[var(--text-muted)]">
+          当前是{currentSession.user.isOwner ? "唯一 Owner" : "成员"}“
+          {currentSession.user.displayName}”。为了避免把邀请或重置操作错误应用到当前账号，必须先退出当前会话，再继续{purpose}。一次性令牌只保留在本页内存中，不会写入浏览器存储。
+        </p>
+      </div>
+      <ErrorMessage error={logout.error} />
+      <Button
+        className="w-full"
+        disabled={logout.isPending}
+        onClick={() => logout.mutate()}
+        type="button"
+      >
+        {logout.isPending ? "正在安全退出…" : `退出当前账号并继续${purpose}`}
+      </Button>
+      <Button
+        className="w-full"
+        onClick={() => navigate("/", { replace: true })}
+        type="button"
+        variant="ghost"
+      >
+        返回当前账号
+      </Button>
+      <p className="text-center text-xs leading-5 text-[var(--text-muted)]">
+        也可以在浏览器无痕窗口或另一浏览器中打开原始链接，以保留当前账号登录状态。
+      </p>
+    </div>
+  );
+}
+
+export function PasswordResetPage({
+  currentSession,
+}: {
+  currentSession: Me | null;
+}) {
   const navigate = useNavigate();
   const [token] = useState(oneTimeTokenFromLocation);
   useEffect(() => {
@@ -1870,6 +1965,12 @@ export function PasswordResetPage() {
       title="设置新密码"
       description="重置成功后，所有旧设备的登录会话都会被撤销。"
     >
+      {currentSession ? (
+        <ExistingSessionHandoff
+          currentSession={currentSession}
+          purpose="重置密码"
+        />
+      ) : (
       <form
         className="space-y-4"
         onSubmit={(event) => {
@@ -1881,24 +1982,24 @@ export function PasswordResetPage() {
           hint="至少 12 位，包含大小写字母、数字和特殊字符。"
           label="新密码"
         >
-          <input
+          <PasswordInput
             autoComplete="new-password"
-            className={fieldClass}
+            inputLabel="新密码"
             minLength={12}
+            name="new-password"
             onChange={(event) => setPassword(event.target.value)}
             required
-            type="password"
             value={password}
           />
         </Field>
         <Field label="确认新密码">
-          <input
+          <PasswordInput
             autoComplete="new-password"
-            className={fieldClass}
+            inputLabel="确认新密码"
             minLength={12}
+            name="new-password-confirmation"
             onChange={(event) => setConfirmation(event.target.value)}
             required
-            type="password"
             value={confirmation}
           />
         </Field>
@@ -1916,6 +2017,7 @@ export function PasswordResetPage() {
           </p>
         ) : null}
       </form>
+      )}
     </AuthFrame>
   );
 }
@@ -2150,7 +2252,7 @@ export function SetupPage() {
           />
         </Field>
         <Field
-          hint="可选。使用国际 E.164 格式，例如 +8613812345678；初始化后在“账户安全”中通过真实短信完成验证，未验证前不会生效。"
+          hint="可选。中国大陆手机号直接填写 11 位；国际号码填写国家区号。初始化后在“账户安全”中通过真实短信完成验证，未验证前不会生效。"
           label="Owner 手机号（可选）"
         >
           <input
@@ -2160,8 +2262,7 @@ export function SetupPage() {
             onChange={(event) =>
               setForm({ ...form, phone: event.target.value })
             }
-            pattern="\+[1-9][0-9]{7,14}"
-            placeholder="+8613812345678"
+            placeholder="13812345678"
             type="tel"
             value={form.phone}
           />
@@ -2170,15 +2271,15 @@ export function SetupPage() {
           hint="至少 12 位，包含大小写字母、数字和特殊字符。"
           label="Owner 密码"
         >
-          <input
+          <PasswordInput
             autoComplete="new-password"
-            className={fieldClass}
+            inputLabel="Owner 密码"
             minLength={12}
+            name="new-password"
             onChange={(event) =>
               setForm({ ...form, password: event.target.value })
             }
             required
-            type="password"
             value={form.password}
           />
         </Field>
@@ -2190,14 +2291,15 @@ export function SetupPage() {
           }
           label="初始化令牌"
         >
-          <input
-            className={fieldClass}
+          <PasswordInput
+            autoComplete="off"
+            inputLabel="初始化令牌"
             minLength={32}
+            name="setup-token"
             onChange={(event) =>
               setForm({ ...form, token: event.target.value })
             }
             required
-            type="password"
             value={form.token}
           />
         </Field>
@@ -2214,7 +2316,11 @@ export function SetupPage() {
   );
 }
 
-export function InvitationPage() {
+export function InvitationPage({
+  currentSession,
+}: {
+  currentSession: Me | null;
+}) {
   const navigate = useNavigate();
   const [token, setToken] = useState(oneTimeTokenFromLocation);
   useEffect(() => {
@@ -2234,6 +2340,12 @@ export function InvitationPage() {
       title="接受组织邀请"
       description="设置个人密码后，邀请令牌会立即失效，成员状态变为在职。"
     >
+      {currentSession ? (
+        <ExistingSessionHandoff
+          currentSession={currentSession}
+          purpose="接受邀请"
+        />
+      ) : (
       <form
         className="space-y-4"
         onSubmit={(event) => {
@@ -2241,25 +2353,32 @@ export function InvitationPage() {
           accept.mutate();
         }}
       >
-        <Field label="邀请令牌">
-          <textarea
-            className={textAreaClass}
-            onChange={(event) => setToken(event.target.value)}
-            required
-            value={token}
-          />
-        </Field>
+        {token ? (
+          <p className="rounded-xl bg-[var(--success-soft)] px-3 py-2 text-sm text-[var(--success)]">
+            已安全读取一次性邀请凭据。提交后立即失效。
+          </p>
+        ) : (
+          <Field hint="仅在没有完整链接时手工粘贴。" label="邀请令牌">
+            <textarea
+              autoComplete="off"
+              className={textAreaClass}
+              onChange={(event) => setToken(event.target.value)}
+              required
+              value={token}
+            />
+          </Field>
+        )}
         <Field
           hint="至少 12 位，包含大小写字母、数字和特殊字符。"
           label="设置密码"
         >
-          <input
+          <PasswordInput
             autoComplete="new-password"
-            className={fieldClass}
+            inputLabel="设置密码"
             minLength={12}
+            name="new-password"
             onChange={(event) => setPassword(event.target.value)}
             required
-            type="password"
             value={password}
           />
         </Field>
@@ -2268,6 +2387,7 @@ export function InvitationPage() {
           {accept.isPending ? "正在加入组织…" : "接受邀请并激活账号"}
         </Button>
       </form>
+      )}
     </AuthFrame>
   );
 }
@@ -6038,7 +6158,352 @@ interface PayrollRecord {
   };
   period: { name: string; startsAt: string; endsAt: string; status: string };
 }
-export function PayrollPage() {
+type CompensationPlanType =
+  | "hourly"
+  | "daily"
+  | "monthly"
+  | "fixed_period"
+  | "project_based"
+  | "hybrid";
+interface PayrollManagementOverview {
+  members: Array<{
+    membershipId: string;
+    displayName: string;
+    status: string;
+    plan: null | {
+      plan: {
+        id: string;
+        name: string;
+        type: CompensationPlanType;
+        currency: string;
+        activeVersion: number;
+      };
+      version: {
+        version: number;
+        type: CompensationPlanType;
+        baseAmount: string;
+        pendingReviewCountsInEstimate: boolean;
+        effectiveFrom: string;
+        effectiveTo: string | null;
+        config: { fixedAmount?: string };
+      };
+      rules: Array<{
+        id: string;
+        type: "weekday" | "weekend" | "holiday" | "night_window" | "overtime";
+        priority: number;
+        multiplier: string;
+        startHour?: number;
+        endHour?: number;
+        thresholdSeconds?: number;
+        holidayDates?: string[];
+      }>;
+    };
+  }>;
+  periods: Array<{
+    id: string;
+    name: string;
+    status: string;
+    startsAt: string;
+    endsAt: string;
+    cutoffAt: string;
+  }>;
+  runs: Array<{
+    run: { id: string; runNumber: number; status: string; createdAt: string };
+    period: { id: string; name: string };
+  }>;
+}
+
+const compensationTypeLabels: Record<CompensationPlanType, string> = {
+  hourly: "时薪",
+  daily: "日薪",
+  monthly: "月薪",
+  fixed_period: "固定周期金额",
+  project_based: "项目制",
+  hybrid: "混合计薪",
+};
+
+function PayrollManagementPanel() {
+  const queryClient = useQueryClient();
+  const management = useQuery({
+    queryKey: ["payroll-management"],
+    queryFn: () => api<PayrollManagementOverview>("/api/payroll/management"),
+  });
+  const activeMembers = useMemo(
+    () =>
+      management.data?.members.filter((member) => member.status === "active") ?? [],
+    [management.data?.members],
+  );
+  const [selectedMemberId, setSelectedMemberId] = useState("");
+  const [planForm, setPlanForm] = useState(() => ({
+    name: "主薪资方案",
+    type: "hourly" as CompensationPlanType,
+    currency: "CNY",
+    baseAmount: "",
+    fixedAmount: "",
+    effectiveFrom: localInput(new Date(Date.now() + 60_000)),
+    pendingReviewCountsInEstimate: true,
+    weekdayEnabled: false,
+    weekdayMultiplier: "1",
+    weekendEnabled: false,
+    weekendMultiplier: "2",
+    holidayEnabled: false,
+    holidayMultiplier: "3",
+    holidayDates: "",
+    nightEnabled: false,
+    nightMultiplier: "1.5",
+    nightStartHour: 22,
+    nightEndHour: 6,
+    overtimeEnabled: false,
+    overtimeMultiplier: "1.5",
+    overtimeHours: 8,
+  }));
+  const [periodForm, setPeriodForm] = useState(() => {
+    const current = new Date();
+    return {
+      name: `${current.getFullYear()} 年 ${current.getMonth() + 1} 月`,
+      startsAt: localInput(new Date(current.getFullYear(), current.getMonth(), 1)),
+      endsAt: localInput(new Date(current.getFullYear(), current.getMonth() + 1, 1)),
+      cutoffAt: localInput(new Date(current.getFullYear(), current.getMonth() + 1, 10, 18)),
+    };
+  });
+  const selectMember = (membershipId: string) => {
+    setSelectedMemberId(membershipId);
+    const selected = activeMembers.find((item) => item.membershipId === membershipId);
+    const selectedRules = selected?.plan?.rules ?? [];
+    const weekdayRule = selectedRules.find((item) => item.type === "weekday");
+    const weekendRule = selectedRules.find((item) => item.type === "weekend");
+    const holidayRule = selectedRules.find((item) => item.type === "holiday");
+    const nightRule = selectedRules.find((item) => item.type === "night_window");
+    const overtimeRule = selectedRules.find((item) => item.type === "overtime");
+    setPlanForm((current) => ({
+      ...current,
+      name: selected?.plan?.plan.name ?? "主薪资方案",
+      type: selected?.plan?.version.type ?? "hourly",
+      currency: selected?.plan?.plan.currency ?? "CNY",
+      baseAmount: selected?.plan?.version.baseAmount ?? "",
+      fixedAmount: selected?.plan?.version.config.fixedAmount ?? "",
+      pendingReviewCountsInEstimate:
+        selected?.plan?.version.pendingReviewCountsInEstimate ?? true,
+      weekdayEnabled: Boolean(weekdayRule),
+      weekdayMultiplier: weekdayRule?.multiplier ?? "1",
+      weekendEnabled: Boolean(weekendRule),
+      weekendMultiplier: weekendRule?.multiplier ?? "2",
+      holidayEnabled: Boolean(holidayRule),
+      holidayMultiplier: holidayRule?.multiplier ?? "3",
+      holidayDates: holidayRule?.holidayDates?.join(", ") ?? "",
+      nightEnabled: Boolean(nightRule),
+      nightMultiplier: nightRule?.multiplier ?? "1.5",
+      nightStartHour: nightRule?.startHour ?? 22,
+      nightEndHour: nightRule?.endHour ?? 6,
+      overtimeEnabled: Boolean(overtimeRule),
+      overtimeMultiplier: overtimeRule?.multiplier ?? "1.5",
+      overtimeHours: (overtimeRule?.thresholdSeconds ?? 28_800) / 3_600,
+      effectiveFrom: localInput(new Date(Date.now() + 60_000)),
+    }));
+  };
+  const refresh = async () => {
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ["payroll-management"] }),
+      queryClient.invalidateQueries({ queryKey: ["payroll-me"] }),
+    ]);
+  };
+  const savePlan = useMutation({
+    mutationFn: () => {
+      const rules = [
+        ...(planForm.weekdayEnabled
+          ? [{ type: "weekday", priority: 50, multiplier: planForm.weekdayMultiplier }]
+          : []),
+        ...(planForm.weekendEnabled
+          ? [{ type: "weekend", priority: 100, multiplier: planForm.weekendMultiplier }]
+          : []),
+        ...(planForm.holidayEnabled
+          ? [{
+              type: "holiday",
+              priority: 150,
+              multiplier: planForm.holidayMultiplier,
+              holidayDates: planForm.holidayDates
+                .split(/[，,\s]+/)
+                .map((item) => item.trim())
+                .filter(Boolean),
+            }]
+          : []),
+        ...(planForm.nightEnabled
+          ? [{
+              type: "night_window",
+              priority: 200,
+              multiplier: planForm.nightMultiplier,
+              startHour: planForm.nightStartHour,
+              endHour: planForm.nightEndHour,
+            }]
+          : []),
+        ...(planForm.overtimeEnabled
+          ? [{
+              type: "overtime",
+              priority: 300,
+              multiplier: planForm.overtimeMultiplier,
+              thresholdSeconds: Math.round(planForm.overtimeHours * 3_600),
+            }]
+          : []),
+      ];
+      return api(`/api/payroll/members/${selectedMemberId}/plan`, {
+        method: "PUT",
+        body: {
+          name: planForm.name,
+          type: planForm.type,
+          currency: planForm.currency,
+          baseAmount: planForm.baseAmount,
+          ...(planForm.type === "hybrid" ? { fixedAmount: planForm.fixedAmount } : {}),
+          effectiveFrom: new Date(planForm.effectiveFrom).toISOString(),
+          pendingReviewCountsInEstimate: planForm.pendingReviewCountsInEstimate,
+          rules,
+        },
+      });
+    },
+    onSuccess: refresh,
+  });
+  const createPeriod = useMutation({
+    mutationFn: () =>
+      api("/api/payroll/periods", {
+        method: "POST",
+        body: {
+          name: periodForm.name,
+          timezone,
+          startsAt: new Date(periodForm.startsAt).toISOString(),
+          endsAt: new Date(periodForm.endsAt).toISOString(),
+          cutoffAt: new Date(periodForm.cutoffAt).toISOString(),
+        },
+      }),
+    onSuccess: refresh,
+  });
+  const calculatePeriod = useMutation({
+    mutationFn: (periodId: string) =>
+      api(`/api/pay-periods/${periodId}/calculate`, { method: "POST" }),
+    onSuccess: refresh,
+  });
+  const settleRun = useMutation({
+    mutationFn: (runId: string) =>
+      api(`/api/payroll-runs/${runId}/settle`, { method: "POST" }),
+    onSuccess: refresh,
+  });
+  return (
+    <section className="mb-6 space-y-5" aria-label="薪资管理">
+      <Card>
+        <CardHeader>
+          <div>
+            <p className="app-page-kicker">Owner 管理</p>
+            <h2 className="mt-1 text-lg font-bold">成员薪资方案</h2>
+          </div>
+          <Badge tone="info">版本化 · 生效日期 · 审计</Badge>
+        </CardHeader>
+        <CardContent>
+          <form
+            className="grid gap-4 xl:grid-cols-4"
+            onSubmit={(event) => {
+              event.preventDefault();
+              savePlan.mutate();
+            }}
+          >
+            <Field label="成员">
+              <select className={fieldClass} onChange={(event) => selectMember(event.target.value)} required value={selectedMemberId}>
+                <option value="">选择已激活成员</option>
+                {activeMembers.map((member) => <option key={member.membershipId} value={member.membershipId}>{member.displayName}</option>)}
+              </select>
+            </Field>
+            <Field label="计薪类型">
+              <select className={fieldClass} onChange={(event) => setPlanForm({ ...planForm, type: event.target.value as CompensationPlanType })} value={planForm.type}>
+                {Object.entries(compensationTypeLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+              </select>
+            </Field>
+            <Field label={planForm.type === "hourly" || planForm.type === "hybrid" ? "基础时薪" : "基础金额"}>
+              <input className={fieldClass} inputMode="decimal" min="0" onChange={(event) => setPlanForm({ ...planForm, baseAmount: event.target.value })} placeholder="例如 80.00" required step="0.000001" type="number" value={planForm.baseAmount} />
+            </Field>
+            <Field label="币种">
+              <input className={fieldClass} maxLength={3} onChange={(event) => setPlanForm({ ...planForm, currency: event.target.value.toUpperCase() })} required value={planForm.currency} />
+            </Field>
+            <Field label="方案名称">
+              <input className={fieldClass} onChange={(event) => setPlanForm({ ...planForm, name: event.target.value })} required value={planForm.name} />
+            </Field>
+            <Field hint="新版本不得倒改已生效历史。" label="新版本生效时间">
+              <input className={fieldClass} onChange={(event) => setPlanForm({ ...planForm, effectiveFrom: event.target.value })} required type="datetime-local" value={planForm.effectiveFrom} />
+            </Field>
+            {planForm.type === "hybrid" ? (
+              <Field label="固定部分金额">
+                <input className={fieldClass} min="0" onChange={(event) => setPlanForm({ ...planForm, fixedAmount: event.target.value })} required step="0.000001" type="number" value={planForm.fixedAmount} />
+              </Field>
+            ) : null}
+            <label className="flex min-h-11 items-center gap-3 rounded-xl bg-[var(--surface-subtle)] px-3 text-sm">
+              <input checked={planForm.pendingReviewCountsInEstimate} onChange={(event) => setPlanForm({ ...planForm, pendingReviewCountsInEstimate: event.target.checked })} type="checkbox" />
+              待审核工时计入预估
+            </label>
+            <div className="grid gap-3 xl:col-span-4 md:grid-cols-2 xl:grid-cols-5">
+              <label className="rounded-xl bg-[var(--surface-subtle)] p-3 text-sm">
+                <span className="flex items-center gap-2 font-semibold"><input checked={planForm.weekdayEnabled} onChange={(event) => setPlanForm({ ...planForm, weekdayEnabled: event.target.checked })} type="checkbox" />工作日倍率</span>
+                <input className={`${fieldClass} mt-2`} disabled={!planForm.weekdayEnabled} min="0" onChange={(event) => setPlanForm({ ...planForm, weekdayMultiplier: event.target.value })} step="0.01" type="number" value={planForm.weekdayMultiplier} />
+              </label>
+              <label className="rounded-xl bg-[var(--surface-subtle)] p-3 text-sm">
+                <span className="flex items-center gap-2 font-semibold"><input checked={planForm.weekendEnabled} onChange={(event) => setPlanForm({ ...planForm, weekendEnabled: event.target.checked })} type="checkbox" />周末倍率</span>
+                <input className={`${fieldClass} mt-2`} disabled={!planForm.weekendEnabled} min="0" onChange={(event) => setPlanForm({ ...planForm, weekendMultiplier: event.target.value })} step="0.01" type="number" value={planForm.weekendMultiplier} />
+              </label>
+              <label className="rounded-xl bg-[var(--surface-subtle)] p-3 text-sm">
+                <span className="flex items-center gap-2 font-semibold"><input checked={planForm.holidayEnabled} onChange={(event) => setPlanForm({ ...planForm, holidayEnabled: event.target.checked })} type="checkbox" />节假日倍率</span>
+                <input className={`${fieldClass} mt-2`} disabled={!planForm.holidayEnabled} min="0" onChange={(event) => setPlanForm({ ...planForm, holidayMultiplier: event.target.value })} step="0.01" type="number" value={planForm.holidayMultiplier} />
+                <input aria-label="节假日日期" className={`${fieldClass} mt-2`} disabled={!planForm.holidayEnabled} onChange={(event) => setPlanForm({ ...planForm, holidayDates: event.target.value })} placeholder="2026-10-01, 2026-10-02" value={planForm.holidayDates} />
+              </label>
+              <label className="rounded-xl bg-[var(--surface-subtle)] p-3 text-sm">
+                <span className="flex items-center gap-2 font-semibold"><input checked={planForm.nightEnabled} onChange={(event) => setPlanForm({ ...planForm, nightEnabled: event.target.checked })} type="checkbox" />夜间倍率（22:00–06:00）</span>
+                <input className={`${fieldClass} mt-2`} disabled={!planForm.nightEnabled} min="0" onChange={(event) => setPlanForm({ ...planForm, nightMultiplier: event.target.value })} step="0.01" type="number" value={planForm.nightMultiplier} />
+              </label>
+              <label className="rounded-xl bg-[var(--surface-subtle)] p-3 text-sm">
+                <span className="flex items-center gap-2 font-semibold"><input checked={planForm.overtimeEnabled} onChange={(event) => setPlanForm({ ...planForm, overtimeEnabled: event.target.checked })} type="checkbox" />超过 8 小时倍率</span>
+                <input className={`${fieldClass} mt-2`} disabled={!planForm.overtimeEnabled} min="0" onChange={(event) => setPlanForm({ ...planForm, overtimeMultiplier: event.target.value })} step="0.01" type="number" value={planForm.overtimeMultiplier} />
+              </label>
+            </div>
+            <div className="xl:col-span-4 flex flex-wrap items-center gap-3">
+              <Button disabled={!selectedMemberId || savePlan.isPending} type="submit">{savePlan.isPending ? "正在保存版本…" : "保存薪资方案新版本"}</Button>
+              {selectedMemberId ? <span className="text-xs text-[var(--text-muted)]">当前版本：{activeMembers.find((item) => item.membershipId === selectedMemberId)?.plan?.version.version ?? "未配置"}</span> : null}
+            </div>
+          </form>
+          <ErrorMessage error={management.error ?? savePlan.error} />
+        </CardContent>
+      </Card>
+      <Card>
+        <CardHeader>
+          <div><p className="app-page-kicker">结算控制</p><h2 className="mt-1 text-lg font-bold">薪资周期与批次</h2></div>
+        </CardHeader>
+        <CardContent>
+          <form className="grid gap-4 lg:grid-cols-4" onSubmit={(event) => { event.preventDefault(); createPeriod.mutate(); }}>
+            <Field label="周期名称"><input className={fieldClass} onChange={(event) => setPeriodForm({ ...periodForm, name: event.target.value })} required value={periodForm.name} /></Field>
+            <Field label="开始"><input className={fieldClass} onChange={(event) => setPeriodForm({ ...periodForm, startsAt: event.target.value })} required type="datetime-local" value={periodForm.startsAt} /></Field>
+            <Field label="结束（不含）"><input className={fieldClass} onChange={(event) => setPeriodForm({ ...periodForm, endsAt: event.target.value })} required type="datetime-local" value={periodForm.endsAt} /></Field>
+            <Field label="确认截止"><input className={fieldClass} onChange={(event) => setPeriodForm({ ...periodForm, cutoffAt: event.target.value })} required type="datetime-local" value={periodForm.cutoffAt} /></Field>
+            <div className="lg:col-span-4"><Button disabled={createPeriod.isPending} type="submit">创建薪资周期</Button></div>
+          </form>
+          <div className="mt-5 space-y-2">
+            {management.data?.periods.map((period) => (
+              <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl bg-[var(--surface-subtle)] px-4 py-3" key={period.id}>
+                <div><p className="font-semibold">{period.name}</p><p className="text-xs text-[var(--text-muted)]">{formatDateTime(period.startsAt)} – {formatDateTime(period.endsAt)} · {period.status}</p></div>
+                <Button disabled={period.status !== "open" || calculatePeriod.isPending} onClick={() => calculatePeriod.mutate(period.id)} type="button" variant="secondary">计算本周期</Button>
+              </div>
+            ))}
+          </div>
+          {management.data?.runs.some((entry) => entry.run.status === "ready") ? (
+            <div className="mt-5 space-y-2">
+              {management.data.runs.filter((entry) => entry.run.status === "ready").map((entry) => (
+                <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl bg-[var(--success-soft)] px-4 py-3" key={entry.run.id}>
+                  <span className="text-sm font-semibold">{entry.period.name} · 批次 #{entry.run.runNumber} 已就绪</span>
+                  <Button disabled={settleRun.isPending} onClick={() => settleRun.mutate(entry.run.id)} type="button">确认结算并锁定</Button>
+                </div>
+              ))}
+            </div>
+          ) : null}
+          <ErrorMessage error={createPeriod.error ?? calculatePeriod.error ?? settleRun.error} />
+        </CardContent>
+      </Card>
+    </section>
+  );
+}
+
+export function PayrollPage({ me }: { me: Me }) {
   const payroll = useQuery({
     queryKey: ["payroll-me"],
     queryFn: () => api<{ items: PayrollRecord[] }>("/api/payroll/me"),
@@ -6046,9 +6511,10 @@ export function PayrollPage() {
   return (
     <>
       <PageHeader
-        title="我的薪资"
-        description="只显示本人薪资明细；金额来自已保存的方案版本、工时版本与计算快照。"
+        title={hasGrant(me, "payroll.configure") ? "薪资管理与我的薪资" : "我的薪资"}
+        description="薪资方案按生效时间版本化；结算金额来自已保存的规则、工时版本与不可变计算快照。"
       />
+      {hasGrant(me, "payroll.configure") ? <PayrollManagementPanel /> : null}
       {payroll.isPending ? (
         <Card>
           <LoadingBlock />
@@ -7377,14 +7843,13 @@ function AiSettingsEditor({
             hint={current.hasApiKey ? "留空会保留当前密钥；输入新值会安全替换它。" : "首次启用必须填写；保存后不可再次查看。"}
             label="API Key"
           >
-            <input
+            <PasswordInput
               autoComplete="new-password"
-              className={fieldClass}
+              inputLabel="API Key"
               onChange={(event) =>
                 setForm((current) => ({ ...current, apiKey: event.target.value }))
               }
               placeholder={current.hasApiKey ? "已保存，输入新密钥才会替换" : "仅在服务端加密保存"}
-              type="password"
               value={form.apiKey}
             />
           </Field>
@@ -7422,15 +7887,14 @@ function AiSettingsEditor({
             />
           </Field>
           <Field hint="修改组织密钥、模型或额度需重新输入当前密码。" label="当前 Owner 密码">
-            <input
+            <PasswordInput
               autoComplete="current-password"
-              className={fieldClass}
+              inputLabel="当前 Owner 密码"
               minLength={8}
               onChange={(event) =>
                 setForm((current) => ({ ...current, password: event.target.value }))
               }
               required
-              type="password"
               value={form.password}
             />
           </Field>

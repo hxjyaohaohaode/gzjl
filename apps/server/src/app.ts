@@ -23,6 +23,11 @@ import { AnalyticsService } from "./analytics/service.js";
 import { createAuthenticationPreHandler, registerAuthRoutes } from "./auth/routes.js";
 import { AuthMailer } from "./auth/mailer.js";
 import { AuthService } from "./auth/service.js";
+import {
+  hashOpaqueToken,
+  SESSION_COOKIE_DEV,
+  SESSION_COOKIE_PROD,
+} from "./auth/security.js";
 import type { ServerConfig } from "./config.js";
 import { registerEvidenceRoutes } from "./evidence/routes.js";
 import { EvidenceService } from "./evidence/service.js";
@@ -129,10 +134,24 @@ export async function buildApp({
   });
   await app.register(rateLimit, {
     global: true,
-    max: 300,
+    // Office networks commonly put every employee behind one public IP. Once
+    // authenticated, isolate the general API budget by opaque session instead
+    // of letting one active browser exhaust the whole company's allowance.
+    // Public/authentication routes keep their stricter route-level limits.
+    max: 600,
     timeWindow: "1 minute",
     ban: 3,
     allowList: (request) => request.url === "/healthz" || request.url === "/readyz",
+    keyGenerator: (request) => {
+      const cookieName =
+        config.NODE_ENV === "production"
+          ? SESSION_COOKIE_PROD
+          : SESSION_COOKIE_DEV;
+      const sessionToken = request.cookies[cookieName];
+      return sessionToken
+        ? `session:${hashOpaqueToken(sessionToken)}`
+        : `ip:${request.ip}`;
+    },
   });
   await app.register(websocket);
 

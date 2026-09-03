@@ -9,6 +9,10 @@ async function mockAuthenticatedWorkspace(page: Page): Promise<void> {
     authenticated = true;
     await route.fulfill({ json: { ok: true } });
   });
+  await page.route("**/api/auth/logout", async (route) => {
+    authenticated = false;
+    await route.fulfill({ status: 204, body: "" });
+  });
   await page.route("**/api/me", (route) =>
     authenticated
       ? route.fulfill({
@@ -30,6 +34,16 @@ async function mockAuthenticatedWorkspace(page: Page): Promise<void> {
                 permission: "payroll.view_own",
                 scopeKind: "self",
                 scopeId: "00000000-0000-4000-8000-000000000002",
+              },
+              {
+                permission: "payroll.configure",
+                scopeKind: "organization",
+                scopeId: null,
+              },
+              {
+                permission: "payroll.settle",
+                scopeKind: "organization",
+                scopeId: null,
               },
               {
                 permission: "import.scope",
@@ -366,6 +380,155 @@ test("password reset requests a generic verified-channel delivery without exposi
     "若该邮箱或手机号对应有效账号，重置链接将通过已验证渠道发送。",
   );
   await expect(page.locator("text=/[A-Za-z0-9_-]{32,}/")).toHaveCount(0);
+});
+
+test("an Owner session cannot swallow an employee invitation link", async ({
+  page,
+}) => {
+  await mockAuthenticatedWorkspace(page);
+  const token = "employee-invitation-token-that-is-long-enough-123456";
+  let accepted = false;
+  await page.route("**/api/auth/invitations/accept", async (route) => {
+    expect(route.request().postDataJSON()).toEqual({
+      token,
+      password: "Employee-Secure-Password-123!",
+    });
+    accepted = true;
+    await route.fulfill({ json: { accepted: true } });
+  });
+  await page.goto("/login");
+  await page.getByLabel("邮箱或手机号").fill("owner@example.test");
+  await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+
+  await page.goto(`/invite#token=${token}`);
+  await expect(page).not.toHaveURL(new RegExp(token));
+  await expect(page.getByRole("heading", { name: "接受组织邀请" })).toBeVisible();
+  await expect(page.getByText(/当前是唯一 Owner“林知夏”/)).toBeVisible();
+  await expect(page.getByLabel("设置密码")).toHaveCount(0);
+
+  await page
+    .getByRole("button", { name: "退出当前账号并继续接受邀请" })
+    .click();
+  await page
+    .getByLabel("设置密码")
+    .fill("Employee-Secure-Password-123!");
+  await page.getByRole("button", { name: "接受邀请并激活账号" }).click();
+  await expect.poll(() => accepted).toBe(true);
+  await expect(page).toHaveURL(/\/login$/);
+});
+
+test("an existing session must be ended before a password-reset capability is used", async ({
+  page,
+}) => {
+  await mockAuthenticatedWorkspace(page);
+  const token = "member-password-reset-token-that-is-long-enough-123456";
+  await page.route("**/api/auth/password-reset/complete", async (route) => {
+    expect(route.request().postDataJSON()).toEqual({
+      token,
+      password: "Member-New-Secure-Password-123!",
+    });
+    await route.fulfill({ json: { reset: true } });
+  });
+  await page.goto("/login");
+  await page.getByLabel("邮箱或手机号").fill("owner@example.test");
+  await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+  await page.goto(`/reset-password#token=${token}`);
+  await expect(page.getByText(/当前是唯一 Owner“林知夏”/)).toBeVisible();
+  await page
+    .getByRole("button", { name: "退出当前账号并继续重置密码" })
+    .click();
+  await page
+    .getByLabel("新密码", { exact: true })
+    .fill("Member-New-Secure-Password-123!");
+  await page
+    .getByLabel("确认新密码")
+    .fill("Member-New-Secure-Password-123!");
+  await page
+    .getByRole("button", { name: "重置密码并撤销旧会话" })
+    .click();
+  await expect(page).toHaveURL(/\/login$/);
+});
+
+test("password controls expose values only on explicit user action", async ({
+  page,
+}) => {
+  await page.route("**/api/me", (route) =>
+    route.fulfill({ status: 401, json: { error: "unauthorized" } }),
+  );
+  await page.goto("/login");
+  const password = page.getByLabel("密码");
+  await password.fill("Visible-Only-When-Requested-123!");
+  await expect(password).toHaveAttribute("type", "password");
+  await page.getByRole("button", { name: "显示输入内容" }).click();
+  await expect(password).toHaveAttribute("type", "text");
+  await page.getByRole("button", { name: "隐藏输入内容" }).click();
+  await expect(password).toHaveAttribute("type", "password");
+});
+
+test("Owner can configure a versioned hourly plan and create a pay period", async ({
+  page,
+}) => {
+  await mockAuthenticatedWorkspace(page);
+  const memberId = "00000000-0000-4000-8000-000000000099";
+  await page.route("**/api/payroll/me", (route) =>
+    route.fulfill({ json: { items: [] } }),
+  );
+  await page.route("**/api/payroll/management", (route) =>
+    route.fulfill({
+      json: {
+        members: [
+          {
+            membershipId: memberId,
+            displayName: "陈远航",
+            status: "active",
+            plan: null,
+          },
+        ],
+        periods: [],
+        runs: [],
+      },
+    }),
+  );
+  let planPayload: Record<string, unknown> | null = null;
+  await page.route(`**/api/payroll/members/${memberId}/plan`, async (route) => {
+    planPayload = route.request().postDataJSON() as Record<string, unknown>;
+    await route.fulfill({ json: { result: { ok: true } } });
+  });
+  let periodPayload: Record<string, unknown> | null = null;
+  await page.route("**/api/payroll/periods", async (route) => {
+    periodPayload = route.request().postDataJSON() as Record<string, unknown>;
+    await route.fulfill({ status: 201, json: { period: { id: "period-1" } } });
+  });
+
+  await page.goto("/login");
+  await page.getByLabel("邮箱或手机号").fill("owner@example.test");
+  await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+  await page.goto("/payroll");
+  await expect(
+    page.getByRole("heading", { name: "薪资管理与我的薪资" }),
+  ).toBeVisible();
+  await page.getByLabel("成员").selectOption(memberId);
+  await page.getByLabel("计薪类型").selectOption("hourly");
+  await page.getByLabel("基础时薪").fill("88.50");
+  await page.getByText("周末倍率", { exact: true }).click();
+  await page.getByRole("button", { name: "保存薪资方案新版本" }).click();
+  await expect.poll(() => planPayload).not.toBeNull();
+  expect(planPayload).toMatchObject({
+    type: "hourly",
+    currency: "CNY",
+    baseAmount: "88.50",
+    pendingReviewCountsInEstimate: true,
+  });
+  expect(planPayload?.rules).toEqual([
+    { type: "weekend", priority: 100, multiplier: "2" },
+  ]);
+
+  await page.getByRole("button", { name: "创建薪资周期" }).click();
+  await expect.poll(() => periodPayload).not.toBeNull();
+  expect(periodPayload).toMatchObject({ timezone: "Asia/Shanghai" });
 });
 
 test("contact verification consumes a fragment capability without leaving it in the address bar", async ({
