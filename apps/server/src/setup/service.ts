@@ -1,4 +1,4 @@
-import { count, eq, sql } from "drizzle-orm";
+import { count, eq, or, sql } from "drizzle-orm";
 import type { Database } from "@workbench/db";
 import {
   accessRoles,
@@ -14,12 +14,17 @@ import {
 } from "@workbench/db/schema";
 import { permissions } from "@workbench/shared";
 
-import { hashPassword, normalizeLoginIdentifier } from "../auth/security.js";
+import {
+  hashOpaqueToken,
+  hashPassword,
+  normalizeLoginIdentifier,
+} from "../auth/security.js";
 
 export interface InitialOwnerInput {
   organizationName: string;
   displayName: string;
   email: string;
+  phone?: string | undefined;
   password: string;
   timezone: string;
   requestId?: string;
@@ -30,6 +35,7 @@ export interface InitialOwnerResult {
   organizationId: string;
   userId: string;
   membershipId: string;
+  phoneVerificationPending: boolean;
 }
 
 export class SetupAlreadyCompletedError extends Error {
@@ -50,6 +56,9 @@ export class SetupService {
   async createInitialOwner(input: InitialOwnerInput): Promise<InitialOwnerResult> {
     const passwordHash = await hashPassword(input.password);
     const normalizedEmail = normalizeLoginIdentifier(input.email);
+    const normalizedPhone = input.phone
+      ? normalizeLoginIdentifier(input.phone)
+      : undefined;
 
     return this.db.transaction(async (tx) => {
       // Serializes every bootstrap attempt, including attempts from separate instances.
@@ -60,7 +69,14 @@ export class SetupService {
       const [existingCredential] = await tx
         .select({ id: userCredentials.id })
         .from(userCredentials)
-        .where(eq(userCredentials.normalizedIdentifier, normalizedEmail))
+        .where(
+          normalizedPhone
+            ? or(
+                eq(userCredentials.normalizedIdentifier, normalizedEmail),
+                eq(userCredentials.normalizedIdentifier, normalizedPhone),
+              )
+            : eq(userCredentials.normalizedIdentifier, normalizedEmail),
+        )
         .limit(1);
       if (existingCredential) throw new SetupAlreadyCompletedError();
 
@@ -95,6 +111,18 @@ export class SetupService {
         passwordHash,
         verifiedAt: new Date(),
       });
+      // Possession of the one-time setup secret establishes the bootstrap
+      // email identity. A telephone number cannot be proven merely because it
+      // was typed into this form, so it intentionally stays pending until the
+      // Owner confirms the real SMS capability from Account Security.
+      if (normalizedPhone) {
+        await tx.insert(userCredentials).values({
+          userId: user.id,
+          kind: "phone",
+          normalizedIdentifier: normalizedPhone,
+          passwordHash,
+        });
+      }
 
       const [membership] = await tx
         .insert(orgMemberships)
@@ -157,7 +185,8 @@ export class SetupService {
         after: {
           organizationName: input.organizationName,
           ownerDisplayName: input.displayName,
-          ownerEmail: normalizedEmail,
+          ownerEmailHash: hashOpaqueToken(normalizedEmail),
+          phoneVerificationPending: Boolean(normalizedPhone),
         },
         reason: "initial_setup",
         requestId: input.requestId,
@@ -168,6 +197,7 @@ export class SetupService {
         organizationId: organization.id,
         userId: user.id,
         membershipId: membership.id,
+        phoneVerificationPending: Boolean(normalizedPhone),
       };
     });
   }

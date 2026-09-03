@@ -18,6 +18,7 @@ const config: ServerConfig = {
   SESSION_SECRET: "test-secret-that-is-at-least-thirty-two-bytes",
   SESSION_TTL_SECONDS: 2_592_000,
   PASSWORD_RESET_TTL_SECONDS: 3_600,
+  CREDENTIAL_VERIFICATION_TTL_SECONDS: 86_400,
   DATABASE_URL: "postgresql://test:test@localhost:5432/test",
   DATABASE_POOL_MAX: 1,
   DATABASE_SSL: false,
@@ -103,9 +104,15 @@ describe("service probes", () => {
         url: "/setup",
         headers: { accept: "text/html" },
       });
+      const verifyContact = await app.inject({
+        method: "GET",
+        url: "/verify-contact",
+        headers: { accept: "text/html" },
+      });
 
       expect(root.statusCode).toBe(200);
       expect(setup.statusCode).toBe(200);
+      expect(verifyContact.statusCode).toBe(200);
       expect(setup.body).toContain("Workbench");
     } finally {
       rmSync(webRoot, { force: true, recursive: true });

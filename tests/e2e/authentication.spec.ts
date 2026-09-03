@@ -71,6 +71,28 @@ async function mockAuthenticatedWorkspace(page: Page): Promise<void> {
   await page.route("**/api/auth/mfa/totp", (route) =>
     route.fulfill({ json: { enabled: false, pending: false } }),
   );
+  await page.route("**/api/auth/credentials", (route) => {
+    if (route.request().method() === "GET") {
+      return route.fulfill({
+        json: {
+          credentials: [
+            {
+              id: "00000000-0000-4000-8000-000000000031",
+              kind: "email",
+              maskedIdentifier: "o***r@example.test",
+              verifiedAt: "2026-09-01T01:00:00.000Z",
+              createdAt: "2026-09-01T01:00:00.000Z",
+            },
+          ],
+          verifiedCount: 1,
+        },
+      });
+    }
+    return route.fulfill({
+      status: 405,
+      json: { error: "unexpected_credential_write" },
+    });
+  });
   await page.route("**/api/notifications", (route) =>
     route.fulfill({ json: { items: [] } }),
   );
@@ -333,6 +355,161 @@ test("password reset requests a generic verified-channel delivery without exposi
     "若该邮箱或手机号对应有效账号，重置链接将通过已验证渠道发送。",
   );
   await expect(page.locator("text=/[A-Za-z0-9_-]{32,}/")).toHaveCount(0);
+});
+
+test("contact verification consumes a fragment capability without leaving it in the address bar", async ({
+  page,
+}) => {
+  const token = "v".repeat(43);
+  await page.route("**/api/auth/csrf", (route) =>
+    route.fulfill({ json: { csrfToken: "test-csrf-token" } }),
+  );
+  await page.route("**/api/me", (route) =>
+    route.fulfill({ status: 401, json: { error: "unauthorized" } }),
+  );
+  await page.route("**/api/auth/credentials/verify", async (route) => {
+    expect(route.request().postDataJSON()).toEqual({ token });
+    await route.fulfill({
+      json: {
+        verified: true,
+        credential: {
+          id: "00000000-0000-4000-8000-000000000032",
+          kind: "phone",
+          maskedIdentifier: "+********0000",
+          verifiedAt: "2026-09-03T01:00:00.000Z",
+          createdAt: "2026-09-03T00:00:00.000Z",
+        },
+      },
+    });
+  });
+
+  await page.goto(`/verify-contact#token=${token}`);
+  await expect(page).not.toHaveURL(new RegExp(token));
+  await page.getByRole("button", { name: "确认验证联系方式" }).click();
+  await expect(page.getByRole("status")).toHaveText(
+    "手机号已验证。现在可使用这项方式登录或找回密码。",
+  );
+});
+
+test("initial Owner setup submits an optional E.164 phone as pending alongside the email bootstrap", async ({
+  page,
+}) => {
+  const setupToken = "s".repeat(43);
+  await page.route("**/api/auth/csrf", (route) =>
+    route.fulfill({ json: { csrfToken: "test-csrf-token" } }),
+  );
+  await page.route("**/api/me", (route) =>
+    route.fulfill({ status: 401, json: { error: "unauthorized" } }),
+  );
+  await page.route("**/api/setup/status", (route) =>
+    route.fulfill({ json: { completed: false, setupAvailable: true } }),
+  );
+  await page.route("**/api/setup/initial-owner", async (route) => {
+    expect(route.request().headers()["x-setup-token"]).toBe(setupToken);
+    expect(route.request().postDataJSON()).toEqual({
+      organizationName: "示例工作室",
+      displayName: "林知夏",
+      email: "owner@example.test",
+      phone: "+8613812345678",
+      password: "ChangeMe-OnlyForLocalDev-123!",
+      timezone: "Asia/Shanghai",
+    });
+    await route.fulfill({
+      status: 201,
+      json: {
+        organizationId: "00000000-0000-4000-8000-000000000003",
+        userId: "00000000-0000-4000-8000-000000000001",
+        membershipId: "00000000-0000-4000-8000-000000000002",
+        phoneVerificationPending: true,
+      },
+    });
+  });
+
+  await page.goto("/setup");
+  await page.getByLabel("组织名称").fill("示例工作室");
+  await page.getByLabel("Owner 姓名").fill("林知夏");
+  await page.getByLabel("Owner 邮箱").fill("owner@example.test");
+  await page.getByLabel("Owner 手机号（可选）").fill("+8613812345678");
+  await page
+    .getByLabel("Owner 密码")
+    .fill("ChangeMe-OnlyForLocalDev-123!");
+  await page.getByLabel("初始化令牌").fill(setupToken);
+  const response = page.waitForResponse(
+    (candidate) =>
+      new URL(candidate.url()).pathname === "/api/setup/initial-owner" &&
+      candidate.request().method() === "POST",
+  );
+  await page.getByRole("button", { name: "创建组织与唯一 Owner" }).click();
+  expect((await response).status()).toBe(201);
+  await expect(page).toHaveURL(/\/login$/);
+});
+
+test("account security creates a pending phone binding through the authenticated channel", async ({
+  page,
+}) => {
+  await mockAuthenticatedWorkspace(page);
+  await page.route("**/api/auth/credentials", async (route) => {
+    if (route.request().method() === "GET") {
+      await route.fulfill({
+        json: {
+          credentials: [
+            {
+              id: "00000000-0000-4000-8000-000000000031",
+              kind: "email",
+              maskedIdentifier: "o***r@example.test",
+              verifiedAt: "2026-09-01T01:00:00.000Z",
+              createdAt: "2026-09-01T01:00:00.000Z",
+            },
+          ],
+          verifiedCount: 1,
+        },
+      });
+      return;
+    }
+    expect(route.request().method()).toBe("POST");
+    expect(route.request().postDataJSON()).toEqual({
+      kind: "phone",
+      identifier: "+8613812345678",
+      password: "ChangeMe-OnlyForLocalDev-123!",
+    });
+    await route.fulfill({
+      status: 202,
+      json: {
+        credential: {
+          id: "00000000-0000-4000-8000-000000000032",
+          kind: "phone",
+          maskedIdentifier: "+********5678",
+          verifiedAt: null,
+          createdAt: "2026-09-03T01:00:00.000Z",
+        },
+        delivery: {
+          kind: "phone",
+          expiresAt: "2026-09-04T01:00:00.000Z",
+          status: "sent",
+        },
+      },
+    });
+  });
+
+  await page.goto("/login");
+  await page.getByLabel("邮箱或手机号").fill("owner@example.test");
+  await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+  await page.goto("/security");
+  await expect(page.getByRole("heading", { name: "账户安全" })).toBeVisible();
+  await page.getByLabel("新联系方式类型").selectOption("phone");
+  await page.getByLabel("新手机号").fill("+8613812345678");
+  await page
+    .getByLabel("当前账户密码（用于联系方式操作）")
+    .fill("ChangeMe-OnlyForLocalDev-123!");
+  const deliveryResponse = page.waitForResponse(
+    (response) =>
+      new URL(response.url()).pathname === "/api/auth/credentials" &&
+      response.request().method() === "POST",
+  );
+  await page.getByRole("button", { name: "发送验证链接" }).click();
+  expect((await deliveryResponse).status()).toBe(202);
+  await expect(page.getByRole("status")).toContainText("手机号验证消息已发送");
 });
 
 test("notification panel shows real unread items and marks them read", async ({

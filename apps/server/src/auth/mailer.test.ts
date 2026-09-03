@@ -14,6 +14,7 @@ const baseConfig: ServerConfig = {
   SESSION_SECRET: "test-secret-that-is-at-least-thirty-two-bytes",
   SESSION_TTL_SECONDS: 2_592_000,
   PASSWORD_RESET_TTL_SECONDS: 3_600,
+  CREDENTIAL_VERIFICATION_TTL_SECONDS: 86_400,
   DATABASE_URL: "postgresql://test:test@localhost:5432/test",
   DATABASE_POOL_MAX: 1,
   DATABASE_SSL: false,

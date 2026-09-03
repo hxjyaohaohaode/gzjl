@@ -17,6 +17,17 @@ const serverConfigSchema = z.object({
   SESSION_SECRET: z.string().min(32),
   SESSION_TTL_SECONDS: z.coerce.number().int().positive().default(2_592_000),
   PASSWORD_RESET_TTL_SECONDS: z.coerce.number().int().min(300).max(86_400).default(3_600),
+  /**
+   * A verification link proves control of a newly bound email address or
+   * phone number. Keep this separate from password-reset lifetime so a short
+   * recovery policy does not make normal contact binding needlessly fragile.
+   */
+  CREDENTIAL_VERIFICATION_TTL_SECONDS: z.coerce
+    .number()
+    .int()
+    .min(300)
+    .max(7 * 86_400)
+    .default(86_400),
   SETUP_TOKEN: z.string().min(32).optional(),
   DATABASE_URL: z.url(),
   DATABASE_POOL_MAX: z.coerce.number().int().positive().default(10),

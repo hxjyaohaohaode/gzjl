@@ -16,6 +16,12 @@ describe("production public URLs", () => {
     expect(loadServerConfig(productionEnvironment).WEB_DIST_DIR).toBe("../web/dist");
   });
 
+  it("gives a contact verification link a bounded one-day lifetime by default", () => {
+    expect(
+      loadServerConfig(productionEnvironment).CREDENTIAL_VERIFICATION_TTL_SECONDS,
+    ).toBe(86_400);
+  });
+
   it("accepts matching HTTPS browser URLs", () => {
     expect(loadServerConfig(productionEnvironment).PUBLIC_APP_URL).toBe(
       "https://app.example.test",

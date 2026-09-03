@@ -38,3 +38,25 @@ export function normalizeLoginIdentifier(value: string): string {
   if (normalized.includes("@")) return normalized.toLocaleLowerCase("en-US");
   return normalized.replace(/[\s()-]/g, "");
 }
+
+/**
+ * The browser never needs a full recovery identifier after it has been bound.
+ * Return a stable, human-recognisable hint without leaking the address or
+ * telephone number into client state, analytics, or screenshots.
+ */
+export function maskCredentialIdentifier(
+  kind: "email" | "phone",
+  normalizedIdentifier: string,
+): string {
+  if (kind === "phone") {
+    const suffix = normalizedIdentifier.slice(-4);
+    return `+********${suffix}`;
+  }
+
+  const at = normalizedIdentifier.lastIndexOf("@");
+  if (at <= 0 || at === normalizedIdentifier.length - 1) return "***";
+  const local = normalizedIdentifier.slice(0, at);
+  const domain = normalizedIdentifier.slice(at + 1);
+  const visibleSuffix = local.length > 2 ? local.slice(-1) : "";
+  return `${local.slice(0, 1)}***${visibleSuffix}@${domain}`;
+}

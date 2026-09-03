@@ -19,6 +19,13 @@ export interface InvitationRecipient {
   expiresAt: Date;
 }
 
+export interface CredentialVerificationRecipient {
+  identifier: string;
+  kind: CredentialDeliveryKind;
+  token: string;
+  expiresAt: Date;
+}
+
 /**
  * Delivery is deliberately fail-closed. Neither an invitation nor a reset
  * token is ever returned to a browser as a fallback when the configured
@@ -33,6 +40,18 @@ export class AuthDeliveryUnavailableError extends Error {
 
 function expiryLabel(expiresAt: Date): string {
   return expiresAt.toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" });
+}
+
+/**
+ * Keep one-time capabilities in the URL fragment. Browser fragments are not
+ * sent in the HTTP request target, so standard access logs, reverse proxies,
+ * and analytics do not accidentally retain reset, invitation, or contact
+ * verification secrets. The client removes the fragment before its API call.
+ */
+function capabilityUrl(pathname: string, token: string, baseUrl: string): string {
+  const url = new URL(pathname, baseUrl);
+  url.hash = new URLSearchParams({ token }).toString();
+  return url.toString();
 }
 
 export class AuthMailer {
@@ -78,12 +97,15 @@ export class AuthMailer {
     token,
     expiresAt,
   }: PasswordResetRecipient): Promise<void> {
-    const resetUrl = new URL("/reset-password", this.config.PUBLIC_APP_URL);
-    resetUrl.searchParams.set("token", token);
+    const resetUrl = capabilityUrl(
+      "/reset-password",
+      token,
+      this.config.PUBLIC_APP_URL,
+    );
     const body =
       kind === "phone"
-        ? `工作智能工作台密码重置：${resetUrl.toString()}（${expiryLabel(expiresAt)} 前有效；非本人操作请忽略）`
-        : `请在 ${expiryLabel(expiresAt)} 前打开以下链接重置工作智能工作台密码：\n${resetUrl.toString()}\n\n如果不是你本人发起，请忽略此消息。`;
+        ? `工作智能工作台密码重置：${resetUrl}（${expiryLabel(expiresAt)} 前有效；非本人操作请忽略）`
+        : `请在 ${expiryLabel(expiresAt)} 前打开以下链接重置工作智能工作台密码：\n${resetUrl}\n\n如果不是你本人发起，请忽略此消息。`;
     await this.send(kind, identifier, "重置工作智能工作台密码", body);
   }
 
@@ -94,13 +116,34 @@ export class AuthMailer {
     token,
     expiresAt,
   }: InvitationRecipient): Promise<void> {
-    const invitationUrl = new URL("/invite", this.config.PUBLIC_APP_URL);
-    invitationUrl.searchParams.set("token", token);
+    const invitationUrl = capabilityUrl(
+      "/invite",
+      token,
+      this.config.PUBLIC_APP_URL,
+    );
     const body =
       kind === "phone"
-        ? `工作智能工作台邀请：${invitationUrl.toString()}（${expiryLabel(expiresAt)} 前有效，仅限本人使用一次）`
-        : `${displayName}，你已被加入工作智能工作台的组织白名单。请在 ${expiryLabel(expiresAt)} 前打开以下链接设置密码并加入组织：\n${invitationUrl.toString()}\n\n链接只能使用一次；如果不是你本人，请忽略此消息。`;
+        ? `工作智能工作台邀请：${invitationUrl}（${expiryLabel(expiresAt)} 前有效，仅限本人使用一次）`
+        : `${displayName}，你已被加入工作智能工作台的组织白名单。请在 ${expiryLabel(expiresAt)} 前打开以下链接设置密码并加入组织：\n${invitationUrl}\n\n链接只能使用一次；如果不是你本人，请忽略此消息。`;
     await this.send(kind, identifier, "加入工作智能工作台", body);
+  }
+
+  async sendCredentialVerification({
+    identifier,
+    kind,
+    token,
+    expiresAt,
+  }: CredentialVerificationRecipient): Promise<void> {
+    const verificationUrl = capabilityUrl(
+      "/verify-contact",
+      token,
+      this.config.PUBLIC_APP_URL,
+    );
+    const body =
+      kind === "phone"
+        ? `验证工作智能工作台手机号：${verificationUrl}（${expiryLabel(expiresAt)} 前有效；非本人操作请忽略）`
+        : `请在 ${expiryLabel(expiresAt)} 前打开以下链接验证你新增的工作智能工作台邮箱：\n${verificationUrl}\n\n验证完成前，该邮箱不能用于登录或找回密码；如果不是你本人操作，请忽略此消息。`;
+    await this.send(kind, identifier, "验证工作智能工作台联系方式", body);
   }
 
   private async send(

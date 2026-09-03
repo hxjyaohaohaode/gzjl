@@ -74,6 +74,13 @@ export async function buildApp({
                 "password",
                 "token",
                 "apiKey",
+                "identifier",
+                "email",
+                "phone",
+                "req.body.identifier",
+                "req.body.email",
+                "req.body.phone",
+                "req.headers.x-setup-token",
               ],
               censor: "[REDACTED]",
             },
@@ -154,6 +161,7 @@ export async function buildApp({
       database,
       config.SESSION_TTL_SECONDS,
       config.PASSWORD_RESET_TTL_SECONDS,
+      config.CREDENTIAL_VERIFICATION_TTL_SECONDS,
       config.SESSION_SECRET,
     );
     /**
@@ -167,6 +175,7 @@ export async function buildApp({
       const method = request.method.toUpperCase();
       const isWrite = ["POST", "PUT", "PATCH", "DELETE"].includes(method);
       const path = request.url.split("?")[0] ?? request.url;
+      const isCredentialLifecycleWrite = path.startsWith("/api/auth/credentials");
       const auth = request.auth;
       if (
         !isWrite ||
@@ -174,7 +183,7 @@ export async function buildApp({
         reply.statusCode < 200 ||
         reply.statusCode >= 300 ||
         !path.startsWith("/api/") ||
-        path.startsWith("/api/auth/") ||
+        (path.startsWith("/api/auth/") && !isCredentialLifecycleWrite) ||
         path === "/api/realtime"
       ) {
         return payload;

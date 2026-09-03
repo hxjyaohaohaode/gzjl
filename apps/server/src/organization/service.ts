@@ -1544,7 +1544,7 @@ export class OrganizationService {
         entityId: membership.id,
         after: {
           displayName: input.displayName,
-          identifier: normalizedIdentifier,
+          identifierHash: hashOpaqueToken(normalizedIdentifier),
           credentialKind: input.kind,
           roleId: role.id,
           orgUnitId: input.orgUnitId,

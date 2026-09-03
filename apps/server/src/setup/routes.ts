@@ -11,6 +11,11 @@ const initialOwnerSchema = z.object({
   organizationName: z.string().trim().min(2).max(120),
   displayName: z.string().trim().min(2).max(80),
   email: z.email().max(320),
+  phone: z
+    .string()
+    .trim()
+    .regex(/^\+[1-9]\d{7,14}$/, "手机号须使用 E.164 格式，例如 +8613812345678。")
+    .optional(),
   password: z
     .string()
     .min(12)
@@ -71,7 +76,9 @@ export async function registerSetupRoutes(
         });
         return reply.code(201).send({
           ...result,
-          message: "初始化完成，请使用 Owner 邮箱与密码登录。",
+          message: input.phone
+            ? "初始化完成。请使用 Owner 邮箱与密码登录，并在账户安全页面完成手机号验证。"
+            : "初始化完成，请使用 Owner 邮箱与密码登录。",
         });
       } catch (error) {
         if (error instanceof SetupAlreadyCompletedError) {

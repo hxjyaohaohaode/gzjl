@@ -435,6 +435,61 @@ interface PersonalIdentityProfile {
   requests: PersonalIdentityRequest[];
 }
 
+interface AccountCredential {
+  id: string;
+  kind: "email" | "phone";
+  maskedIdentifier: string;
+  verifiedAt: string | null;
+  createdAt: string;
+}
+
+interface AccountCredentialProfile {
+  credentials: AccountCredential[];
+  verifiedCount: number;
+}
+
+interface CredentialDeliveryResponse {
+  credential: AccountCredential;
+  delivery: {
+    kind: "email" | "phone";
+    expiresAt: string;
+    status: "sent" | "retry_required";
+    message?: string;
+  };
+}
+
+function credentialKindLabel(kind: AccountCredential["kind"]): string {
+  return kind === "email" ? "邮箱" : "手机号";
+}
+
+/**
+ * New capability links put their token in the fragment, which browsers do not
+ * send to the server. Retain the query-string fallback only for links issued
+ * by an earlier deployment, then immediately remove either form from the bar.
+ */
+function oneTimeTokenFromLocation(): string {
+  const url = new URL(window.location.href);
+  const fragment = url.hash.startsWith("#")
+    ? new URLSearchParams(url.hash.slice(1)).get("token")
+    : null;
+  return fragment ?? url.searchParams.get("token") ?? "";
+}
+
+function removeOneTimeTokenFromLocation(): void {
+  const url = new URL(window.location.href);
+  const fragment = url.hash.startsWith("#")
+    ? new URLSearchParams(url.hash.slice(1))
+    : null;
+  if (!url.searchParams.has("token") && !fragment?.has("token")) return;
+  url.searchParams.delete("token");
+  url.hash = "";
+  window.history.replaceState(
+    window.history.state,
+    "",
+    `${url.pathname}${url.search}`,
+  );
+}
+
 export function SecurityPage() {
   const queryClient = useQueryClient();
   const status = useQuery({
@@ -454,6 +509,11 @@ export function SecurityPage() {
     queryFn: () =>
       api<PersonalIdentityProfile>("/api/organization/my-identities"),
   });
+  const credentials = useQuery({
+    queryKey: ["account-credentials"],
+    queryFn: () =>
+      api<AccountCredentialProfile>("/api/auth/credentials"),
+  });
   const [setup, setSetup] = useState<{
     secret: string;
     otpauthUri: string;
@@ -466,8 +526,20 @@ export function SecurityPage() {
   const [selectedIdentityId, setSelectedIdentityId] = useState("");
   const [customIdentityName, setCustomIdentityName] = useState("");
   const [identityRequestReason, setIdentityRequestReason] = useState("");
+  const [credentialKind, setCredentialKind] = useState<"email" | "phone">(
+    "email",
+  );
+  const [credentialIdentifier, setCredentialIdentifier] = useState("");
+  const [credentialPassword, setCredentialPassword] = useState("");
+  const [credentialTotpCode, setCredentialTotpCode] = useState("");
+  const [credentialFeedback, setCredentialFeedback] = useState<
+    CredentialDeliveryResponse["delivery"] | null
+  >(null);
   const refresh = async () => {
     await queryClient.invalidateQueries({ queryKey: ["totp-status"] });
+  };
+  const refreshCredentials = async () => {
+    await queryClient.invalidateQueries({ queryKey: ["account-credentials"] });
   };
   const begin = useMutation({
     mutationFn: () =>
@@ -498,6 +570,66 @@ export function SecurityPage() {
       setDisablePassword("");
       setDisableCode("");
       await refresh();
+    },
+  });
+  const bindCredential = useMutation({
+    mutationFn: () =>
+      api<CredentialDeliveryResponse>("/api/auth/credentials", {
+        method: "POST",
+        body: {
+          kind: credentialKind,
+          identifier: credentialIdentifier.trim(),
+          password: credentialPassword,
+          ...(credentialTotpCode
+            ? { totpCode: credentialTotpCode }
+            : {}),
+        },
+      }),
+    onSuccess: async (result) => {
+      setCredentialFeedback(result.delivery);
+      setCredentialIdentifier("");
+      setCredentialPassword("");
+      setCredentialTotpCode("");
+      await refreshCredentials();
+    },
+  });
+  const resendCredential = useMutation({
+    mutationFn: (credentialId: string) =>
+      api<CredentialDeliveryResponse>(
+        `/api/auth/credentials/${credentialId}/resend`,
+        {
+          method: "POST",
+          body: {
+            password: credentialPassword,
+            ...(credentialTotpCode
+              ? { totpCode: credentialTotpCode }
+              : {}),
+          },
+        },
+      ),
+    onSuccess: async (result) => {
+      setCredentialFeedback(result.delivery);
+      setCredentialPassword("");
+      setCredentialTotpCode("");
+      await refreshCredentials();
+    },
+  });
+  const removeCredential = useMutation({
+    mutationFn: (credentialId: string) =>
+      api<{ removed: boolean }>(`/api/auth/credentials/${credentialId}`, {
+        method: "DELETE",
+        body: {
+          password: credentialPassword,
+          ...(credentialTotpCode
+            ? { totpCode: credentialTotpCode }
+            : {}),
+        },
+      }),
+    onSuccess: async () => {
+      setCredentialFeedback(null);
+      setCredentialPassword("");
+      setCredentialTotpCode("");
+      await refreshCredentials();
     },
   });
   const confirmOwnershipTransfer = useMutation({
@@ -558,13 +690,254 @@ export function SecurityPage() {
       await queryClient.invalidateQueries({ queryKey: ["my-identities"] });
     },
   });
+  const credentialActionAllowed =
+    Boolean(credentialPassword) &&
+    (!status.data?.enabled || /^\d{6}$/.test(credentialTotpCode));
   return (
     <>
       <PageHeader
         title="账户安全"
-        description="动态验证码使用兼容 RFC 6238 的身份验证器。共享密钥仅在设置时展示一次，服务端以 AES‑GCM 加密保存。"
+        description="管理可登录、找回密码的邮箱和手机号，以及动态验证码。每个登录标识都必须由对应渠道真实验证；共享密钥仅在设置时展示一次，服务端以 AES‑GCM 加密保存。"
       />
       <div className="grid max-w-4xl gap-5 lg:grid-cols-2">
+        <Card className="lg:col-span-2">
+          <CardHeader className="max-sm:flex-col max-sm:gap-3">
+            <div className="min-w-0">
+              <p className="app-section-label">登录与恢复方式</p>
+              <h2 className="mt-2 flex items-center gap-2 font-bold">
+                <KeyRound className="text-[var(--accent-strong)]" size={18} />
+                邮箱与手机号
+              </h2>
+              <p className="mt-1 max-w-2xl text-sm leading-6 text-[var(--text-muted)]">
+                已验证的方式可用于登录和找回密码；待验证方式不会生效。你至少需要保留一个已验证的联系方式，所有新增、重发与移除操作都需要当前密码；若已启用动态验证码，还需一组未使用的动态码。
+              </p>
+            </div>
+            <Badge
+              className="shrink-0 self-start whitespace-nowrap"
+              tone={
+                credentials.data?.verifiedCount ? "positive" : "warning"
+              }
+            >
+              {credentials.data?.verifiedCount ?? 0} 个已验证
+            </Badge>
+          </CardHeader>
+          <CardContent className="space-y-5">
+            {credentials.isPending ? (
+              <LoadingBlock />
+            ) : credentials.data ? (
+              <div className="overflow-hidden rounded-2xl bg-[var(--surface-subtle)]">
+                {credentials.data.credentials.map((credential) => {
+                  const isLastVerified =
+                    Boolean(credential.verifiedAt) &&
+                    credentials.data!.verifiedCount <= 1;
+                  return (
+                    <div
+                      className="flex flex-col gap-3 border-b border-[var(--border)] px-4 py-4 last:border-b-0 sm:flex-row sm:items-center sm:justify-between"
+                      key={credential.id}
+                    >
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <p className="font-semibold">
+                            {credentialKindLabel(credential.kind)}
+                          </p>
+                          <Badge
+                            tone={
+                              credential.verifiedAt ? "positive" : "warning"
+                            }
+                          >
+                            {credential.verifiedAt ? "已验证" : "待验证"}
+                          </Badge>
+                        </div>
+                        <p className="mt-1 break-all text-sm text-[var(--text-muted)]">
+                          {credential.maskedIdentifier}
+                        </p>
+                        {!credential.verifiedAt ? (
+                          <p className="mt-1 text-xs leading-5 text-[var(--warning)]">
+                            验证完成前不能用于登录或找回密码。
+                          </p>
+                        ) : null}
+                      </div>
+                      <div className="flex shrink-0 flex-wrap gap-2">
+                        {!credential.verifiedAt ? (
+                          <Button
+                            disabled={
+                              !credentialActionAllowed ||
+                              status.isLoading ||
+                              status.isError ||
+                              resendCredential.isPending
+                            }
+                            onClick={() => {
+                              setCredentialFeedback(null);
+                              resendCredential.mutate(credential.id);
+                            }}
+                            variant="secondary"
+                          >
+                            <RotateCcw size={15} />
+                            {resendCredential.isPending
+                              ? "正在重发…"
+                              : "重新发送验证"}
+                          </Button>
+                        ) : null}
+                        <Button
+                          disabled={
+                            !credentialActionAllowed ||
+                            status.isLoading ||
+                            status.isError ||
+                            removeCredential.isPending ||
+                            isLastVerified
+                          }
+                          onClick={() => {
+                            if (
+                              window.confirm(
+                                credential.verifiedAt
+                                  ? "确认移除此登录与找回方式吗？移除后无法恢复，除非重新绑定并完成验证。"
+                                  : "确认移除此待验证联系方式吗？当前验证链接将立即失效。",
+                              )
+                            ) {
+                              setCredentialFeedback(null);
+                              removeCredential.mutate(credential.id);
+                            }
+                          }}
+                          title={
+                            isLastVerified
+                              ? "必须保留至少一个已验证的邮箱或手机号。"
+                              : undefined
+                          }
+                          variant="danger"
+                        >
+                          {removeCredential.isPending ? "正在移除…" : "移除"}
+                        </Button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : null}
+
+            <form
+              className="grid gap-3 rounded-2xl bg-[var(--surface-subtle)] p-4 md:grid-cols-2"
+              onSubmit={(event) => {
+                event.preventDefault();
+                setCredentialFeedback(null);
+                bindCredential.mutate();
+              }}
+            >
+              <div className="md:col-span-2">
+                <p className="text-sm font-semibold">新增登录与恢复方式</p>
+                <p className="mt-1 text-xs leading-5 text-[var(--text-muted)]">
+                  邮箱需要已配置 SMTP；手机号需要已配置 Twilio，并须填写国际 E.164 格式。未配置渠道时系统会明确拒绝，不会伪造“已发送”。
+                </p>
+              </div>
+              <Field label="新联系方式类型">
+                <select
+                  className={fieldClass}
+                  onChange={(event) => {
+                    setCredentialKind(
+                      event.target.value as "email" | "phone",
+                    );
+                    setCredentialIdentifier("");
+                  }}
+                  value={credentialKind}
+                >
+                  <option value="email">邮箱</option>
+                  <option value="phone">手机号</option>
+                </select>
+              </Field>
+              <Field
+                hint={
+                  credentialKind === "phone"
+                    ? "例如 +8613812345678"
+                    : "将收到一次性验证链接"
+                }
+                label={credentialKind === "email" ? "新邮箱" : "新手机号"}
+              >
+                <input
+                  autoComplete={credentialKind === "email" ? "email" : "tel"}
+                  className={fieldClass}
+                  inputMode={credentialKind === "email" ? "email" : "tel"}
+                  onChange={(event) =>
+                    setCredentialIdentifier(event.target.value)
+                  }
+                  placeholder={
+                    credentialKind === "email"
+                      ? "name@example.com"
+                      : "+8613812345678"
+                  }
+                  required
+                  type={credentialKind === "email" ? "email" : "tel"}
+                  value={credentialIdentifier}
+                />
+              </Field>
+              <Field label="当前账户密码（用于联系方式操作）">
+                <input
+                  autoComplete="current-password"
+                  className={fieldClass}
+                  onChange={(event) => setCredentialPassword(event.target.value)}
+                  required
+                  type="password"
+                  value={credentialPassword}
+                />
+              </Field>
+              {status.data?.enabled ? (
+                <Field label="动态验证码（用于联系方式操作，6 位）">
+                  <input
+                    autoComplete="one-time-code"
+                    className={fieldClass}
+                    inputMode="numeric"
+                    maxLength={6}
+                    onChange={(event) =>
+                      setCredentialTotpCode(
+                        event.target.value.replace(/\D/g, "").slice(0, 6),
+                      )
+                    }
+                    pattern="[0-9]*"
+                    required
+                    value={credentialTotpCode}
+                  />
+                </Field>
+              ) : null}
+              <div className="flex flex-wrap items-end gap-2 md:col-span-2">
+                <Button
+                  disabled={
+                    bindCredential.isPending ||
+                    !credentialIdentifier.trim() ||
+                    !credentialActionAllowed ||
+                    status.isLoading ||
+                    status.isError
+                  }
+                  type="submit"
+                >
+                  <KeyRound size={16} />
+                  {bindCredential.isPending
+                    ? "正在创建验证…"
+                    : "发送验证链接"}
+                </Button>
+                {credentialFeedback ? (
+                  <p
+                    className={
+                      credentialFeedback.status === "sent"
+                        ? "text-sm text-[var(--success)]"
+                        : "text-sm text-[var(--warning)]"
+                    }
+                    role="status"
+                  >
+                    {credentialFeedback.status === "sent"
+                      ? `${credentialKindLabel(credentialFeedback.kind)}验证消息已发送，请在 ${formatDateTime(credentialFeedback.expiresAt)} 前完成验证。`
+                      : `联系方式已安全保存为待验证，但本次投递未完成：${credentialFeedback.message ?? "请检查通道配置后重新发送。"}`}
+                  </p>
+                ) : null}
+              </div>
+            </form>
+            <ErrorMessage
+              error={
+                credentials.error ??
+                bindCredential.error ??
+                resendCredential.error ??
+                removeCredential.error
+              }
+            />
+          </CardContent>
+        </Card>
         {pendingOwnershipTransfer.data?.transfer ? (
           <Card className="bg-[color-mix(in_srgb,var(--warning-soft)_72%,var(--surface))] lg:col-span-2">
             <CardHeader>
@@ -1473,9 +1846,10 @@ export function PasswordResetRequestPage() {
 
 export function PasswordResetPage() {
   const navigate = useNavigate();
-  const [token] = useState(
-    () => new URLSearchParams(window.location.search).get("token") ?? "",
-  );
+  const [token] = useState(oneTimeTokenFromLocation);
+  useEffect(() => {
+    removeOneTimeTokenFromLocation();
+  }, []);
   const [password, setPassword] = useState("");
   const [confirmation, setConfirmation] = useState("");
   const reset = useMutation({
@@ -1539,6 +1913,72 @@ export function PasswordResetPage() {
           </p>
         ) : null}
       </form>
+    </AuthFrame>
+  );
+}
+
+export function VerifyContactPage() {
+  const navigate = useNavigate();
+  const [token] = useState(oneTimeTokenFromLocation);
+  const verify = useMutation({
+    mutationFn: () =>
+      api<{ verified: boolean; credential: AccountCredential }>(
+        "/api/auth/credentials/verify",
+        { method: "POST", body: { token } },
+      ),
+  });
+  useEffect(() => {
+    removeOneTimeTokenFromLocation();
+  }, []);
+  return (
+    <AuthFrame
+      title="验证联系方式"
+      description="验证后，该邮箱或手机号才会成为可登录、可找回密码的账号标识。一次性令牌已从地址栏移除，验证结果仅由服务端确认。"
+    >
+      {verify.data?.verified ? (
+        <div className="space-y-5">
+          <div
+            className="rounded-xl bg-[var(--success-soft)] p-4 text-sm leading-6 text-[var(--success)]"
+            role="status"
+          >
+            {credentialKindLabel(verify.data.credential.kind)}已验证。现在可使用这项方式登录或找回密码。
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Button onClick={() => navigate("/login")}>
+              前往登录
+            </Button>
+            <Button onClick={() => navigate("/security")} variant="secondary">
+              返回账户安全
+            </Button>
+          </div>
+        </div>
+      ) : (
+        <form
+          className="space-y-4"
+          onSubmit={(event) => {
+            event.preventDefault();
+            verify.mutate();
+          }}
+        >
+          <p className="rounded-xl bg-[var(--surface-subtle)] p-4 text-sm leading-6 text-[var(--text-muted)]">
+            只有发送到该邮箱或手机号的本人才能打开这条链接。点击确认后，系统会消费一次性令牌；过期或已使用时请登录后在“账户安全”重新发送。
+          </p>
+          <ErrorMessage error={verify.error} />
+          <Button
+            className="w-full"
+            disabled={!token || verify.isPending}
+            type="submit"
+          >
+            <Check size={16} />
+            {verify.isPending ? "正在验证…" : "确认验证联系方式"}
+          </Button>
+          {!token ? (
+            <p className="text-sm text-[var(--danger)]" role="alert">
+              链接中缺少一次性令牌，请从账户安全页面重新发送。
+            </p>
+          ) : null}
+        </form>
+      )}
     </AuthFrame>
   );
 }
@@ -1627,6 +2067,7 @@ export function SetupPage() {
     organizationName: "",
     displayName: "",
     email: "",
+    phone: "",
     password: "",
     token: "",
   });
@@ -1639,6 +2080,7 @@ export function SetupPage() {
           organizationName: form.organizationName,
           displayName: form.displayName,
           email: form.email,
+          ...(form.phone.trim() ? { phone: form.phone.trim() } : {}),
           password: form.password,
           timezone,
         },
@@ -1659,7 +2101,7 @@ export function SetupPage() {
   return (
     <AuthFrame
       title="初始化唯一 Owner"
-      description="此操作只允许成功一次，并会在单个数据库事务中建立组织、Owner、角色与审计记录。"
+      description="此操作只允许成功一次，并会在单个数据库事务中建立组织、Owner、角色与审计记录。邮箱是初始登录方式；可同时登记手机号，随后须通过真实短信验证才可用于登录或找回密码。"
     >
       <form
         className="space-y-4"
@@ -1702,6 +2144,23 @@ export function SetupPage() {
             required
             type="email"
             value={form.email}
+          />
+        </Field>
+        <Field
+          hint="可选。使用国际 E.164 格式，例如 +8613812345678；初始化后在“账户安全”中通过真实短信完成验证，未验证前不会生效。"
+          label="Owner 手机号（可选）"
+        >
+          <input
+            autoComplete="tel"
+            className={fieldClass}
+            inputMode="tel"
+            onChange={(event) =>
+              setForm({ ...form, phone: event.target.value })
+            }
+            pattern="\+[1-9][0-9]{7,14}"
+            placeholder="+8613812345678"
+            type="tel"
+            value={form.phone}
           />
         </Field>
         <Field
@@ -1754,9 +2213,10 @@ export function SetupPage() {
 
 export function InvitationPage() {
   const navigate = useNavigate();
-  const [token, setToken] = useState(
-    () => new URLSearchParams(window.location.search).get("token") ?? "",
-  );
+  const [token, setToken] = useState(oneTimeTokenFromLocation);
+  useEffect(() => {
+    removeOneTimeTokenFromLocation();
+  }, []);
   const [password, setPassword] = useState("");
   const accept = useMutation({
     mutationFn: () =>

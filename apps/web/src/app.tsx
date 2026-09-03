@@ -26,6 +26,7 @@ import {
   SecurityPage,
   SetupPage,
   TeamPage,
+  VerifyContactPage,
   WorkPage,
 } from "./pages.js";
 
@@ -103,6 +104,7 @@ export function App() {
         path="/reset-password"
         element={me ? <Navigate replace to="/" /> : <PasswordResetPage />}
       />
+      <Route path="/verify-contact" element={<VerifyContactPage />} />
       <Route
         path="/setup"
         element={me ? <Navigate replace to="/" /> : <SetupPage />}

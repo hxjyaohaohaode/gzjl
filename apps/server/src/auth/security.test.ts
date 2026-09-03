@@ -4,6 +4,7 @@ import {
   createOpaqueToken,
   hashOpaqueToken,
   hashPassword,
+  maskCredentialIdentifier,
   normalizeLoginIdentifier,
   verifyPassword,
 } from "./security.js";
@@ -29,5 +30,14 @@ describe("authentication security", () => {
   it("normalizes email and phone identifiers without conflating credentials", () => {
     expect(normalizeLoginIdentifier(" Owner@Example.TEST ")).toBe("owner@example.test");
     expect(normalizeLoginIdentifier("+86 (138) 0000-0000")).toBe("+8613800000000");
+  });
+
+  it("only exposes masked recovery identifiers to a signed-in browser", () => {
+    expect(maskCredentialIdentifier("email", "owner@example.test")).toBe(
+      "o***r@example.test",
+    );
+    expect(maskCredentialIdentifier("phone", "+8613800000000")).toBe(
+      "+********0000",
+    );
   });
 });
