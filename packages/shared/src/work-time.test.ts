@@ -4,6 +4,7 @@ import {
   calculateWorkDuration,
   findOverlappingIntervals,
   intervalsOverlap,
+  workDurationAnomalyFlags,
 } from "./work-time.js";
 
 describe("calculateWorkDuration", () => {
@@ -119,5 +120,35 @@ describe("interval overlap", () => {
         },
       ]),
     ).toEqual([["a", "b"]]);
+  });
+});
+
+describe("work-duration review flags", () => {
+  it("flags exceptional durations for review without discarding factual time", () => {
+    expect(
+      workDurationAnomalyFlags({
+        grossSeconds: 30,
+        breakSeconds: 0,
+        netSeconds: 30,
+      }),
+    ).toEqual(["net_duration_under_60_seconds"]);
+
+    expect(
+      workDurationAnomalyFlags({
+        grossSeconds: 16 * 60 * 60 + 1,
+        breakSeconds: 0,
+        netSeconds: 16 * 60 * 60 + 1,
+      }),
+    ).toEqual(["gross_duration_over_16_hours"]);
+  });
+
+  it("does not flag an ordinary work interval", () => {
+    expect(
+      workDurationAnomalyFlags({
+        grossSeconds: 8 * 60 * 60,
+        breakSeconds: 30 * 60,
+        netSeconds: 7.5 * 60 * 60,
+      }),
+    ).toEqual([]);
   });
 });

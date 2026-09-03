@@ -34,6 +34,14 @@ services:
         value: "false"
       - key: AI_ENABLED
         value: "true"
+      # Enter the same generated 32+ byte value on both services. Render cannot
+      # safely generate and share one secret between separate service entries.
+      - key: AI_CONFIG_ENCRYPTION_KEY
+        sync: false
+      - key: AI_REQUEST_TIMEOUT_MS
+        value: "60000"
+      - key: AI_MAX_RETRIES
+        value: "2"
       - key: DATABASE_POOL_MAX
         value: "10"
       - key: SESSION_SECRET
@@ -68,12 +76,20 @@ services:
         sync: false
       - key: SMTP_FROM
         sync: false
+      - key: SMS_PROVIDER
+        value: disabled
+      - key: TWILIO_ACCOUNT_SID
+        sync: false
+      - key: TWILIO_AUTH_TOKEN
+        sync: false
+      - key: TWILIO_FROM
+        sync: false
       - key: ZHIPU_API_KEY
         sync: false
       - key: ZHIPU_API_BASE_URL
         value: https://open.bigmodel.cn/api/paas/v4
       - key: ZHIPU_MODEL
-        value: glm-5.3-flash
+        value: glm-4.7-flash
 
   - type: worker
     name: work-intelligence-worker
@@ -99,9 +115,16 @@ services:
         value: "false"
       - key: DATABASE_POOL_MAX
         value: "5"
+      - key: AI_ENABLED
+        value: "true"
+      # Must exactly match the web/API service value above.
+      - key: AI_CONFIG_ENCRYPTION_KEY
+        sync: false
+      - key: AI_REQUEST_TIMEOUT_MS
+        value: "60000"
       - key: ZHIPU_API_KEY
         sync: false
       - key: ZHIPU_API_BASE_URL
         value: https://open.bigmodel.cn/api/paas/v4
       - key: ZHIPU_MODEL
-        value: glm-5.3-flash
+        value: glm-4.7-flash

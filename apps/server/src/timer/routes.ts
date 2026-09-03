@@ -17,6 +17,7 @@ const startSchema = z.object({
   blockers: z.string().max(5_000).default(""),
   nextStep: z.string().max(5_000).default(""),
   primaryProjectNodeId: z.uuid().nullable().default(null),
+  projectNodeIds: z.array(z.uuid()).max(32).default([]),
   visibility: z
     .enum(["private", "management_only", "project_visible"])
     .default("management_only"),
@@ -45,21 +46,30 @@ export async function registerTimerRoutes(
     timer: await service.getCurrent(request.auth!),
   }));
 
-  app.post("/api/timer/start", { preHandler: protectedWrite }, async (request, reply) => {
-    const input = startSchema.parse(request.body);
-    try {
-      const timer = await service.start(request.auth!, {
-        ...input,
-        occurredAt: new Date(input.occurredAt),
-      });
-      return reply.code(201).send({ timer });
-    } catch (error) {
-      if (error instanceof ActiveTimerConflictError || error instanceof TimerEventConflictError) {
-        return reply.code(409).send({ error: "timer_conflict", message: error.message });
+  app.post(
+    "/api/timer/start",
+    { preHandler: protectedWrite },
+    async (request, reply) => {
+      const input = startSchema.parse(request.body);
+      try {
+        const timer = await service.start(request.auth!, {
+          ...input,
+          occurredAt: new Date(input.occurredAt),
+        });
+        return reply.code(201).send({ timer });
+      } catch (error) {
+        if (
+          error instanceof ActiveTimerConflictError ||
+          error instanceof TimerEventConflictError
+        ) {
+          return reply
+            .code(409)
+            .send({ error: "timer_conflict", message: error.message });
+        }
+        throw error;
       }
-      throw error;
-    }
-  });
+    },
+  );
 
   app.post(
     "/api/timer/:timerId/events",
@@ -75,10 +85,14 @@ export async function registerTimerRoutes(
         return { timer };
       } catch (error) {
         if (error instanceof TimerNotFoundError) {
-          return reply.code(404).send({ error: "timer_not_found", message: error.message });
+          return reply
+            .code(404)
+            .send({ error: "timer_not_found", message: error.message });
         }
         if (error instanceof TimerEventConflictError) {
-          return reply.code(409).send({ error: "timer_conflict", message: error.message });
+          return reply
+            .code(409)
+            .send({ error: "timer_conflict", message: error.message });
         }
         throw error;
       }

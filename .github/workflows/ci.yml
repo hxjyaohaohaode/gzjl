@@ -37,7 +37,6 @@ jobs:
       DATABASE_SSL: "false"
       SESSION_SECRET: ci-session-secret-that-is-at-least-thirty-two-bytes
       WEB_ORIGIN: http://localhost:5173
-      SEED_OWNER_PASSWORD: CI-Only-Seed-Password-123!
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -59,9 +58,6 @@ jobs:
 
       - name: Apply database migrations
         run: pnpm db:migrate
-
-      - name: Seed test database
-        run: pnpm db:seed
 
       - name: Run all quality gates
         run: pnpm check

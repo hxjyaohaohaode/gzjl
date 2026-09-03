@@ -1,7 +1,42 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { EChartsCoreOption } from "echarts/core";
-import { AlertCircle, ArrowLeft, ArrowUpRight, Bot, CalendarDays, Check, ChevronRight, CircleDollarSign, Clock3, ExternalLink, FileCheck2, FileText, FolderKanban, ListTodo, LoaderCircle, Paperclip, Pause, Play, Plus, RotateCcw, Sparkles, Square, TimerReset, Users } from "lucide-react";
-import { lazy, Suspense, useMemo, useState, type ReactNode } from "react";
+import {
+  AlertCircle,
+  ArrowLeft,
+  ArrowUpRight,
+  Bot,
+  CalendarDays,
+  Check,
+  ChevronRight,
+  CircleDollarSign,
+  Clock3,
+  Crown,
+  ExternalLink,
+  FileCheck2,
+  FileText,
+  FolderKanban,
+  KeyRound,
+  ListTodo,
+  LoaderCircle,
+  Paperclip,
+  Pause,
+  Play,
+  Plus,
+  RotateCcw,
+  Sparkles,
+  Settings2,
+  Square,
+  TimerReset,
+  Users,
+} from "lucide-react";
+import {
+  lazy,
+  Suspense,
+  useEffect,
+  useMemo,
+  useState,
+  type ReactNode,
+} from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { Badge, Button, Card, CardContent, CardHeader } from "@workbench/ui";
 
@@ -9,41 +44,225 @@ import { api, hasGrant, type Me } from "./api.js";
 import { readableForeground } from "./color.js";
 import { sendQueueableTimerEvent } from "./offline.js";
 
-const fieldClass = "min-h-11 w-full rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3 text-sm text-[var(--text)] outline-none transition focus:border-[var(--accent)] focus:ring-2 focus:ring-[var(--accent-soft)]";
-const textAreaClass = `${fieldClass} min-h-28 py-3`;
-const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Shanghai";
+export const fieldClass =
+  "min-h-11 w-full rounded-xl border border-transparent bg-[var(--surface-subtle)] px-3 text-sm text-[var(--text)] outline-none transition focus:border-[var(--accent)] focus:bg-[var(--surface)] focus:ring-2 focus:ring-[var(--accent-soft)]";
+export const textAreaClass = `${fieldClass} min-h-28 py-3`;
+const timezone =
+  Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Shanghai";
 const AnalyticsChartLazy = lazy(() => import("./analytics-chart.js"));
 const ProjectCanvasLazy = lazy(() => import("./project-canvas.js"));
-function AnalyticsChart({ ariaLabel, option }: { ariaLabel: string; option: EChartsCoreOption }) {
-  return <Suspense fallback={<LoadingBlock />}><AnalyticsChartLazy ariaLabel={ariaLabel} option={option} /></Suspense>;
+function AnalyticsChart({
+  ariaLabel,
+  option,
+}: {
+  ariaLabel: string;
+  option: EChartsCoreOption;
+}) {
+  return (
+    <Suspense fallback={<LoadingBlock />}>
+      <AnalyticsChartLazy ariaLabel={ariaLabel} option={option} />
+    </Suspense>
+  );
 }
-function ProjectCanvas({ nodes, edges }: { nodes: ProjectNode[]; edges: ProjectEdge[] }) {
-  return <Suspense fallback={<LoadingBlock />}><ProjectCanvasLazy edges={edges} nodes={nodes} /></Suspense>;
+function ProjectCanvas({
+  nodes,
+  edges,
+  accent,
+}: {
+  nodes: ProjectNode[];
+  edges: ProjectEdge[];
+  accent?: string;
+}) {
+  return (
+    <Suspense fallback={<LoadingBlock />}>
+      <ProjectCanvasLazy
+        {...(accent ? { accent } : {})}
+        edges={edges}
+        nodes={nodes}
+      />
+    </Suspense>
+  );
 }
 
-function PageHeader({ title, description, actions }: { title: string; description: string; actions?: ReactNode }) {
-  return <div className="app-page-header flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between"><div><p className="mb-2 text-[11px] font-extrabold tracking-[0.13em] text-[var(--accent-strong)] uppercase">工作智能平台</p><h1 className="text-[28px] leading-none md:text-[34px]">{title}</h1><p className="mt-3 text-sm leading-6 text-[var(--text-muted)]">{description}</p></div>{actions ? <div className="flex shrink-0 flex-wrap gap-2">{actions}</div> : null}</div>;
+export function PageHeader({
+  title,
+  description,
+  actions,
+}: {
+  title: string;
+  description: string;
+  actions?: ReactNode;
+}) {
+  return (
+    <header className="app-page-header flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+      <div>
+        <p className="app-page-kicker mb-2">工作智能工作台</p>
+        <h1 className="text-[28px] leading-none md:text-[34px]">{title}</h1>
+        <p className="mt-3 text-sm leading-6 text-[var(--text-muted)]">
+          {description}
+        </p>
+      </div>
+      {actions ? (
+        <div className="flex shrink-0 flex-wrap items-center gap-2">
+          {actions}
+        </div>
+      ) : null}
+    </header>
+  );
 }
 
-function Field({ label, children, hint }: { label: string; children: ReactNode; hint?: string }) {
-  return <label className="block"><span className="mb-1.5 block text-sm font-semibold">{label}</span>{children}{hint ? <span className="mt-1.5 block text-xs text-[var(--text-muted)]">{hint}</span> : null}</label>;
+export function Field({
+  label,
+  children,
+  hint,
+}: {
+  label: string;
+  children: ReactNode;
+  hint?: string;
+}) {
+  return (
+    <label className="app-field block">
+      <span className="mb-1.5 block text-sm font-semibold">{label}</span>
+      {children}
+      {hint ? (
+        <span className="mt-1.5 block text-xs text-[var(--text-muted)]">
+          {hint}
+        </span>
+      ) : null}
+    </label>
+  );
 }
 
-function EmptyState({ icon, title, description, action }: { icon: ReactNode; title: string; description: string; action?: ReactNode }) {
-  return <div className="flex min-h-64 flex-col items-center justify-center px-6 py-12 text-center"><div className="grid size-12 place-items-center rounded-2xl bg-[var(--surface-subtle)] text-[var(--text-muted)]">{icon}</div><h2 className="mt-4 font-bold">{title}</h2><p className="mt-2 max-w-md text-sm leading-6 text-[var(--text-muted)]">{description}</p>{action ? <div className="mt-5">{action}</div> : null}</div>;
+export function EmptyState({
+  icon,
+  title,
+  description,
+  action,
+}: {
+  icon: ReactNode;
+  title: string;
+  description: string;
+  action?: ReactNode;
+}) {
+  return (
+    <div className="app-empty-state flex min-h-64 flex-col items-center justify-center px-6 py-12 text-center">
+      <div className="grid size-12 place-items-center rounded-2xl bg-[var(--surface-subtle)] text-[var(--text-muted)]">
+        {icon}
+      </div>
+      <h2 className="mt-4 font-bold">{title}</h2>
+      <p className="mt-2 max-w-md text-sm leading-6 text-[var(--text-muted)]">
+        {description}
+      </p>
+      {action ? <div className="mt-5">{action}</div> : null}
+    </div>
+  );
 }
 
-function ErrorMessage({ error }: { error: unknown }) {
+export function ErrorMessage({ error }: { error: unknown }) {
   if (!error) return null;
-  return <div className="flex gap-2 rounded-xl bg-[var(--danger-soft)] p-3 text-sm text-[var(--danger)]" role="alert"><AlertCircle className="mt-0.5 shrink-0" size={17} /><span>{error instanceof Error ? error.message : "操作失败，请重试。"}</span></div>;
+  return (
+    <div
+      className="flex gap-2 rounded-xl border border-[color-mix(in_srgb,var(--danger)_16%,transparent)] bg-[var(--danger-soft)] p-3 text-sm text-[var(--danger)]"
+      role="alert"
+    >
+      <AlertCircle className="mt-0.5 shrink-0" size={17} />
+      <span>
+        {error instanceof Error ? error.message : "操作失败，请重试。"}
+      </span>
+    </div>
+  );
 }
 
-function LoadingBlock() { return <div className="flex min-h-48 items-center justify-center gap-2 text-sm text-[var(--text-muted)]"><LoaderCircle className="animate-spin" size={18} />正在加载真实数据…</div>; }
+export function LoadingBlock() {
+  return (
+    <div className="flex min-h-48 flex-col items-center justify-center gap-3 text-sm text-[var(--text-muted)]">
+      <span className="grid size-9 place-items-center rounded-xl bg-[var(--surface-subtle)] text-[var(--accent-strong)]">
+        <LoaderCircle className="animate-spin" size={17} />
+      </span>
+      正在加载真实数据…
+    </div>
+  );
+}
 
-function formatDateTime(value: string | Date): string { return new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }).format(new Date(value)); }
-function formatDuration(seconds: number): string { const hours = Math.floor(seconds / 3600); const minutes = Math.floor((seconds % 3600) / 60); return hours > 0 ? `${hours} 小时 ${minutes} 分` : `${minutes} 分钟`; }
-function localInput(date: Date): string { const offset = date.getTimezoneOffset() * 60_000; return new Date(date.getTime() - offset).toISOString().slice(0, 16); }
-
+function formatDateTime(value: string | Date): string {
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).format(new Date(value));
+}
+function formatDuration(seconds: number): string {
+  const safeSeconds = Math.max(0, Math.floor(seconds));
+  const hours = Math.floor(safeSeconds / 3600);
+  const minutes = Math.floor((safeSeconds % 3600) / 60);
+  const remainder = safeSeconds % 60;
+  if (hours > 0) {
+    return `${hours} 小时 ${minutes} 分${remainder ? ` ${remainder} 秒` : ""}`;
+  }
+  if (minutes > 0) return `${minutes} 分${remainder ? ` ${remainder} 秒` : ""}`;
+  return `${remainder} 秒`;
+}
+function formatWorkAnomaly(flag: string): string {
+  switch (flag) {
+    case "net_duration_under_60_seconds":
+      return "净工时不足 1 分钟，需复核";
+    case "gross_duration_over_16_hours":
+      return "总时段超过 16 小时，需复核";
+    default:
+      return "该记录需要人工复核";
+  }
+}
+function formatCorrectionStatus(status: OwnWorkCorrection["correction"]["status"]): string {
+  switch (status) {
+    case "pending":
+      return "更正申请待审核";
+    case "approved":
+      return "更正申请已确认（未产生薪资调整）";
+    case "applied_next_period":
+      return "更正申请已写入下期调整";
+    case "rejected":
+      return "更正申请已驳回";
+  }
+}
+function localInput(date: Date): string {
+  const offset = date.getTimezoneOffset() * 60_000;
+  return new Date(date.getTime() - offset).toISOString().slice(0, 19);
+}
+function hexWithAlpha(hex: string, alpha: number): string {
+  const value = hex.replace("#", "");
+  if (!/^[0-9a-f]{6}$/i.test(value)) return "rgb(91 92 226 / " + alpha + ")";
+  const red = Number.parseInt(value.slice(0, 2), 16);
+  const green = Number.parseInt(value.slice(2, 4), 16);
+  const blue = Number.parseInt(value.slice(4, 6), 16);
+  return "rgb(" + red + " " + green + " " + blue + " / " + alpha + ")";
+}
+function useChartPalette() {
+  const [, setVersion] = useState(0);
+  useEffect(() => {
+    const observer = new MutationObserver(() =>
+      setVersion((value) => value + 1),
+    );
+    observer.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["data-theme", "style"],
+    });
+    return () => observer.disconnect();
+  }, []);
+  const styles = getComputedStyle(document.documentElement);
+  const token = (name: string, fallback: string) =>
+    styles.getPropertyValue(name).trim() || fallback;
+  return {
+    accent: token("--accent", "#5b5ce2"),
+    border: token("--border", "#e2e7f0"),
+    grid: token("--surface-subtle", "#f2f4fa"),
+    surface: token("--surface-raised", "#ffffff"),
+    text: token("--text", "#172036"),
+    textMuted: token("--text-muted", "#65718a"),
+    textSubtle: token("--text-subtle", "#929bb0"),
+  };
+}
 export function LoginPage() {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
@@ -51,48 +270,948 @@ export function LoginPage() {
   const [password, setPassword] = useState("");
   const [challengeToken, setChallengeToken] = useState("");
   const [code, setCode] = useState("");
-  const enterWorkspace = async () => { await queryClient.invalidateQueries({ queryKey: ["me"] }); navigate("/", { replace: true }); };
+  const enterWorkspace = async () => {
+    await queryClient.invalidateQueries({ queryKey: ["me"] });
+    navigate("/", { replace: true });
+  };
   const login = useMutation({
-    mutationFn: () => api<{ mfaRequired?: boolean; challengeToken?: string }>("/api/auth/login", { method: "POST", body: { identifier, password } }),
-    onSuccess: async (result) => { if (result.mfaRequired && result.challengeToken) setChallengeToken(result.challengeToken); else await enterWorkspace(); },
+    mutationFn: () =>
+      api<{ mfaRequired?: boolean; challengeToken?: string }>(
+        "/api/auth/login",
+        { method: "POST", body: { identifier, password } },
+      ),
+    onSuccess: async (result) => {
+      if (result.mfaRequired && result.challengeToken)
+        setChallengeToken(result.challengeToken);
+      else await enterWorkspace();
+    },
   });
-  const verifyMfa = useMutation({ mutationFn: () => api("/api/auth/login/mfa", { method: "POST", body: { challengeToken, code } }), onSuccess: enterWorkspace });
-  if (challengeToken) return <AuthFrame title="验证身份" description="请输入身份验证器当前显示的 6 位动态验证码。验证完成前不会创建登录会话。"><form className="space-y-4" onSubmit={(event) => { event.preventDefault(); verifyMfa.mutate(); }}><Field hint="验证码每 30 秒更新一次。" label="动态验证码"><input autoComplete="one-time-code" className={fieldClass} inputMode="numeric" maxLength={6} onChange={(event) => setCode(event.target.value.replace(/\D/g, ""))} pattern="[0-9]{6}" required value={code} /></Field><ErrorMessage error={verifyMfa.error} /><Button className="w-full" disabled={verifyMfa.isPending || code.length !== 6} type="submit">{verifyMfa.isPending ? "正在验证…" : "完成安全登录"}</Button><Button className="w-full" onClick={() => { setChallengeToken(""); setCode(""); }} type="button" variant="ghost">返回重新登录</Button></form></AuthFrame>;
-  return <AuthFrame title="登录工作台" description="使用组织中已验证的邮箱或手机号登录。"><form className="space-y-4" onSubmit={(event) => { event.preventDefault(); login.mutate(); }}><Field label="邮箱或手机号"><input autoComplete="username" className={fieldClass} onChange={(event) => setIdentifier(event.target.value)} required value={identifier} /></Field><Field label="密码"><input autoComplete="current-password" className={fieldClass} minLength={8} onChange={(event) => setPassword(event.target.value)} required type="password" value={password} /></Field><ErrorMessage error={login.error} /><Button className="w-full" disabled={login.isPending} type="submit">{login.isPending ? "正在安全登录…" : "登录"}</Button><p className="text-center text-sm text-[var(--text-muted)]"><Link className="font-semibold text-[var(--accent-strong)]" to="/forgot-password">忘记密码？</Link><span aria-hidden="true"> · </span>首次部署？<Link className="font-semibold text-[var(--accent-strong)]" to="/setup">初始化唯一 Owner</Link></p></form></AuthFrame>;
+  const verifyMfa = useMutation({
+    mutationFn: () =>
+      api("/api/auth/login/mfa", {
+        method: "POST",
+        body: { challengeToken, code },
+      }),
+    onSuccess: enterWorkspace,
+  });
+  if (challengeToken)
+    return (
+      <AuthFrame
+        title="验证身份"
+        description="请输入身份验证器当前显示的 6 位动态验证码。验证完成前不会创建登录会话。"
+      >
+        <form
+          className="space-y-4"
+          onSubmit={(event) => {
+            event.preventDefault();
+            verifyMfa.mutate();
+          }}
+        >
+          <Field hint="验证码每 30 秒更新一次。" label="动态验证码">
+            <input
+              autoComplete="one-time-code"
+              className={fieldClass}
+              inputMode="numeric"
+              maxLength={6}
+              onChange={(event) =>
+                setCode(event.target.value.replace(/\D/g, ""))
+              }
+              pattern="[0-9]{6}"
+              required
+              value={code}
+            />
+          </Field>
+          <ErrorMessage error={verifyMfa.error} />
+          <Button
+            className="w-full"
+            disabled={verifyMfa.isPending || code.length !== 6}
+            type="submit"
+          >
+            {verifyMfa.isPending ? "正在验证…" : "完成安全登录"}
+          </Button>
+          <Button
+            className="w-full"
+            onClick={() => {
+              setChallengeToken("");
+              setCode("");
+            }}
+            type="button"
+            variant="ghost"
+          >
+            返回重新登录
+          </Button>
+        </form>
+      </AuthFrame>
+    );
+  return (
+    <AuthFrame
+      title="登录工作台"
+      description="使用组织中已验证的邮箱或手机号登录。"
+    >
+      <form
+        className="space-y-4"
+        onSubmit={(event) => {
+          event.preventDefault();
+          login.mutate();
+        }}
+      >
+        <Field label="邮箱或手机号">
+          <input
+            autoComplete="username"
+            className={fieldClass}
+            onChange={(event) => setIdentifier(event.target.value)}
+            required
+            value={identifier}
+          />
+        </Field>
+        <Field label="密码">
+          <input
+            autoComplete="current-password"
+            className={fieldClass}
+            minLength={8}
+            onChange={(event) => setPassword(event.target.value)}
+            required
+            type="password"
+            value={password}
+          />
+        </Field>
+        <ErrorMessage error={login.error} />
+        <Button className="w-full" disabled={login.isPending} type="submit">
+          {login.isPending ? "正在安全登录…" : "登录"}
+        </Button>
+        <p className="text-center text-sm text-[var(--text-muted)]">
+          <Link
+            className="font-semibold text-[var(--accent-strong)]"
+            to="/forgot-password"
+          >
+            忘记密码？
+          </Link>
+          <span aria-hidden="true"> · </span>首次部署？
+          <Link
+            className="font-semibold text-[var(--accent-strong)]"
+            to="/setup"
+          >
+            初始化唯一 Owner
+          </Link>
+        </p>
+      </form>
+    </AuthFrame>
+  );
+}
+
+interface PendingOwnershipTransfer {
+  id: string;
+  requestedAt: string;
+  fromDisplayName: string;
+}
+
+interface PersonalIdentity {
+  identityId: string;
+  identityName: string;
+  description: string | null;
+  source: "organization" | "self_declared";
+  verifiedAt: string | null;
+}
+
+interface PersonalIdentityRequest {
+  id: string;
+  action: "add" | "remove";
+  requestedName: string;
+  requestedIdentityId: string | null;
+  reason: string | null;
+  status: "pending" | "approved" | "rejected" | "cancelled";
+  reviewNote: string | null;
+  createdAt: string;
+  reviewedAt: string | null;
+}
+
+interface PersonalIdentityProfile {
+  identities: PersonalIdentity[];
+  availableIdentities: Array<{
+    id: string;
+    name: string;
+    description: string | null;
+  }>;
+  requests: PersonalIdentityRequest[];
 }
 
 export function SecurityPage() {
   const queryClient = useQueryClient();
-  const status = useQuery({ queryKey: ["totp-status"], queryFn: () => api<{ enabled: boolean; pending: boolean }>("/api/auth/mfa/totp") });
-  const [setup, setSetup] = useState<{ secret: string; otpauthUri: string } | null>(null);
+  const status = useQuery({
+    queryKey: ["totp-status"],
+    queryFn: () =>
+      api<{ enabled: boolean; pending: boolean }>("/api/auth/mfa/totp"),
+  });
+  const pendingOwnershipTransfer = useQuery({
+    queryKey: ["pending-ownership-transfer"],
+    queryFn: () =>
+      api<{ transfer: PendingOwnershipTransfer | null }>(
+        "/api/organization/ownership-transfers/pending-for-me",
+      ),
+  });
+  const personalIdentities = useQuery({
+    queryKey: ["my-identities"],
+    queryFn: () =>
+      api<PersonalIdentityProfile>("/api/organization/my-identities"),
+  });
+  const [setup, setSetup] = useState<{
+    secret: string;
+    otpauthUri: string;
+  } | null>(null);
   const [confirmationCode, setConfirmationCode] = useState("");
   const [disablePassword, setDisablePassword] = useState("");
   const [disableCode, setDisableCode] = useState("");
-  const refresh = async () => { await queryClient.invalidateQueries({ queryKey: ["totp-status"] }); };
-  const begin = useMutation({ mutationFn: () => api<{ secret: string; otpauthUri: string }>("/api/auth/mfa/totp/setup", { method: "POST" }), onSuccess: (value) => setSetup(value) });
-  const confirm = useMutation({ mutationFn: () => api("/api/auth/mfa/totp/confirm", { method: "POST", body: { code: confirmationCode } }), onSuccess: async () => { setSetup(null); setConfirmationCode(""); await refresh(); } });
-  const disable = useMutation({ mutationFn: () => api("/api/auth/mfa/totp", { method: "DELETE", body: { password: disablePassword, code: disableCode } }), onSuccess: async () => { setDisablePassword(""); setDisableCode(""); await refresh(); } });
-  return <><PageHeader title="账户安全" description="动态验证码使用兼容 RFC 6238 的身份验证器。共享密钥仅在设置时展示一次，服务端以 AES‑GCM 加密保存。" /><div className="grid max-w-4xl gap-5 lg:grid-cols-2"><Card><CardHeader><div><h2 className="font-bold">双因素认证（TOTP）</h2><p className="mt-1 text-sm text-[var(--text-muted)]">密码之外再验证一次设备持有权。</p></div><Badge tone={status.data?.enabled ? "positive" : "neutral"}>{status.data?.enabled ? "已启用" : "未启用"}</Badge></CardHeader><CardContent className="space-y-4">{status.isPending ? <LoadingBlock /> : status.data?.enabled ? <p className="text-sm leading-6 text-[var(--text-muted)]">登录时需要密码和身份验证器的 6 位动态验证码。撤销时需要重新输入两项凭据。</p> : setup ? <><p className="text-sm leading-6 text-[var(--text-muted)]">在身份验证器中选择“手动输入密钥”，账户名任意，类型选“基于时间”。请妥善保管，不要发送给任何人。</p><Field label="一次性设置密钥"><input className={`${fieldClass} font-mono tracking-wider`} readOnly value={setup.secret} /></Field><details className="rounded-xl bg-[var(--surface-subtle)] p-3 text-xs text-[var(--text-muted)]"><summary className="cursor-pointer font-semibold">高级：otpauth 配置链接</summary><code className="mt-2 block break-all select-all">{setup.otpauthUri}</code></details><form className="space-y-3" onSubmit={(event) => { event.preventDefault(); confirm.mutate(); }}><Field label="验证身份验证器"><input autoComplete="one-time-code" className={fieldClass} inputMode="numeric" maxLength={6} onChange={(event) => setConfirmationCode(event.target.value.replace(/\D/g, ""))} required value={confirmationCode} /></Field><ErrorMessage error={confirm.error} /><Button disabled={confirm.isPending || confirmationCode.length !== 6} type="submit">{confirm.isPending ? "正在启用…" : "验证并启用"}</Button></form></> : <><p className="text-sm leading-6 text-[var(--text-muted)]">支持 Google Authenticator、Microsoft Authenticator、1Password 等标准身份验证器。</p><ErrorMessage error={begin.error} /><Button disabled={begin.isPending || status.data?.pending} onClick={() => begin.mutate()}>{begin.isPending ? "正在生成安全密钥…" : "开始设置"}</Button></>}</CardContent></Card>{status.data?.enabled ? <Card><CardHeader><h2 className="font-bold">撤销双因素认证</h2></CardHeader><CardContent><form className="space-y-4" onSubmit={(event) => { event.preventDefault(); disable.mutate(); }}><p className="text-sm leading-6 text-[var(--text-muted)]">这是敏感操作：需要当前密码和当前动态验证码。成功后，其它会话不会自动被撤销。</p><Field label="当前密码"><input autoComplete="current-password" className={fieldClass} onChange={(event) => setDisablePassword(event.target.value)} required type="password" value={disablePassword} /></Field><Field label="动态验证码"><input autoComplete="one-time-code" className={fieldClass} inputMode="numeric" maxLength={6} onChange={(event) => setDisableCode(event.target.value.replace(/\D/g, ""))} required value={disableCode} /></Field><ErrorMessage error={disable.error} /><Button disabled={disable.isPending || disableCode.length !== 6} type="submit" variant="danger">{disable.isPending ? "正在撤销…" : "撤销双因素认证"}</Button></form></CardContent></Card> : <Card><CardHeader><h2 className="font-bold">恢复与设备管理</h2></CardHeader><CardContent><p className="text-sm leading-6 text-[var(--text-muted)]">当前版本不生成恢复码。启用前请确认身份验证器已完成安全备份；遗失设备时，请由组织 Owner 按既定身份核验流程协助处理。</p></CardContent></Card>}</div></>;
+  const [ownershipPassword, setOwnershipPassword] = useState("");
+  const [ownershipTotpCode, setOwnershipTotpCode] = useState("");
+  const [selectedIdentityId, setSelectedIdentityId] = useState("");
+  const [customIdentityName, setCustomIdentityName] = useState("");
+  const [identityRequestReason, setIdentityRequestReason] = useState("");
+  const refresh = async () => {
+    await queryClient.invalidateQueries({ queryKey: ["totp-status"] });
+  };
+  const begin = useMutation({
+    mutationFn: () =>
+      api<{ secret: string; otpauthUri: string }>("/api/auth/mfa/totp/setup", {
+        method: "POST",
+      }),
+    onSuccess: (value) => setSetup(value),
+  });
+  const confirm = useMutation({
+    mutationFn: () =>
+      api("/api/auth/mfa/totp/confirm", {
+        method: "POST",
+        body: { code: confirmationCode },
+      }),
+    onSuccess: async () => {
+      setSetup(null);
+      setConfirmationCode("");
+      await refresh();
+    },
+  });
+  const disable = useMutation({
+    mutationFn: () =>
+      api("/api/auth/mfa/totp", {
+        method: "DELETE",
+        body: { password: disablePassword, code: disableCode },
+      }),
+    onSuccess: async () => {
+      setDisablePassword("");
+      setDisableCode("");
+      await refresh();
+    },
+  });
+  const confirmOwnershipTransfer = useMutation({
+    mutationFn: ({
+      transferId,
+      password,
+      totpCode,
+    }: {
+      transferId: string;
+      password: string;
+      totpCode?: string;
+    }) =>
+      api(`/api/organization/ownership-transfers/${transferId}/confirm`, {
+        method: "POST",
+        body: { password, ...(totpCode ? { totpCode } : {}) },
+      }),
+    onSuccess: async () => {
+      setOwnershipPassword("");
+      setOwnershipTotpCode("");
+      await Promise.all([
+        queryClient.invalidateQueries({
+          queryKey: ["pending-ownership-transfer"],
+        }),
+        queryClient.invalidateQueries({ queryKey: ["organization"] }),
+        queryClient.invalidateQueries({ queryKey: ["me"] }),
+      ]);
+    },
+  });
+  const rejectOwnershipTransfer = useMutation({
+    mutationFn: (transferId: string) =>
+      api(`/api/organization/ownership-transfers/${transferId}/cancel`, {
+        method: "POST",
+      }),
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({
+          queryKey: ["pending-ownership-transfer"],
+        }),
+        queryClient.invalidateQueries({ queryKey: ["organization"] }),
+      ]);
+    },
+  });
+  const requestIdentityChange = useMutation({
+    mutationFn: (body: {
+      action: "add" | "remove";
+      identityId?: string;
+      requestedName?: string;
+      reason?: string;
+    }) =>
+      api("/api/organization/my-identities/requests", {
+        method: "POST",
+        body,
+      }),
+    onSuccess: async () => {
+      setSelectedIdentityId("");
+      setCustomIdentityName("");
+      setIdentityRequestReason("");
+      await queryClient.invalidateQueries({ queryKey: ["my-identities"] });
+    },
+  });
+  return (
+    <>
+      <PageHeader
+        title="账户安全"
+        description="动态验证码使用兼容 RFC 6238 的身份验证器。共享密钥仅在设置时展示一次，服务端以 AES‑GCM 加密保存。"
+      />
+      <div className="grid max-w-4xl gap-5 lg:grid-cols-2">
+        {pendingOwnershipTransfer.data?.transfer ? (
+          <Card className="bg-[color-mix(in_srgb,var(--warning-soft)_72%,var(--surface))] lg:col-span-2">
+            <CardHeader>
+              <div>
+                <p className="app-section-label text-[var(--warning)]">
+                  高风险身份操作
+                </p>
+                <h2 className="mt-2 flex items-center gap-2 font-bold">
+                  <Crown className="text-[var(--warning)]" size={18} />
+                  待确认组织所有权转移
+                </h2>
+              </div>
+              <Badge tone="warning">需要本人确认</Badge>
+            </CardHeader>
+            <CardContent>
+              <p className="max-w-2xl text-sm leading-6 text-[var(--text-muted)]">
+                {pendingOwnershipTransfer.data.transfer.fromDisplayName}
+                已请求将唯一 Owner 身份转移给你。确认前，现任 Owner
+                与现有权限保持不变；为避免遗留会话误操作，你还需要再次验证当前密码；
+                已启用动态验证码时还须验证一组未使用的动态码。确认后，服务端会在同一事务内完成唯一
+                Owner 的原子切换，并保留完整审计记录。
+              </p>
+              <p className="mt-2 text-xs text-[var(--text-subtle)]">
+                请求时间：
+                {formatDateTime(
+                  pendingOwnershipTransfer.data.transfer.requestedAt,
+                )}
+              </p>
+              <div className="mt-4 grid max-w-xl gap-3 sm:grid-cols-2">
+                <Field label="当前密码（用于二次验证）">
+                  <input
+                    autoComplete="current-password"
+                    className={fieldClass}
+                    onChange={(event) => setOwnershipPassword(event.target.value)}
+                    type="password"
+                    value={ownershipPassword}
+                  />
+                </Field>
+                {status.data?.enabled ? (
+                  <Field label="动态验证码（6 位）">
+                    <input
+                      autoComplete="one-time-code"
+                      className={fieldClass}
+                      inputMode="numeric"
+                      maxLength={6}
+                      onChange={(event) =>
+                        setOwnershipTotpCode(
+                          event.target.value.replace(/\D/g, "").slice(0, 6),
+                        )
+                      }
+                      pattern="[0-9]*"
+                      value={ownershipTotpCode}
+                    />
+                  </Field>
+                ) : null}
+              </div>
+              <div className="mt-5 flex flex-wrap gap-2">
+                <Button
+                  disabled={
+                    confirmOwnershipTransfer.isPending ||
+                    status.isLoading ||
+                    status.isError ||
+                    !ownershipPassword ||
+                    (status.data?.enabled && !/^\d{6}$/.test(ownershipTotpCode))
+                  }
+                  onClick={() => {
+                    if (
+                      window.confirm(
+                        "确认接任唯一 Owner 吗？该操作会立即切换组织所有权。",
+                      )
+                    )
+                      confirmOwnershipTransfer.mutate(
+                        {
+                          transferId:
+                            pendingOwnershipTransfer.data!.transfer!.id,
+                          password: ownershipPassword,
+                          ...(ownershipTotpCode
+                            ? { totpCode: ownershipTotpCode }
+                            : {}),
+                        },
+                      );
+                  }}
+                >
+                  <Crown size={16} />
+                  {confirmOwnershipTransfer.isPending
+                    ? "正在确认…"
+                    : "确认接任 Owner"}
+                </Button>
+                <Button
+                  disabled={rejectOwnershipTransfer.isPending}
+                  onClick={() => {
+                    if (window.confirm("确定拒绝这笔所有权转移吗？"))
+                      rejectOwnershipTransfer.mutate(
+                        pendingOwnershipTransfer.data!.transfer!.id,
+                      );
+                  }}
+                  variant="secondary"
+                >
+                  拒绝转移
+                </Button>
+              </div>
+              <div className="mt-3">
+                <ErrorMessage
+                  error={
+                    confirmOwnershipTransfer.error ??
+                    rejectOwnershipTransfer.error ?? status.error
+                  }
+                />
+              </div>
+            </CardContent>
+          </Card>
+        ) : null}
+        <Card className="lg:col-span-2">
+          <CardHeader className="max-sm:flex-col max-sm:gap-3">
+            <div className="min-w-0">
+              <p className="app-section-label">个人协作标签</p>
+              <h2 className="mt-2 flex items-center gap-2 font-bold">
+                <Sparkles className="text-[var(--accent-strong)]" size={18} />
+                我的专业身份
+              </h2>
+              <p className="mt-1 text-sm text-[var(--text-muted)]">
+                专业身份用于协作、工作类型和分析标签；它不授予角色权限，也不改变组织岗位。
+              </p>
+            </div>
+            <Badge tone="info" className="shrink-0 self-start whitespace-nowrap">
+              独立于权限
+            </Badge>
+          </CardHeader>
+          <CardContent>
+            {personalIdentities.isPending ? (
+              <LoadingBlock />
+            ) : (
+              <>
+                <div className="flex flex-wrap gap-2">
+                  {personalIdentities.data?.identities.length ? (
+                    personalIdentities.data.identities.map((identity) => (
+                      <span
+                        className="inline-flex items-center gap-2 rounded-full bg-[var(--accent-soft)] px-3 py-1.5 text-sm font-semibold text-[var(--accent-strong)]"
+                        key={identity.identityId}
+                      >
+                        {identity.identityName}
+                        <button
+                          aria-label={`申请移除专业身份 ${identity.identityName}`}
+                          className="rounded-full text-xs text-[var(--text-muted)] transition hover:text-[var(--danger)]"
+                          disabled={requestIdentityChange.isPending}
+                          onClick={() => {
+                            if (
+                              window.confirm(
+                                `提交移除“${identity.identityName}”的申请吗？该操作需要管理人员审核。`,
+                              )
+                            )
+                              requestIdentityChange.mutate({
+                                action: "remove",
+                                identityId: identity.identityId,
+                              });
+                          }}
+                          type="button"
+                        >
+                          移除
+                        </button>
+                      </span>
+                    ))
+                  ) : (
+                    <p className="text-sm text-[var(--text-muted)]">
+                      还没有专业身份。可以从组织目录申请，或提交自定义身份供审核。
+                    </p>
+                  )}
+                </div>
+                <details className="mt-4 rounded-2xl bg-[var(--surface-subtle)] p-4">
+                  <summary className="cursor-pointer text-sm font-semibold text-[var(--text)]">
+                    申请新增专业身份
+                  </summary>
+                  <form
+                    className="mt-4 grid gap-3 md:grid-cols-2"
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      requestIdentityChange.mutate({
+                        action: "add",
+                        ...(selectedIdentityId
+                          ? { identityId: selectedIdentityId }
+                          : {}),
+                        ...(customIdentityName.trim()
+                          ? { requestedName: customIdentityName.trim() }
+                          : {}),
+                        ...(identityRequestReason.trim()
+                          ? { reason: identityRequestReason.trim() }
+                          : {}),
+                      });
+                    }}
+                  >
+                    <Field label="组织已有身份（可选）">
+                      <select
+                        className={fieldClass}
+                        onChange={(event) =>
+                          setSelectedIdentityId(event.target.value)
+                        }
+                        value={selectedIdentityId}
+                      >
+                        <option value="">选择已有身份</option>
+                        {personalIdentities.data?.availableIdentities
+                          .filter(
+                            (identity) =>
+                              !personalIdentities.data?.identities.some(
+                                (assigned) =>
+                                  assigned.identityId === identity.id,
+                              ),
+                          )
+                          .map((identity) => (
+                            <option key={identity.id} value={identity.id}>
+                              {identity.name}
+                            </option>
+                          ))}
+                      </select>
+                    </Field>
+                    <Field label="自定义身份名称（可选）">
+                      <input
+                        className={fieldClass}
+                        disabled={Boolean(selectedIdentityId)}
+                        maxLength={120}
+                        onChange={(event) =>
+                          setCustomIdentityName(event.target.value)
+                        }
+                        placeholder="例如：知识库开发"
+                        value={customIdentityName}
+                      />
+                    </Field>
+                    <div className="md:col-span-2">
+                      <Field hint="可选，最多 2,000 字。" label="申请说明">
+                        <textarea
+                          className={textAreaClass}
+                          maxLength={2000}
+                          onChange={(event) =>
+                            setIdentityRequestReason(event.target.value)
+                          }
+                          value={identityRequestReason}
+                        />
+                      </Field>
+                    </div>
+                    <div className="md:col-span-2 flex flex-wrap items-center gap-2">
+                      <Button
+                        disabled={
+                          requestIdentityChange.isPending ||
+                          (!selectedIdentityId && !customIdentityName.trim())
+                        }
+                        size="compact"
+                        type="submit"
+                      >
+                        {requestIdentityChange.isPending
+                          ? "正在提交…"
+                          : "提交身份申请"}
+                      </Button>
+                      <span className="text-xs text-[var(--text-subtle)]">
+                        申请不会自动获得管理、审批、薪资或数据访问权限。
+                      </span>
+                    </div>
+                  </form>
+                </details>
+                {personalIdentities.data?.requests.length ? (
+                  <div className="mt-4 space-y-2">
+                    <p className="app-section-label">身份申请记录</p>
+                    {personalIdentities.data.requests.map((request) => (
+                      <div
+                        className="flex flex-wrap items-center justify-between gap-3 rounded-xl bg-[var(--surface-subtle)] px-3 py-2.5"
+                        key={request.id}
+                      >
+                        <span className="min-w-0">
+                          <strong className="block text-sm">
+                            {request.action === "add" ? "新增" : "移除"} ·{" "}
+                            {request.requestedName}
+                          </strong>
+                          <small className="mt-0.5 block text-xs text-[var(--text-muted)]">
+                            {formatDateTime(request.createdAt)}
+                            {request.reviewNote
+                              ? ` · 审核说明：${request.reviewNote}`
+                              : ""}
+                          </small>
+                        </span>
+                        <Badge
+                          tone={
+                            request.status === "approved"
+                              ? "positive"
+                              : request.status === "rejected"
+                                ? "danger"
+                                : request.status === "pending"
+                                  ? "warning"
+                                  : "neutral"
+                          }
+                        >
+                          {request.status === "approved"
+                            ? "已通过"
+                            : request.status === "rejected"
+                              ? "已拒绝"
+                              : request.status === "pending"
+                                ? "待审核"
+                                : "已取消"}
+                        </Badge>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+                <div className="mt-3">
+                  <ErrorMessage
+                    error={
+                      personalIdentities.error ?? requestIdentityChange.error
+                    }
+                  />
+                </div>
+              </>
+            )}
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader>
+            <div>
+              <h2 className="font-bold">双因素认证（TOTP）</h2>
+              <p className="mt-1 text-sm text-[var(--text-muted)]">
+                密码之外再验证一次设备持有权。
+              </p>
+            </div>
+            <Badge tone={status.data?.enabled ? "positive" : "neutral"}>
+              {status.data?.enabled ? "已启用" : "未启用"}
+            </Badge>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {status.isPending ? (
+              <LoadingBlock />
+            ) : status.data?.enabled ? (
+              <p className="text-sm leading-6 text-[var(--text-muted)]">
+                登录时需要密码和身份验证器的 6
+                位动态验证码。撤销时需要重新输入两项凭据。
+              </p>
+            ) : setup ? (
+              <>
+                <p className="text-sm leading-6 text-[var(--text-muted)]">
+                  在身份验证器中选择“手动输入密钥”，账户名任意，类型选“基于时间”。请妥善保管，不要发送给任何人。
+                </p>
+                <Field label="一次性设置密钥">
+                  <input
+                    className={`${fieldClass} font-mono tracking-wider`}
+                    readOnly
+                    value={setup.secret}
+                  />
+                </Field>
+                <details className="rounded-xl bg-[var(--surface-subtle)] p-3 text-xs text-[var(--text-muted)]">
+                  <summary className="cursor-pointer font-semibold">
+                    高级：otpauth 配置链接
+                  </summary>
+                  <code className="mt-2 block break-all select-all">
+                    {setup.otpauthUri}
+                  </code>
+                </details>
+                <form
+                  className="space-y-3"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    confirm.mutate();
+                  }}
+                >
+                  <Field label="验证身份验证器">
+                    <input
+                      autoComplete="one-time-code"
+                      className={fieldClass}
+                      inputMode="numeric"
+                      maxLength={6}
+                      onChange={(event) =>
+                        setConfirmationCode(
+                          event.target.value.replace(/\D/g, ""),
+                        )
+                      }
+                      required
+                      value={confirmationCode}
+                    />
+                  </Field>
+                  <ErrorMessage error={confirm.error} />
+                  <Button
+                    disabled={
+                      confirm.isPending || confirmationCode.length !== 6
+                    }
+                    type="submit"
+                  >
+                    {confirm.isPending ? "正在启用…" : "验证并启用"}
+                  </Button>
+                </form>
+              </>
+            ) : (
+              <>
+                <p className="text-sm leading-6 text-[var(--text-muted)]">
+                  支持 Google Authenticator、Microsoft Authenticator、1Password
+                  等标准身份验证器。
+                </p>
+                <ErrorMessage error={begin.error} />
+                <Button
+                  disabled={begin.isPending || status.data?.pending}
+                  onClick={() => begin.mutate()}
+                >
+                  {begin.isPending ? "正在生成安全密钥…" : "开始设置"}
+                </Button>
+              </>
+            )}
+          </CardContent>
+        </Card>
+        {status.data?.enabled ? (
+          <Card>
+            <CardHeader>
+              <h2 className="font-bold">撤销双因素认证</h2>
+            </CardHeader>
+            <CardContent>
+              <form
+                className="space-y-4"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  disable.mutate();
+                }}
+              >
+                <p className="text-sm leading-6 text-[var(--text-muted)]">
+                  这是敏感操作：需要当前密码和当前动态验证码。成功后，其它会话不会自动被撤销。
+                </p>
+                <Field label="当前密码">
+                  <input
+                    autoComplete="current-password"
+                    className={fieldClass}
+                    onChange={(event) => setDisablePassword(event.target.value)}
+                    required
+                    type="password"
+                    value={disablePassword}
+                  />
+                </Field>
+                <Field label="动态验证码">
+                  <input
+                    autoComplete="one-time-code"
+                    className={fieldClass}
+                    inputMode="numeric"
+                    maxLength={6}
+                    onChange={(event) =>
+                      setDisableCode(event.target.value.replace(/\D/g, ""))
+                    }
+                    required
+                    value={disableCode}
+                  />
+                </Field>
+                <ErrorMessage error={disable.error} />
+                <Button
+                  disabled={disable.isPending || disableCode.length !== 6}
+                  type="submit"
+                  variant="danger"
+                >
+                  {disable.isPending ? "正在撤销…" : "撤销双因素认证"}
+                </Button>
+              </form>
+            </CardContent>
+          </Card>
+        ) : (
+          <Card>
+            <CardHeader>
+              <h2 className="font-bold">恢复与设备管理</h2>
+            </CardHeader>
+            <CardContent>
+              <p className="text-sm leading-6 text-[var(--text-muted)]">
+                当前版本不生成恢复码。启用前请确认身份验证器已完成安全备份；遗失设备时，请由组织
+                Owner 按既定身份核验流程协助处理。
+              </p>
+            </CardContent>
+          </Card>
+        )}
+      </div>
+    </>
+  );
 }
 
 const notificationCategories = [
-  { category: "timer_long_running", title: "长时间计时", description: "计时器运行时间过长时提醒。" },
-  { category: "payroll_cutoff_pending", title: "薪资截止", description: "薪资截止日存在待处理事项时提醒。" },
-  { category: "ai_report_ready", title: "AI 报告完成", description: "异步洞察生成完成时提醒。" },
-  { category: "ai_report_failed", title: "AI 报告失败", description: "异步洞察生成失败时提醒。" },
+  {
+    category: "timer_long_running",
+    title: "长时间计时",
+    description: "计时器运行时间过长时提醒。",
+  },
+  {
+    category: "payroll_cutoff_pending",
+    title: "薪资截止",
+    description: "薪资截止日存在待处理事项时提醒。",
+  },
+  {
+    category: "ai_report_ready",
+    title: "AI 报告完成",
+    description: "异步洞察生成完成时提醒。",
+  },
+  {
+    category: "ai_report_failed",
+    title: "AI 报告失败",
+    description: "异步洞察生成失败时提醒。",
+  },
 ] as const;
 
-interface NotificationPreference { category: string; inAppEnabled: boolean; mutedUntil: string | null; pushEnabled: boolean; emailEnabled: boolean; quietHours: Record<string, unknown> }
+interface NotificationPreference {
+  category: string;
+  inAppEnabled: boolean;
+  mutedUntil: string | null;
+  pushEnabled: boolean;
+  emailEnabled: boolean;
+  quietHours: Record<string, unknown>;
+}
 
 export function NotificationPreferencesPage() {
   const queryClient = useQueryClient();
-  const preferences = useQuery({ queryKey: ["notification-preferences"], queryFn: () => api<{ items: NotificationPreference[] }>("/api/notification-preferences") });
-  const save = useMutation({ mutationFn: (body: { category: string; inAppEnabled: boolean; mutedUntil: string | null }) => api("/api/notification-preferences", { method: "PUT", body: { ...body, pushEnabled: false, emailEnabled: false, quietHours: {} } }), onSuccess: async () => { await queryClient.invalidateQueries({ queryKey: ["notification-preferences"] }); } });
-  const getPreference = (category: string) => preferences.data?.items.find((item) => item.category === category) ?? { category, inAppEnabled: true, mutedUntil: null };
-  return <><PageHeader title="通知设置" description="应用内通知默认开启。当前版本不会把“邮件”或“浏览器推送”开关伪装成已投递能力；它们会在通道真正配置并验证后才开放。" /><Card className="max-w-4xl"><CardHeader><div><h2 className="font-bold">应用内提醒</h2><p className="mt-1 text-sm text-[var(--text-muted)]">关闭某类提醒会阻止 worker 创建该分类的应用内通知；静音会在截止时间自动恢复。</p></div></CardHeader><CardContent>{preferences.isPending ? <LoadingBlock /> : <div className="divide-y divide-[var(--border)]">{notificationCategories.map((item) => { const preference = getPreference(item.category); const muted = preference.mutedUntil && new Date(preference.mutedUntil) > new Date(); return <div className="flex flex-col gap-3 py-4 first:pt-0 sm:flex-row sm:items-center" key={item.category}><div className="min-w-0 flex-1"><p className="font-semibold">{item.title}</p><p className="mt-1 text-sm text-[var(--text-muted)]">{item.description}{muted ? ` 已静音至 ${formatDateTime(preference.mutedUntil!)}` : ""}</p></div><div className="flex flex-wrap gap-2"><Button disabled={save.isPending} onClick={() => save.mutate({ category: item.category, inAppEnabled: !preference.inAppEnabled, mutedUntil: preference.mutedUntil })} size="compact" variant={preference.inAppEnabled ? "secondary" : "primary"}>{preference.inAppEnabled ? "关闭" : "开启"}</Button>{muted ? <Button disabled={save.isPending} onClick={() => save.mutate({ category: item.category, inAppEnabled: preference.inAppEnabled, mutedUntil: null })} size="compact" variant="ghost">取消静音</Button> : <Button disabled={save.isPending || !preference.inAppEnabled} onClick={() => save.mutate({ category: item.category, inAppEnabled: preference.inAppEnabled, mutedUntil: new Date(Date.now() + 60 * 60_000).toISOString() })} size="compact" variant="ghost">静音 1 小时</Button>}</div></div>; })}</div>}<div className="mt-4"><ErrorMessage error={preferences.error ?? save.error} /></div></CardContent></Card></>;
+  const preferences = useQuery({
+    queryKey: ["notification-preferences"],
+    queryFn: () =>
+      api<{ items: NotificationPreference[] }>("/api/notification-preferences"),
+  });
+  const save = useMutation({
+    mutationFn: (body: {
+      category: string;
+      inAppEnabled: boolean;
+      mutedUntil: string | null;
+    }) =>
+      api("/api/notification-preferences", {
+        method: "PUT",
+        body: {
+          ...body,
+          pushEnabled: false,
+          emailEnabled: false,
+          quietHours: {},
+        },
+      }),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({
+        queryKey: ["notification-preferences"],
+      });
+    },
+  });
+  const getPreference = (category: string) =>
+    preferences.data?.items.find((item) => item.category === category) ?? {
+      category,
+      inAppEnabled: true,
+      mutedUntil: null,
+    };
+  return (
+    <>
+      <PageHeader
+        title="通知设置"
+        description="应用内通知默认开启。当前版本不会把“邮件”或“浏览器推送”开关伪装成已投递能力；它们会在通道真正配置并验证后才开放。"
+      />
+      <Card className="max-w-4xl">
+        <CardHeader>
+          <div>
+            <h2 className="font-bold">应用内提醒</h2>
+            <p className="mt-1 text-sm text-[var(--text-muted)]">
+              关闭某类提醒会阻止 worker
+              创建该分类的应用内通知；静音会在截止时间自动恢复。
+            </p>
+          </div>
+        </CardHeader>
+        <CardContent>
+          {preferences.isPending ? (
+            <LoadingBlock />
+          ) : (
+            <div className="divide-y divide-[var(--border)]">
+              {notificationCategories.map((item) => {
+                const preference = getPreference(item.category);
+                const muted =
+                  preference.mutedUntil &&
+                  new Date(preference.mutedUntil) > new Date();
+                return (
+                  <div
+                    className="flex flex-col gap-3 py-4 first:pt-0 sm:flex-row sm:items-center"
+                    key={item.category}
+                  >
+                    <div className="min-w-0 flex-1">
+                      <p className="font-semibold">{item.title}</p>
+                      <p className="mt-1 text-sm text-[var(--text-muted)]">
+                        {item.description}
+                        {muted
+                          ? ` 已静音至 ${formatDateTime(preference.mutedUntil!)}`
+                          : ""}
+                      </p>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      <Button
+                        disabled={save.isPending}
+                        onClick={() =>
+                          save.mutate({
+                            category: item.category,
+                            inAppEnabled: !preference.inAppEnabled,
+                            mutedUntil: preference.mutedUntil,
+                          })
+                        }
+                        size="compact"
+                        variant={
+                          preference.inAppEnabled ? "secondary" : "primary"
+                        }
+                      >
+                        {preference.inAppEnabled ? "关闭" : "开启"}
+                      </Button>
+                      {muted ? (
+                        <Button
+                          disabled={save.isPending}
+                          onClick={() =>
+                            save.mutate({
+                              category: item.category,
+                              inAppEnabled: preference.inAppEnabled,
+                              mutedUntil: null,
+                            })
+                          }
+                          size="compact"
+                          variant="ghost"
+                        >
+                          取消静音
+                        </Button>
+                      ) : (
+                        <Button
+                          disabled={save.isPending || !preference.inAppEnabled}
+                          onClick={() =>
+                            save.mutate({
+                              category: item.category,
+                              inAppEnabled: preference.inAppEnabled,
+                              mutedUntil: new Date(
+                                Date.now() + 60 * 60_000,
+                              ).toISOString(),
+                            })
+                          }
+                          size="compact"
+                          variant="ghost"
+                        >
+                          静音 1 小时
+                        </Button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+          <div className="mt-4">
+            <ErrorMessage error={preferences.error ?? save.error} />
+          </div>
+        </CardContent>
+      </Card>
+    </>
+  );
 }
 
-interface ImportPreview { importId: string; hash: string; rowCount: number; validCount: number; errors: Array<{ row: number; field: string; message: string }> }
+interface ImportPreview {
+  importId: string;
+  hash: string;
+  rowCount: number;
+  validCount: number;
+  errors: Array<{ row: number; field: string; message: string }>;
+}
 
 export function ImportPage({ me }: { me: Me }) {
   const queryClient = useQueryClient();
@@ -100,75 +1219,1356 @@ export function ImportPage({ me }: { me: Me }) {
   const [fileName, setFileName] = useState("");
   const [preview, setPreview] = useState<ImportPreview | null>(null);
   const [fileError, setFileError] = useState<string | null>(null);
-  const previewImport = useMutation({ mutationFn: () => api<ImportPreview>("/api/imports/work-sessions/preview", { method: "POST", body: { csv } }), onSuccess: setPreview });
-  const confirmImport = useMutation({ mutationFn: () => { if (!preview) throw new Error("请先完成预览。"); return api<{ importedCount: number }>(`/api/imports/${preview.importId}/confirm`, { method: "POST", body: { csv } }); }, onSuccess: async () => { setPreview(null); setCsv(""); setFileName(""); await queryClient.invalidateQueries({ queryKey: ["work-sessions"] }); } });
-  if (!me.permissions.some((grant) => grant.permission === "import.scope" && grant.scopeKind === "organization")) return <><PageHeader title="导入工时" description="导入属于受控批量写入操作。" /><Card><EmptyState description="你没有组织级导入授权；请联系组织管理员按范围授予 import.scope。" icon={<FileText />} title="没有导入权限" /></Card></>;
+  const previewImport = useMutation({
+    mutationFn: () =>
+      api<ImportPreview>("/api/imports/work-sessions/preview", {
+        method: "POST",
+        body: { csv },
+      }),
+    onSuccess: setPreview,
+  });
+  const confirmImport = useMutation({
+    mutationFn: () => {
+      if (!preview) throw new Error("请先完成预览。");
+      return api<{ importedCount: number }>(
+        `/api/imports/${preview.importId}/confirm`,
+        { method: "POST", body: { csv } },
+      );
+    },
+    onSuccess: async () => {
+      setPreview(null);
+      setCsv("");
+      setFileName("");
+      await queryClient.invalidateQueries({ queryKey: ["work-sessions"] });
+    },
+  });
+  if (
+    !me.permissions.some(
+      (grant) =>
+        grant.permission === "import.scope" &&
+        grant.scopeKind === "organization",
+    )
+  )
+    return (
+      <>
+        <PageHeader title="导入工时" description="导入属于受控批量写入操作。" />
+        <Card>
+          <EmptyState
+            description="你没有组织级导入授权；请联系组织管理员按范围授予 import.scope。"
+            icon={<FileText />}
+            title="没有导入权限"
+          />
+        </Card>
+      </>
+    );
   const selectFile = async (file: File | undefined) => {
-    setPreview(null); setFileError(null);
+    setPreview(null);
+    setFileError(null);
     if (!file) return;
-    if (!file.name.toLowerCase().endsWith(".csv")) { setFileError("请选择 CSV 文件。"); return; }
-    if (file.size > 5 * 1024 * 1024) { setFileError("CSV 文件不能超过 5 MB。"); return; }
-    setFileName(file.name); setCsv(await file.text());
+    if (!file.name.toLowerCase().endsWith(".csv")) {
+      setFileError("请选择 CSV 文件。");
+      return;
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      setFileError("CSV 文件不能超过 5 MB。");
+      return;
+    }
+    setFileName(file.name);
+    setCsv(await file.text());
   };
   const errors = preview?.errors ?? [];
-  return <><PageHeader title="导入工时" description="文件仅在当前浏览器读取后提交预览。服务端会逐行校验并冻结内容哈希；确认时仅导入与预览完全相同的文件，任一行失败则整批不写入。" /><div className="grid max-w-5xl gap-5 xl:grid-cols-[minmax(0,1fr)_360px]"><Card><CardHeader><div><h2 className="font-bold">上传 CSV</h2><p className="mt-1 text-sm text-[var(--text-muted)]">必需列：startAt、endAt、content；可选列包括 timezone、result、blockers、nextStep、visibility。</p></div></CardHeader><CardContent className="space-y-4"><Field hint="最大 5 MB、最多 10,000 条；请选择同一时区语义明确的记录。" label="工时 CSV 文件"><input accept=".csv,text/csv" className={fieldClass} onChange={(event) => void selectFile(event.target.files?.[0])} type="file" /></Field>{fileName ? <p className="rounded-xl bg-[var(--surface-subtle)] p-3 text-sm">已选择：<strong>{fileName}</strong> · {new Blob([csv]).size.toLocaleString("zh-CN")} bytes</p> : null}<ErrorMessage error={fileError ?? previewImport.error ?? confirmImport.error} /><div className="flex flex-wrap gap-2"><Button disabled={!csv || previewImport.isPending} onClick={() => previewImport.mutate()}>{previewImport.isPending ? "正在逐行校验…" : "预览并校验"}</Button><Button disabled={!preview || errors.length > 0 || confirmImport.isPending} onClick={() => confirmImport.mutate()} variant="secondary">{confirmImport.isPending ? "正在原子导入…" : "确认原子导入"}</Button></div>{confirmImport.data ? <p className="rounded-xl bg-[var(--success-soft)] p-3 text-sm text-[var(--success)]" role="status">已原子导入 {confirmImport.data.importedCount} 条工时记录。</p> : null}</CardContent></Card><Card className="h-fit"><CardHeader><h2 className="font-bold">预览结果</h2></CardHeader><CardContent>{preview ? <div className="space-y-3"><StatusLine label="数据行" value={`${preview.rowCount} 条`} /><StatusLine label="可导入" value={`${preview.validCount} 条`} /><StatusLine label="错误" value={`${errors.length} 项`} />{errors.length === 0 ? <p className="rounded-xl bg-[var(--success-soft)] p-3 text-sm text-[var(--success)]">校验通过，可以确认导入。</p> : <p className="rounded-xl bg-[var(--danger-soft)] p-3 text-sm text-[var(--danger)]">存在错误，确认按钮已禁用。修复原文件后请重新预览。</p>}</div> : <p className="text-sm leading-6 text-[var(--text-muted)]">选择文件后点击“预览并校验”。不会在预览阶段写入任何工时。</p>}</CardContent></Card></div>{errors.length ? <Card className="mt-5 max-w-5xl"><CardHeader><h2 className="font-bold">逐行错误</h2><Badge tone="danger">最多显示全部返回错误</Badge></CardHeader><CardContent><div className="overflow-x-auto"><table className="w-full min-w-[540px] text-left text-sm"><thead className="text-[var(--text-muted)]"><tr><th className="pb-3 pr-4">行</th><th className="pb-3 pr-4">字段</th><th className="pb-3">原因</th></tr></thead><tbody>{errors.map((error, index) => <tr className="border-t border-[var(--border)]" key={`${error.row}-${error.field}-${index}`}><td className="py-3 pr-4 tabular-nums">{error.row}</td><td className="py-3 pr-4 font-mono text-xs">{error.field}</td><td className="py-3">{error.message}</td></tr>)}</tbody></table></div></CardContent></Card> : null}</>;
+  return (
+    <>
+      <PageHeader
+        title="导入工时"
+        description="文件仅在当前浏览器读取后提交预览。服务端会逐行校验并冻结内容哈希；确认时仅导入与预览完全相同的文件，任一行失败则整批不写入。"
+      />
+      <div className="grid max-w-5xl gap-5 xl:grid-cols-[minmax(0,1fr)_360px]">
+        <Card>
+          <CardHeader>
+            <div>
+              <h2 className="font-bold">上传 CSV</h2>
+              <p className="mt-1 text-sm text-[var(--text-muted)]">
+                必需列：startAt、endAt、content；可选列包括
+                membershipId、timezone、result、blockers、nextStep、visibility。
+              </p>
+            </div>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <Field
+              hint="最大 5 MB、最多 10,000 条。填 membershipId 时会导入到该组织内的在职成员；留空才会导入到当前操作账号。"
+              label="工时 CSV 文件"
+            >
+              <input
+                accept=".csv,text/csv"
+                className={fieldClass}
+                onChange={(event) => void selectFile(event.target.files?.[0])}
+                type="file"
+              />
+            </Field>
+            {fileName ? (
+              <p className="rounded-xl bg-[var(--surface-subtle)] p-3 text-sm">
+                已选择：<strong>{fileName}</strong> ·{" "}
+                {new Blob([csv]).size.toLocaleString("zh-CN")} bytes
+              </p>
+            ) : null}
+            <ErrorMessage
+              error={fileError ?? previewImport.error ?? confirmImport.error}
+            />
+            <div className="flex flex-wrap gap-2">
+              <Button
+                disabled={!csv || previewImport.isPending}
+                onClick={() => previewImport.mutate()}
+              >
+                {previewImport.isPending ? "正在逐行校验…" : "预览并校验"}
+              </Button>
+              <Button
+                disabled={
+                  !preview || errors.length > 0 || confirmImport.isPending
+                }
+                onClick={() => confirmImport.mutate()}
+                variant="secondary"
+              >
+                {confirmImport.isPending ? "正在原子导入…" : "确认原子导入"}
+              </Button>
+            </div>
+            {confirmImport.data ? (
+              <p
+                className="rounded-xl bg-[var(--success-soft)] p-3 text-sm text-[var(--success)]"
+                role="status"
+              >
+                已原子导入 {confirmImport.data.importedCount} 条工时记录。
+              </p>
+            ) : null}
+          </CardContent>
+        </Card>
+        <Card className="h-fit">
+          <CardHeader>
+            <h2 className="font-bold">预览结果</h2>
+          </CardHeader>
+          <CardContent>
+            {preview ? (
+              <div className="space-y-3">
+                <StatusLine label="数据行" value={`${preview.rowCount} 条`} />
+                <StatusLine label="可导入" value={`${preview.validCount} 条`} />
+                <StatusLine label="错误" value={`${errors.length} 项`} />
+                {errors.length === 0 ? (
+                  <p className="rounded-xl bg-[var(--success-soft)] p-3 text-sm text-[var(--success)]">
+                    校验通过，可以确认导入。
+                  </p>
+                ) : (
+                  <p className="rounded-xl bg-[var(--danger-soft)] p-3 text-sm text-[var(--danger)]">
+                    存在错误，确认按钮已禁用。修复原文件后请重新预览。
+                  </p>
+                )}
+              </div>
+            ) : (
+              <p className="text-sm leading-6 text-[var(--text-muted)]">
+                选择文件后点击“预览并校验”。不会在预览阶段写入任何工时。
+              </p>
+            )}
+          </CardContent>
+        </Card>
+      </div>
+      {errors.length ? (
+        <Card className="mt-5 max-w-5xl">
+          <CardHeader>
+            <h2 className="font-bold">逐行错误</h2>
+            <Badge tone="danger">最多显示全部返回错误</Badge>
+          </CardHeader>
+          <CardContent>
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[540px] text-left text-sm">
+                <thead className="text-[var(--text-muted)]">
+                  <tr>
+                    <th className="pb-3 pr-4">行</th>
+                    <th className="pb-3 pr-4">字段</th>
+                    <th className="pb-3">原因</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {errors.map((error, index) => (
+                    <tr
+                      className="border-t border-[var(--border)]"
+                      key={`${error.row}-${error.field}-${index}`}
+                    >
+                      <td className="py-3 pr-4 tabular-nums">{error.row}</td>
+                      <td className="py-3 pr-4 font-mono text-xs">
+                        {error.field}
+                      </td>
+                      <td className="py-3">{error.message}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </CardContent>
+        </Card>
+      ) : null}
+    </>
+  );
 }
 
 export function PasswordResetRequestPage() {
-  const [identifier, setIdentifier] = useState("");
-  const requestReset = useMutation({ mutationFn: () => api<{ accepted: boolean; message: string }>("/api/auth/password-reset/request", { method: "POST", body: { identifier } }) });
-  return <AuthFrame title="重置密码" description="输入组织中登记的邮箱。无论该账号是否存在，系统都不会在此页面泄露账号状态。"><form className="space-y-4" onSubmit={(event) => { event.preventDefault(); requestReset.mutate(); }}><Field label="邮箱"><input autoComplete="email" className={fieldClass} onChange={(event) => setIdentifier(event.target.value)} required type="email" value={identifier} /></Field><ErrorMessage error={requestReset.error} />{requestReset.data ? <p className="rounded-xl bg-[var(--success-soft)] p-3 text-sm text-[var(--success)]" role="status">{requestReset.data.message}</p> : null}<Button className="w-full" disabled={requestReset.isPending} type="submit">{requestReset.isPending ? "正在提交…" : "发送重置链接"}</Button><p className="text-center text-sm"><Link className="font-semibold text-[var(--accent-strong)]" to="/login">返回登录</Link></p></form></AuthFrame>;
+  const requestReset = useMutation({
+    mutationFn: (identifier: string) =>
+      api<{ accepted: boolean; message: string }>(
+        "/api/auth/password-reset/request",
+        { method: "POST", body: { identifier } },
+      ),
+  });
+  return (
+    <AuthFrame
+      title="重置密码"
+      description="输入组织中登记的邮箱或手机号。无论该账号是否存在，系统都不会在此页面泄露账号状态。"
+    >
+      <form
+        className="space-y-4"
+        onSubmit={(event) => {
+          event.preventDefault();
+          const formData = new FormData(event.currentTarget);
+          const identifier = String(formData.get("identifier") ?? "").trim();
+          if (!identifier) return;
+          requestReset.mutate(identifier);
+        }}
+      >
+        <Field label="邮箱或手机号">
+          <input
+            autoComplete="username"
+            className={fieldClass}
+            name="identifier"
+            placeholder="邮箱或 +8613812345678"
+            required
+            type="text"
+          />
+        </Field>
+        <ErrorMessage error={requestReset.error} />
+        {requestReset.data ? (
+          <p
+            className="rounded-xl bg-[var(--success-soft)] p-3 text-sm text-[var(--success)]"
+            role="status"
+          >
+            {requestReset.data.message}
+          </p>
+        ) : null}
+        <Button
+          className="w-full"
+          disabled={requestReset.isPending}
+          type="submit"
+        >
+          {requestReset.isPending ? "正在提交…" : "发送重置链接"}
+        </Button>
+        <p className="text-center text-sm">
+          <Link
+            className="font-semibold text-[var(--accent-strong)]"
+            to="/login"
+          >
+            返回登录
+          </Link>
+        </p>
+      </form>
+    </AuthFrame>
+  );
 }
 
 export function PasswordResetPage() {
   const navigate = useNavigate();
-  const [token] = useState(() => new URLSearchParams(window.location.search).get("token") ?? "");
+  const [token] = useState(
+    () => new URLSearchParams(window.location.search).get("token") ?? "",
+  );
   const [password, setPassword] = useState("");
   const [confirmation, setConfirmation] = useState("");
-  const reset = useMutation({ mutationFn: () => { if (password !== confirmation) throw new Error("两次输入的密码不一致。"); return api("/api/auth/password-reset/complete", { method: "POST", body: { token, password } }); }, onSuccess: () => navigate("/login", { replace: true }) });
-  return <AuthFrame title="设置新密码" description="重置成功后，所有旧设备的登录会话都会被撤销。"><form className="space-y-4" onSubmit={(event) => { event.preventDefault(); reset.mutate(); }}><Field hint="至少 12 位，包含大小写字母、数字和特殊字符。" label="新密码"><input autoComplete="new-password" className={fieldClass} minLength={12} onChange={(event) => setPassword(event.target.value)} required type="password" value={password} /></Field><Field label="确认新密码"><input autoComplete="new-password" className={fieldClass} minLength={12} onChange={(event) => setConfirmation(event.target.value)} required type="password" value={confirmation} /></Field><ErrorMessage error={reset.error} /><Button className="w-full" disabled={!token || reset.isPending} type="submit">{reset.isPending ? "正在安全重置…" : "重置密码并撤销旧会话"}</Button>{!token ? <p className="text-sm text-[var(--danger)]" role="alert">链接中缺少一次性令牌，请重新申请重置邮件。</p> : null}</form></AuthFrame>;
+  const reset = useMutation({
+    mutationFn: () => {
+      if (password !== confirmation) throw new Error("两次输入的密码不一致。");
+      return api("/api/auth/password-reset/complete", {
+        method: "POST",
+        body: { token, password },
+      });
+    },
+    onSuccess: () => navigate("/login", { replace: true }),
+  });
+  return (
+    <AuthFrame
+      title="设置新密码"
+      description="重置成功后，所有旧设备的登录会话都会被撤销。"
+    >
+      <form
+        className="space-y-4"
+        onSubmit={(event) => {
+          event.preventDefault();
+          reset.mutate();
+        }}
+      >
+        <Field
+          hint="至少 12 位，包含大小写字母、数字和特殊字符。"
+          label="新密码"
+        >
+          <input
+            autoComplete="new-password"
+            className={fieldClass}
+            minLength={12}
+            onChange={(event) => setPassword(event.target.value)}
+            required
+            type="password"
+            value={password}
+          />
+        </Field>
+        <Field label="确认新密码">
+          <input
+            autoComplete="new-password"
+            className={fieldClass}
+            minLength={12}
+            onChange={(event) => setConfirmation(event.target.value)}
+            required
+            type="password"
+            value={confirmation}
+          />
+        </Field>
+        <ErrorMessage error={reset.error} />
+        <Button
+          className="w-full"
+          disabled={!token || reset.isPending}
+          type="submit"
+        >
+          {reset.isPending ? "正在安全重置…" : "重置密码并撤销旧会话"}
+        </Button>
+        {!token ? (
+          <p className="text-sm text-[var(--danger)]" role="alert">
+            链接中缺少一次性令牌，请重新申请重置邮件。
+          </p>
+        ) : null}
+      </form>
+    </AuthFrame>
+  );
 }
 
-function AuthFrame({ title, description, children }: { title: string; description: string; children: ReactNode }) {
-  return <div className="grid min-h-dvh bg-[var(--canvas)] lg:grid-cols-[minmax(0,1fr)_560px]"><div className="relative hidden overflow-hidden bg-[#123c31] p-12 text-white lg:flex lg:flex-col lg:justify-between"><div className="pointer-events-none absolute inset-0 opacity-50" style={{ backgroundImage: "radial-gradient(circle at 78% 24%, rgb(123 225 170 / 0.34), transparent 17rem), linear-gradient(120deg, transparent 26%, rgb(255 255 255 / 0.055) 26.2%, transparent 26.4%), linear-gradient(120deg, transparent 45%, rgb(255 255 255 / 0.05) 45.2%, transparent 45.4%)" }} /><div className="relative flex items-center gap-3 text-sm font-bold"><div className="grid size-10 place-items-center rounded-[14px] bg-white/14 ring-1 ring-white/15"><Clock3 size={20} /></div><span>时序 · 工作智能</span></div><div className="relative max-w-2xl"><p className="text-xs font-extrabold tracking-[0.16em] text-emerald-100/70 uppercase">Work intelligence, grounded in facts</p><p className="mt-5 max-w-xl text-[42px] font-extrabold leading-[1.12] tracking-[-0.055em]">让每一段工作，都有清晰的下一步。</p><p className="mt-6 max-w-lg text-[15px] leading-7 text-white/70">时间、项目、审批、薪资与洞察共用同一套授权与版本事实。你可以低打扰地记录工作，系统负责可靠地关联与解释。</p><div className="mt-10 grid max-w-lg grid-cols-3 gap-3"><div className="rounded-2xl border border-white/12 bg-white/8 p-3"><p className="text-lg font-extrabold">1</p><p className="mt-1 text-[11px] leading-4 text-white/60">统一事实来源</p></div><div className="rounded-2xl border border-white/12 bg-white/8 p-3"><p className="text-lg font-extrabold">0</p><p className="mt-1 text-[11px] leading-4 text-white/60">虚构的业务数据</p></div><div className="rounded-2xl border border-white/12 bg-white/8 p-3"><p className="text-lg font-extrabold">∞</p><p className="mt-1 text-[11px] leading-4 text-white/60">可追溯的协作链</p></div></div></div><p className="relative text-xs text-white/50">安全会话 · 最小权限 · 全程审计</p></div><div className="relative flex items-center justify-center p-5 sm:p-10"><div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_100%_0%,color-mix(in_srgb,var(--accent)_8%,transparent),transparent_25rem)]" /><Card className="relative w-full max-w-md border-[color-mix(in_srgb,var(--border)_85%,var(--accent))] bg-[color-mix(in_srgb,var(--surface)_94%,transparent)] shadow-[var(--shadow-float)]"><CardContent className="p-6 sm:p-9"><div className="mb-8"><div className="mb-5 grid size-10 place-items-center rounded-[14px] bg-[var(--accent-soft)] text-[var(--accent-strong)] lg:hidden"><Clock3 size={20} /></div><p className="text-[11px] font-extrabold tracking-[0.13em] text-[var(--accent-strong)] uppercase">安全访问</p><h1 className="mt-2 text-2xl font-extrabold tracking-[-0.04em]">{title}</h1><p className="mt-3 text-sm leading-6 text-[var(--text-muted)]">{description}</p></div>{children}</CardContent></Card></div></div>;
+function AuthFrame({
+  title,
+  description,
+  children,
+}: {
+  title: string;
+  description: string;
+  children: ReactNode;
+}) {
+  return (
+    <div className="auth-shell grid min-h-dvh lg:grid-cols-[minmax(0,1fr)_minmax(28rem,0.72fr)]">
+      <section className="auth-story relative hidden overflow-hidden p-12 lg:flex lg:flex-col lg:justify-between">
+        <div className="auth-brand flex items-center gap-3 text-sm font-bold text-[#253150]">
+          <div className="auth-brand-mark grid size-10 place-items-center rounded-[14px]">
+            <Clock3 size={20} />
+          </div>
+          <span>时序 · 工作智能</span>
+        </div>
+        <div className="auth-story-copy relative max-w-2xl">
+          <p className="text-xs font-extrabold tracking-[0.16em] uppercase">
+            Work intelligence, grounded in facts
+          </p>
+          <p className="mt-5 max-w-xl text-[42px] font-extrabold leading-[1.12] tracking-[-0.055em]">
+            让每一段工作，
+            <br />
+            都有清晰的下一步。
+          </p>
+          <p className="mt-6 max-w-lg text-[15px] leading-7">
+            记录、项目、审批、薪资与洞察共用同一条事实链。你专注推进工作，系统负责可靠地关联与解释。
+          </p>
+          <div className="mt-10 grid max-w-xl grid-cols-3 gap-3">
+            <div className="auth-fact-card rounded-2xl border p-3">
+              <p className="text-lg font-extrabold">01</p>
+              <p className="mt-1 text-[11px] leading-4">记录真实工作</p>
+            </div>
+            <div className="auth-fact-card rounded-2xl border p-3">
+              <p className="text-lg font-extrabold">02</p>
+              <p className="mt-1 text-[11px] leading-4">关联项目事实</p>
+            </div>
+            <div className="auth-fact-card rounded-2xl border p-3">
+              <p className="text-lg font-extrabold">03</p>
+              <p className="mt-1 text-[11px] leading-4">生成可追溯洞察</p>
+            </div>
+          </div>
+        </div>
+        <p className="auth-story-footer text-xs text-[#7b88a3]">
+          安全会话 · 最小权限 · 全程审计
+        </p>
+      </section>
+      <section className="auth-panel relative flex items-center justify-center p-5 sm:p-10">
+        <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_100%_0%,color-mix(in_srgb,var(--accent)_10%,transparent),transparent_25rem)]" />
+        <Card className="auth-panel-card relative w-full max-w-md shadow-[var(--shadow-float)]">
+          <CardContent>
+            <div className="mb-8">
+              <div className="mb-5 grid size-10 place-items-center rounded-[14px] bg-[var(--accent-soft)] text-[var(--accent-strong)] lg:hidden">
+                <Clock3 size={20} />
+              </div>
+              <p className="app-page-kicker">安全访问</p>
+              <h1 className="mt-2 text-2xl font-extrabold tracking-[-0.04em]">
+                {title}
+              </h1>
+              <p className="mt-3 text-sm leading-6 text-[var(--text-muted)]">
+                {description}
+              </p>
+            </div>
+            {children}
+          </CardContent>
+        </Card>
+      </section>
+    </div>
+  );
 }
-
 export function SetupPage() {
   const navigate = useNavigate();
-  const status = useQuery({ queryKey: ["setup-status"], queryFn: () => api<{ completed: boolean; setupAvailable: boolean }>("/api/setup/status"), retry: false });
-  const [form, setForm] = useState({ organizationName: "", displayName: "", email: "", password: "", token: "" });
-  const setup = useMutation({ mutationFn: () => api("/api/setup/initial-owner", { method: "POST", headers: { "x-setup-token": form.token }, body: { organizationName: form.organizationName, displayName: form.displayName, email: form.email, password: form.password, timezone } }), onSuccess: () => navigate("/login", { replace: true }) });
-  if (status.data?.completed) return <AuthFrame title="初始化已完成" description="系统中已经存在唯一 Owner，初始化入口已永久锁定。"><Button className="w-full" onClick={() => navigate("/login")}>返回登录</Button></AuthFrame>;
-  return <AuthFrame title="初始化唯一 Owner" description="此操作只允许成功一次，并会在单个数据库事务中建立组织、Owner、角色与审计记录。"><form className="space-y-4" onSubmit={(event) => { event.preventDefault(); setup.mutate(); }}><Field label="组织名称"><input className={fieldClass} maxLength={120} minLength={2} onChange={(event) => setForm({ ...form, organizationName: event.target.value })} required value={form.organizationName} /></Field><Field label="Owner 姓名"><input className={fieldClass} maxLength={80} minLength={2} onChange={(event) => setForm({ ...form, displayName: event.target.value })} required value={form.displayName} /></Field><Field label="Owner 邮箱"><input autoComplete="email" className={fieldClass} onChange={(event) => setForm({ ...form, email: event.target.value })} required type="email" value={form.email} /></Field><Field hint="至少 12 位，包含大小写字母、数字和特殊字符。" label="Owner 密码"><input autoComplete="new-password" className={fieldClass} minLength={12} onChange={(event) => setForm({ ...form, password: event.target.value })} required type="password" value={form.password} /></Field><Field hint={status.data?.setupAvailable === false ? "服务端尚未配置 SETUP_TOKEN。" : "从部署环境变量 SETUP_TOKEN 获取，不会保存到浏览器。"} label="初始化令牌"><input className={fieldClass} minLength={32} onChange={(event) => setForm({ ...form, token: event.target.value })} required type="password" value={form.token} /></Field><ErrorMessage error={status.error ?? setup.error} /><Button className="w-full" disabled={setup.isPending || status.data?.setupAvailable === false} type="submit">{setup.isPending ? "正在原子初始化…" : "创建组织与唯一 Owner"}</Button></form></AuthFrame>;
+  const status = useQuery({
+    queryKey: ["setup-status"],
+    queryFn: () =>
+      api<{ completed: boolean; setupAvailable: boolean }>("/api/setup/status"),
+    retry: false,
+  });
+  const [form, setForm] = useState({
+    organizationName: "",
+    displayName: "",
+    email: "",
+    password: "",
+    token: "",
+  });
+  const setup = useMutation({
+    mutationFn: () =>
+      api("/api/setup/initial-owner", {
+        method: "POST",
+        headers: { "x-setup-token": form.token },
+        body: {
+          organizationName: form.organizationName,
+          displayName: form.displayName,
+          email: form.email,
+          password: form.password,
+          timezone,
+        },
+      }),
+    onSuccess: () => navigate("/login", { replace: true }),
+  });
+  if (status.data?.completed)
+    return (
+      <AuthFrame
+        title="初始化已完成"
+        description="系统中已经存在唯一 Owner，初始化入口已永久锁定。"
+      >
+        <Button className="w-full" onClick={() => navigate("/login")}>
+          返回登录
+        </Button>
+      </AuthFrame>
+    );
+  return (
+    <AuthFrame
+      title="初始化唯一 Owner"
+      description="此操作只允许成功一次，并会在单个数据库事务中建立组织、Owner、角色与审计记录。"
+    >
+      <form
+        className="space-y-4"
+        onSubmit={(event) => {
+          event.preventDefault();
+          setup.mutate();
+        }}
+      >
+        <Field label="组织名称">
+          <input
+            className={fieldClass}
+            maxLength={120}
+            minLength={2}
+            onChange={(event) =>
+              setForm({ ...form, organizationName: event.target.value })
+            }
+            required
+            value={form.organizationName}
+          />
+        </Field>
+        <Field label="Owner 姓名">
+          <input
+            className={fieldClass}
+            maxLength={80}
+            minLength={2}
+            onChange={(event) =>
+              setForm({ ...form, displayName: event.target.value })
+            }
+            required
+            value={form.displayName}
+          />
+        </Field>
+        <Field label="Owner 邮箱">
+          <input
+            autoComplete="email"
+            className={fieldClass}
+            onChange={(event) =>
+              setForm({ ...form, email: event.target.value })
+            }
+            required
+            type="email"
+            value={form.email}
+          />
+        </Field>
+        <Field
+          hint="至少 12 位，包含大小写字母、数字和特殊字符。"
+          label="Owner 密码"
+        >
+          <input
+            autoComplete="new-password"
+            className={fieldClass}
+            minLength={12}
+            onChange={(event) =>
+              setForm({ ...form, password: event.target.value })
+            }
+            required
+            type="password"
+            value={form.password}
+          />
+        </Field>
+        <Field
+          hint={
+            status.data?.setupAvailable === false
+              ? "服务端尚未配置 SETUP_TOKEN。"
+              : "从部署环境变量 SETUP_TOKEN 获取，不会保存到浏览器。"
+          }
+          label="初始化令牌"
+        >
+          <input
+            className={fieldClass}
+            minLength={32}
+            onChange={(event) =>
+              setForm({ ...form, token: event.target.value })
+            }
+            required
+            type="password"
+            value={form.token}
+          />
+        </Field>
+        <ErrorMessage error={status.error ?? setup.error} />
+        <Button
+          className="w-full"
+          disabled={setup.isPending || status.data?.setupAvailable === false}
+          type="submit"
+        >
+          {setup.isPending ? "正在原子初始化…" : "创建组织与唯一 Owner"}
+        </Button>
+      </form>
+    </AuthFrame>
+  );
 }
 
 export function InvitationPage() {
   const navigate = useNavigate();
-  const [token, setToken] = useState(() => new URLSearchParams(window.location.search).get("token") ?? "");
+  const [token, setToken] = useState(
+    () => new URLSearchParams(window.location.search).get("token") ?? "",
+  );
   const [password, setPassword] = useState("");
-  const accept = useMutation({ mutationFn: () => api("/api/auth/invitations/accept", { method: "POST", body: { token, password } }), onSuccess: () => navigate("/login", { replace: true }) });
-  return <AuthFrame title="接受组织邀请" description="设置个人密码后，邀请令牌会立即失效，成员状态变为在职。"><form className="space-y-4" onSubmit={(event) => { event.preventDefault(); accept.mutate(); }}><Field label="邀请令牌"><textarea className={textAreaClass} onChange={(event) => setToken(event.target.value)} required value={token} /></Field><Field hint="至少 12 位，包含大小写字母、数字和特殊字符。" label="设置密码"><input autoComplete="new-password" className={fieldClass} minLength={12} onChange={(event) => setPassword(event.target.value)} required type="password" value={password} /></Field><ErrorMessage error={accept.error} /><Button className="w-full" disabled={accept.isPending} type="submit">{accept.isPending ? "正在加入组织…" : "接受邀请并激活账号"}</Button></form></AuthFrame>;
+  const accept = useMutation({
+    mutationFn: () =>
+      api("/api/auth/invitations/accept", {
+        method: "POST",
+        body: { token, password },
+      }),
+    onSuccess: () => navigate("/login", { replace: true }),
+  });
+  return (
+    <AuthFrame
+      title="接受组织邀请"
+      description="设置个人密码后，邀请令牌会立即失效，成员状态变为在职。"
+    >
+      <form
+        className="space-y-4"
+        onSubmit={(event) => {
+          event.preventDefault();
+          accept.mutate();
+        }}
+      >
+        <Field label="邀请令牌">
+          <textarea
+            className={textAreaClass}
+            onChange={(event) => setToken(event.target.value)}
+            required
+            value={token}
+          />
+        </Field>
+        <Field
+          hint="至少 12 位，包含大小写字母、数字和特殊字符。"
+          label="设置密码"
+        >
+          <input
+            autoComplete="new-password"
+            className={fieldClass}
+            minLength={12}
+            onChange={(event) => setPassword(event.target.value)}
+            required
+            type="password"
+            value={password}
+          />
+        </Field>
+        <ErrorMessage error={accept.error} />
+        <Button className="w-full" disabled={accept.isPending} type="submit">
+          {accept.isPending ? "正在加入组织…" : "接受邀请并激活账号"}
+        </Button>
+      </form>
+    </AuthFrame>
+  );
 }
 
-interface WorkSession { id: string; startAt: string; endAt: string; netSeconds: number; content: string; result: string; source: string; submissionStatus: string; approvalStatus: string; version: number; visibility: string }
-interface TimerState { id: string; status: "running" | "paused" | "on_break"; startedAt: string; stateChangedAt: string; accumulatedSeconds: number; version: number; metadata: { content?: string } }
-interface EvidenceAttachment { id: string; kind: "file" | "url" | "text"; status: string; originalName: string | null; externalUrl: string | null; textContent?: string | null; mimeType: string | null; sizeBytes: number | null; visibility: string; note: string | null; sha256: string | null; version: number }
+interface WorkSessionProjectLink {
+  projectId: string;
+  projectNodeId: string;
+  projectNodeTitle: string;
+  isPrimary: boolean;
+  allocationBasisPoints: number;
+}
+interface WorkSession {
+  id: string;
+  startAt: string;
+  endAt: string;
+  timezone: string;
+  netSeconds: number;
+  content: string;
+  result: string;
+  blockers: string;
+  nextStep: string;
+  parallelWork: boolean;
+  primaryProjectNodeId: string | null;
+  projectLinks?: WorkSessionProjectLink[];
+  source: string;
+  recordKind: "fact" | "plan";
+  submissionStatus: string;
+  approvalStatus: string;
+  version: number;
+  visibility: string;
+  breaks?: Array<{ startAt: string; endAt: string }>;
+  anomalyFlags?: string[];
+}
+
+interface WorkSessionVersion {
+  id: string;
+  version: number;
+  snapshot: unknown;
+  changeReason: string | null;
+  createdAt: string;
+}
+
+interface OwnWorkCorrection {
+  correction: {
+    id: string;
+    workSessionId: string;
+    status: "pending" | "approved" | "rejected" | "applied_next_period";
+    reason: string;
+    createdAt: string;
+  };
+}
+
+function readWorkSnapshot(snapshot: unknown): {
+  content: string | null;
+  startAt: string | null;
+  endAt: string | null;
+  breaks: number | null;
+  projectLinks: number | null;
+} {
+  if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) {
+    return {
+      content: null,
+      startAt: null,
+      endAt: null,
+      breaks: null,
+      projectLinks: null,
+    };
+  }
+  const value = snapshot as Record<string, unknown>;
+  return {
+    content: typeof value.content === "string" ? value.content : null,
+    startAt: typeof value.startAt === "string" ? value.startAt : null,
+    endAt: typeof value.endAt === "string" ? value.endAt : null,
+    breaks: Array.isArray(value.breaks) ? value.breaks.length : null,
+    projectLinks: Array.isArray(value.projectLinks)
+      ? value.projectLinks.length
+      : null,
+  };
+}
+
+function WorkVersionHistory({ sessionId }: { sessionId: string }) {
+  const [open, setOpen] = useState(false);
+  const history = useQuery({
+    queryKey: ["work-session-versions", sessionId],
+    queryFn: () =>
+      api<{ items: WorkSessionVersion[] }>(
+        `/api/work-sessions/${sessionId}/versions?limit=100`,
+      ),
+    enabled: open,
+  });
+  return (
+    <section className="mt-1 px-2 pb-3" aria-label="工作记录版本历史">
+      <button
+        aria-expanded={open}
+        className="text-xs font-bold text-[var(--accent-strong)]"
+        onClick={() => setOpen((value) => !value)}
+        type="button"
+      >
+        {open ? "收起版本历史" : "查看版本历史"}
+      </button>
+      {open ? (
+        <div className="mt-2 space-y-2 rounded-xl bg-[var(--surface-subtle)] p-3">
+          {history.isPending ? (
+            <p className="text-xs text-[var(--text-muted)]">正在读取不可变快照…</p>
+          ) : history.data?.items.length ? (
+            history.data.items.map((entry) => {
+              const snapshot = readWorkSnapshot(entry.snapshot);
+              return (
+                <div
+                  className="rounded-lg bg-[var(--surface)] px-3 py-2 text-xs"
+                  key={entry.id}
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <strong>版本 {entry.version}</strong>
+                    <span className="text-[var(--text-subtle)]">
+                      {formatDateTime(entry.createdAt)}
+                    </span>
+                  </div>
+                  <p className="mt-1 text-[var(--text-muted)]">
+                    {entry.changeReason || "已保存事实快照"}
+                    {snapshot.breaks !== null
+                      ? ` · ${snapshot.breaks} 段休息`
+                      : ""}
+                    {snapshot.projectLinks !== null
+                      ? ` · ${snapshot.projectLinks} 个项目关联`
+                      : ""}
+                  </p>
+                  {snapshot.content ? (
+                    <p className="mt-1 truncate text-[var(--text)]">
+                      {snapshot.content}
+                    </p>
+                  ) : null}
+                  {snapshot.startAt && snapshot.endAt ? (
+                    <p className="mt-1 text-[var(--text-subtle)]">
+                      {formatDateTime(snapshot.startAt)} –{" "}
+                      {formatDateTime(snapshot.endAt)}
+                    </p>
+                  ) : null}
+                </div>
+              );
+            })
+          ) : (
+            <p className="text-xs text-[var(--text-muted)]">
+              当前记录尚未找到可展示的历史版本。
+            </p>
+          )}
+          <ErrorMessage error={history.error} />
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+interface ManualWorkDraft {
+  content: string;
+  result: string;
+  blockers: string;
+  nextStep: string;
+  startAt: string;
+  endAt: string;
+  visibility: string;
+  parallelWork: boolean;
+}
+
+interface LocalManualPrefill {
+  version: 1;
+  savedAt: string;
+  manual: ManualWorkDraft;
+  breaks: Array<{ id: string; startAt: string; endAt: string }>;
+  linkedProjectId: string;
+  primaryProjectNodeId: string;
+  linkedProjectNodes: LinkedProjectNode[];
+}
+
+const manualPrefillStorageKey = "workbench:manual-work-prefill:v1";
+interface TimerState {
+  id: string;
+  status: "running" | "paused" | "on_break";
+  startedAt: string;
+  stateChangedAt: string;
+  accumulatedSeconds: number;
+  version: number;
+  metadata: {
+    content?: string;
+    primaryProjectNodeId?: string | null;
+    projectNodeIds?: string[];
+  };
+}
+interface EvidenceAttachment {
+  id: string;
+  kind: "file" | "url" | "text";
+  status: string;
+  originalName: string | null;
+  externalUrl: string | null;
+  textContent?: string | null;
+  mimeType: string | null;
+  sizeBytes: number | null;
+  visibility: string;
+  note: string | null;
+  sha256: string | null;
+  version: number;
+}
 
 export function HomePage({ me }: { me: Me }) {
-  const work = useQuery({ queryKey: ["work-sessions"], queryFn: () => api<{ items: WorkSession[] }>("/api/work-sessions?limit=5") });
-  const timer = useQuery({ queryKey: ["timer"], queryFn: () => api<{ timer: TimerState | null }>("/api/timer") });
-  const total = work.data?.items.reduce((sum, item) => sum + item.netSeconds, 0) ?? 0;
-  const pendingCount = work.data?.items.filter((item) => item.approvalStatus === "pending_review").length ?? 0;
-  return <><PageHeader title={`${me.user.displayName}，今天好`} description="从一段真实工作开始。计时、项目、审批和洞察共享同一条可追溯的事实链。" actions={<><Link to="/calendar"><Button size="compact" variant="secondary"><CalendarDays size={15} />查看日历</Button></Link><Link to="/work"><Button><Plus size={17} />记录工作</Button></Link></>} />
-    <div className="grid gap-5 xl:grid-cols-12"><div className="space-y-5 xl:col-span-8"><Card className="overflow-hidden border-[color-mix(in_srgb,var(--accent)_18%,var(--border))] bg-[linear-gradient(135deg,color-mix(in_srgb,var(--accent)_7%,var(--surface)),var(--surface)_55%)]"><CardHeader><div><div className="mb-3 flex items-center gap-2 text-[11px] font-extrabold tracking-[0.12em] text-[var(--accent-strong)] uppercase"><span className="size-1.5 rounded-full bg-[var(--accent)]" />现在正在做什么</div><h2 className="text-xl font-extrabold tracking-[-0.035em]">当前计时</h2><p className="mt-1 text-sm text-[var(--text-muted)]">服务端是跨设备同步的唯一事实源。</p></div>{timer.data?.timer ? <Badge tone={timer.data.timer.status === "running" ? "positive" : "warning"}>{timer.data.timer.status === "running" ? "运行中" : timer.data.timer.status === "paused" ? "已暂停" : "休息中"}</Badge> : <Badge>等待开始</Badge>}</CardHeader><CardContent>{timer.isPending ? <LoadingBlock /> : timer.data?.timer ? <div className="flex flex-col gap-5 sm:flex-row sm:items-end sm:justify-between"><div><p className="text-2xl font-extrabold tracking-[-0.035em]">{timer.data.timer.metadata.content || "未命名工作"}</p><p className="mt-2 text-sm text-[var(--text-muted)]">开始于 {formatDateTime(timer.data.timer.startedAt)} · 已累计 <strong className="text-[var(--text)]">{formatDuration(timer.data.timer.accumulatedSeconds)}</strong></p></div><Link to="/work"><Button variant="secondary">管理计时器<ArrowUpRight size={16} /></Button></Link></div> : <div className="flex flex-col gap-5 sm:flex-row sm:items-center sm:justify-between"><div className="flex gap-4"><div className="grid size-12 shrink-0 place-items-center rounded-2xl bg-[var(--accent)] text-[var(--accent-foreground)] shadow-[0_10px_20px_rgb(31_118_92_/_0.2)]"><Clock3 size={22} /></div><div><h3 className="font-bold">还没有活动计时器</h3><p className="mt-1 max-w-lg text-sm leading-6 text-[var(--text-muted)]">开始后，暂停、休息和结束都会形成可核验的工作记录。</p></div></div><Link to="/work"><Button><Play size={16} />开始计时</Button></Link></div>}</CardContent></Card>
-      <div className="grid gap-4 sm:grid-cols-3"><Card className="app-stat-card"><CardContent><p className="text-xs font-semibold text-[var(--text-muted)]">最近记录时长</p><p className="mt-2 text-2xl font-extrabold tracking-[-0.04em] tabular-nums">{formatDuration(total)}</p><p className="mt-2 text-xs text-[var(--text-subtle)]">最近 5 条可见记录</p></CardContent></Card><Card className="app-stat-card"><CardContent><p className="text-xs font-semibold text-[var(--text-muted)]">待处理审核</p><p className="mt-2 text-2xl font-extrabold tracking-[-0.04em] tabular-nums">{pendingCount}<span className="ml-1 text-sm font-semibold text-[var(--text-muted)]">条</span></p><p className="mt-2 text-xs text-[var(--text-subtle)]">只显示当前授权范围</p></CardContent></Card><Card className="app-stat-card"><CardContent><p className="text-xs font-semibold text-[var(--text-muted)]">可用授权</p><p className="mt-2 text-2xl font-extrabold tracking-[-0.04em] tabular-nums">{me.permissions.length}<span className="ml-1 text-sm font-semibold text-[var(--text-muted)]">项</span></p><p className="mt-2 text-xs text-[var(--text-subtle)]">按 Scope 安全裁剪</p></CardContent></Card></div>
-      <Card><CardHeader><div><p className="text-[11px] font-extrabold tracking-[0.12em] text-[var(--text-subtle)] uppercase">工作足迹</p><h2 className="mt-1 font-extrabold tracking-[-0.025em]">最近工作</h2></div><Link to="/work"><Button size="compact" variant="ghost">全部记录<ChevronRight size={15} /></Button></Link></CardHeader><CardContent className="pt-5">{work.isPending ? <LoadingBlock /> : work.data?.items.length ? <div className="divide-y divide-[var(--border)]">{work.data.items.map((item) => <WorkRow item={item} key={item.id} />)}</div> : <EmptyState description="手工录入或结束计时后，记录会按时间顺序出现在这里。" icon={<TimerReset />} title="还没有工作记录" />}</CardContent></Card></div>
-      <div className="space-y-5 xl:col-span-4"><Card><CardHeader><div><p className="text-[11px] font-extrabold tracking-[0.12em] text-[var(--text-subtle)] uppercase">今天的下一步</p><h2 className="mt-1 font-extrabold tracking-[-0.025em]">快速操作</h2></div></CardHeader><CardContent className="space-y-2"><Link className="group flex items-center gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface-tint)] p-3 transition hover:border-[var(--border-strong)] hover:bg-[var(--surface-subtle)]" to="/work"><span className="grid size-9 place-items-center rounded-xl bg-[var(--accent-soft)] text-[var(--accent-strong)]"><Plus size={18} /></span><span className="min-w-0 flex-1"><span className="block text-sm font-bold">补录一段工作</span><span className="block text-xs text-[var(--text-muted)]">填写开始、结束和结果</span></span><ArrowUpRight className="text-[var(--text-subtle)] transition group-hover:text-[var(--accent-strong)]" size={16} /></Link><Link className="group flex items-center gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface-tint)] p-3 transition hover:border-[var(--border-strong)] hover:bg-[var(--surface-subtle)]" to="/projects"><span className="grid size-9 place-items-center rounded-xl bg-[var(--info-soft)] text-[var(--info)]"><ListTodo size={18} /></span><span className="min-w-0 flex-1"><span className="block text-sm font-bold">查看项目推进</span><span className="block text-xs text-[var(--text-muted)]">从节点进入工作上下文</span></span><ArrowUpRight className="text-[var(--text-subtle)] transition group-hover:text-[var(--accent-strong)]" size={16} /></Link><Link className="group flex items-center gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface-tint)] p-3 transition hover:border-[var(--border-strong)] hover:bg-[var(--surface-subtle)]" to="/ai"><span className="grid size-9 place-items-center rounded-xl bg-[var(--warning-soft)] text-[var(--warning)]"><Sparkles size={18} /></span><span className="min-w-0 flex-1"><span className="block text-sm font-bold">生成工作洞察</span><span className="block text-xs text-[var(--text-muted)]">AI 只解释已授权事实</span></span><ArrowUpRight className="text-[var(--text-subtle)] transition group-hover:text-[var(--accent-strong)]" size={16} /></Link></CardContent></Card><Card className="bg-[linear-gradient(150deg,var(--surface),var(--accent-soft))]"><CardContent><div className="flex gap-3"><div className="grid size-10 shrink-0 place-items-center rounded-xl bg-[var(--surface-raised)] text-[var(--accent-strong)] shadow-sm"><Bot size={19} /></div><div><p className="font-bold">事实优先的工作洞察</p><p className="mt-1 text-sm leading-6 text-[var(--text-muted)]">AI 只能解释服务端聚合出的真实数据，不能改写工时、项目、审批或薪资事实。</p><Link className="mt-3 inline-flex items-center gap-1 text-xs font-bold text-[var(--accent-strong)]" to="/ai">打开洞察中心<ChevronRight size={14} /></Link></div></div></CardContent></Card><Card><CardHeader><h2 className="font-extrabold tracking-[-0.025em]">事实链状态</h2></CardHeader><CardContent className="space-y-2"><StatusLine label="身份与权限" value={`${me.permissions.length} 项有效授权`} /><StatusLine label="最近记录" value={`${work.data?.items.length ?? 0} 条`} /><StatusLine label="待审记录" value={`${pendingCount} 条`} /></CardContent></Card></div></div></>;
+  const work = useQuery({
+    queryKey: ["work-sessions", "home", "fact", 5],
+    queryFn: () =>
+      api<{ items: WorkSession[] }>(
+        "/api/work-sessions?limit=5&recordKind=fact",
+      ),
+  });
+  const timer = useQuery({
+    queryKey: ["timer"],
+    queryFn: () => api<{ timer: TimerState | null }>("/api/timer"),
+  });
+  const factualWork = (work.data?.items ?? []).filter(
+    (item) => item.recordKind !== "plan",
+  );
+  const total =
+    factualWork.reduce((sum, item) => sum + item.netSeconds, 0);
+  const pendingCount =
+    factualWork.filter((item) => item.approvalStatus === "pending_review")
+      .length;
+  const activeTimer = timer.data?.timer;
+
+  return (
+    <div className="home-page">
+      <PageHeader
+        title={`${me.user.displayName}，今天好`}
+        description="从一段真实工作开始。计时、项目、审批和洞察共享同一条可追溯的事实链。"
+        actions={
+          <>
+            <Link to="/calendar">
+              <Button size="compact" variant="secondary">
+                <CalendarDays size={15} />
+                查看日历
+              </Button>
+            </Link>
+            <Link to="/work">
+              <Button>
+                <Plus size={17} />
+                记录工作
+              </Button>
+            </Link>
+          </>
+        }
+      />
+      <div className="home-layout">
+        <section className="home-primary">
+          <Card className="home-focus-card">
+            <CardHeader>
+              <div>
+                <div className="mb-3 flex items-center gap-2">
+                  <span
+                    className={
+                      activeTimer?.status === "running"
+                        ? "size-2 rounded-full bg-[var(--positive)] shadow-[0_0_0_4px_var(--positive-soft)]"
+                        : "size-2 rounded-full bg-[var(--accent)]"
+                    }
+                  />
+                  <p className="app-section-label text-[var(--accent-strong)]">
+                    此刻的工作
+                  </p>
+                </div>
+                <h2 className="text-xl font-extrabold tracking-[-0.035em]">
+                  当前计时
+                </h2>
+                <p className="mt-1 text-sm text-[var(--text-muted)]">
+                  服务端是跨设备同步的唯一事实源。
+                </p>
+              </div>
+              {activeTimer ? (
+                <Badge
+                  tone={
+                    activeTimer.status === "running" ? "positive" : "warning"
+                  }
+                >
+                  {activeTimer.status === "running"
+                    ? "正在计时"
+                    : activeTimer.status === "paused"
+                      ? "已暂停"
+                      : "休息中"}
+                </Badge>
+              ) : (
+                <Badge>等待开始</Badge>
+              )}
+            </CardHeader>
+            <CardContent>
+              {timer.isPending ? (
+                <LoadingBlock />
+              ) : activeTimer ? (
+                <div className="flex flex-col gap-6 sm:flex-row sm:items-end sm:justify-between">
+                  <div>
+                    <p className="text-2xl font-extrabold tracking-[-0.04em]">
+                      {activeTimer.metadata.content || "未命名工作"}
+                    </p>
+                    <p className="mt-2 text-sm text-[var(--text-muted)]">
+                      开始于 {formatDateTime(activeTimer.startedAt)} ·
+                      服务端累计{" "}
+                      <strong className="text-[var(--text)]">
+                        {formatDuration(activeTimer.accumulatedSeconds)}
+                      </strong>
+                    </p>
+                  </div>
+                  <Link to="/work">
+                    <Button variant="secondary">
+                      管理计时器
+                      <ArrowUpRight size={16} />
+                    </Button>
+                  </Link>
+                </div>
+              ) : (
+                <div className="flex flex-col gap-5 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="flex gap-4">
+                    <div className="home-focus-orb grid size-12 shrink-0 place-items-center rounded-2xl text-[var(--accent-foreground)]">
+                      <Clock3 size={22} />
+                    </div>
+                    <div>
+                      <h3 className="font-bold">还没有活动计时器</h3>
+                      <p className="mt-1 max-w-lg text-sm leading-6 text-[var(--text-muted)]">
+                        开始后，暂停、休息和结束都会形成可核验的工作记录。
+                      </p>
+                    </div>
+                  </div>
+                  <Link to="/work">
+                    <Button>
+                      <Play size={16} />
+                      开始计时
+                    </Button>
+                  </Link>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+          <div className="home-stats-grid">
+            <Card className="home-stat-card">
+              <CardContent>
+                <p className="text-xs font-semibold text-[var(--text-muted)]">
+                  最近记录时长
+                </p>
+                <p className="text-2xl font-extrabold tracking-[-0.04em] tabular-nums">
+                  {formatDuration(total)}
+                </p>
+                <p className="text-xs text-[var(--text-subtle)]">
+                  最近 5 条可见记录
+                </p>
+              </CardContent>
+            </Card>
+            <Card className="home-stat-card">
+              <CardContent>
+                <p className="text-xs font-semibold text-[var(--text-muted)]">
+                  待处理审核
+                </p>
+                <p className="text-2xl font-extrabold tracking-[-0.04em] tabular-nums">
+                  {pendingCount}
+                  <span className="ml-1 text-sm font-semibold text-[var(--text-muted)]">
+                    条
+                  </span>
+                </p>
+                <p className="text-xs text-[var(--text-subtle)]">
+                  当前授权范围内
+                </p>
+              </CardContent>
+            </Card>
+            <Card className="home-stat-card">
+              <CardContent>
+                <p className="text-xs font-semibold text-[var(--text-muted)]">
+                  有效授权
+                </p>
+                <p className="text-2xl font-extrabold tracking-[-0.04em] tabular-nums">
+                  {me.permissions.length}
+                  <span className="ml-1 text-sm font-semibold text-[var(--text-muted)]">
+                    项
+                  </span>
+                </p>
+                <p className="text-xs text-[var(--text-subtle)]">
+                  按 Scope 安全裁剪
+                </p>
+              </CardContent>
+            </Card>
+          </div>
+          <Card>
+            <CardHeader>
+              <div>
+                <p className="app-section-label">今日足迹</p>
+                <h2 className="mt-2 font-extrabold tracking-[-0.025em]">
+                  最近工作
+                </h2>
+              </div>
+              <Link to="/work">
+                <Button size="compact" variant="ghost">
+                  全部记录
+                  <ChevronRight size={15} />
+                </Button>
+              </Link>
+            </CardHeader>
+            <CardContent className="pt-5">
+              {work.isPending ? (
+                <LoadingBlock />
+              ) : factualWork.length ? (
+                <div className="divide-y divide-[var(--border)]">
+                  {factualWork.map((item) => (
+                    <WorkRow item={item} key={item.id} />
+                  ))}
+                </div>
+              ) : (
+                <EmptyState
+                  description="手工录入或结束计时后，记录会按时间顺序出现在这里。"
+                  icon={<TimerReset />}
+                  title="还没有工作记录"
+                />
+              )}
+            </CardContent>
+          </Card>
+        </section>
+        <aside className="home-rail">
+          <Card>
+            <CardHeader>
+              <div>
+                <p className="app-section-label">下一步</p>
+                <h2 className="mt-2 font-extrabold tracking-[-0.025em]">
+                  快速操作
+                </h2>
+              </div>
+            </CardHeader>
+            <CardContent className="space-y-2">
+              <Link
+                className="home-action-link group flex items-center gap-3 rounded-xl border p-3 transition"
+                to="/work"
+              >
+                <span className="grid size-9 place-items-center rounded-xl bg-[var(--accent-soft)] text-[var(--accent-strong)]">
+                  <Plus size={18} />
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="block text-sm font-bold">补录一段工作</span>
+                  <span className="block text-xs text-[var(--text-muted)]">
+                    填写开始、结束和结果
+                  </span>
+                </span>
+                <ArrowUpRight
+                  className="text-[var(--text-subtle)] transition group-hover:text-[var(--accent-strong)]"
+                  size={16}
+                />
+              </Link>
+              <Link
+                className="home-action-link group flex items-center gap-3 rounded-xl border p-3 transition"
+                to="/projects"
+              >
+                <span className="grid size-9 place-items-center rounded-xl bg-[var(--info-soft)] text-[var(--info)]">
+                  <ListTodo size={18} />
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="block text-sm font-bold">查看项目推进</span>
+                  <span className="block text-xs text-[var(--text-muted)]">
+                    从节点进入工作上下文
+                  </span>
+                </span>
+                <ArrowUpRight
+                  className="text-[var(--text-subtle)] transition group-hover:text-[var(--accent-strong)]"
+                  size={16}
+                />
+              </Link>
+              <Link
+                className="home-action-link group flex items-center gap-3 rounded-xl border p-3 transition"
+                to="/ai"
+              >
+                <span className="grid size-9 place-items-center rounded-xl bg-[var(--warning-soft)] text-[var(--warning)]">
+                  <Sparkles size={18} />
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="block text-sm font-bold">生成工作洞察</span>
+                  <span className="block text-xs text-[var(--text-muted)]">
+                    AI 只解释已授权事实
+                  </span>
+                </span>
+                <ArrowUpRight
+                  className="text-[var(--text-subtle)] transition group-hover:text-[var(--accent-strong)]"
+                  size={16}
+                />
+              </Link>
+            </CardContent>
+          </Card>
+          <Card className="home-insight-card">
+            <CardContent>
+              <div className="flex gap-3">
+                <div className="grid size-10 shrink-0 place-items-center rounded-xl bg-[var(--surface-raised)] text-[var(--accent-strong)] shadow-sm">
+                  <Bot size={19} />
+                </div>
+                <div>
+                  <p className="font-bold">事实优先的工作洞察</p>
+                  <p className="mt-1 text-sm leading-6 text-[var(--text-muted)]">
+                    AI
+                    只能解释服务端聚合出的真实数据，不能改写工时、项目、审批或薪资事实。
+                  </p>
+                  <Link
+                    className="mt-3 inline-flex items-center gap-1 text-xs font-bold text-[var(--accent-strong)]"
+                    to="/ai"
+                  >
+                    打开洞察中心
+                    <ChevronRight size={14} />
+                  </Link>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader>
+              <div>
+                <p className="app-section-label">数据完整性</p>
+                <h2 className="mt-2 font-extrabold tracking-[-0.025em]">
+                  事实链状态
+                </h2>
+              </div>
+            </CardHeader>
+            <CardContent className="space-y-2">
+              <StatusLine
+                label="身份与权限"
+                value={`${me.permissions.length} 项有效授权`}
+              />
+              <StatusLine
+                label="最近记录"
+                value={`${factualWork.length} 条`}
+              />
+              <StatusLine label="待审记录" value={`${pendingCount} 条`} />
+            </CardContent>
+          </Card>
+        </aside>
+      </div>
+    </div>
+  );
+}
+function StatusLine({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="home-fact-line flex items-center justify-between gap-4 rounded-xl px-3 py-3 text-sm">
+      <span className="text-[var(--text-muted)]">{label}</span>
+      <strong className="text-right">{value}</strong>
+    </div>
+  );
 }
 
-function StatusLine({ label, value }: { label: string; value: string }) { return <div className="flex items-center justify-between gap-4 rounded-xl bg-[var(--surface-subtle)] px-3 py-3 text-sm"><span className="text-[var(--text-muted)]">{label}</span><strong className="text-right">{value}</strong></div>; }
-function WorkRow({ item, action }: { item: WorkSession; action?: ReactNode }) { return <div className="flex flex-col gap-3 py-4 first:pt-0 last:pb-0 sm:flex-row sm:items-center"><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><p className="truncate font-semibold">{item.content}</p><Badge tone={item.approvalStatus === "approved" || item.approvalStatus === "locked" ? "positive" : item.approvalStatus === "returned" ? "danger" : item.approvalStatus === "pending_review" ? "warning" : "neutral"}>{item.approvalStatus === "not_requested" ? "草稿" : item.approvalStatus === "pending_review" ? "待审核" : item.approvalStatus === "approved" ? "已批准" : item.approvalStatus === "returned" ? "已退回" : "已锁定"}</Badge></div><p className="mt-1 text-sm text-[var(--text-muted)]">{formatDateTime(item.startAt)} – {formatDateTime(item.endAt)} · {formatDuration(item.netSeconds)} · {item.source === "timer" ? "计时" : "手工"}</p></div>{action}</div>; }
+function WorkRow({ item, action }: { item: WorkSession; action?: ReactNode }) {
+  const isPlan = item.recordKind === "plan";
+  const statusTone =
+    isPlan
+      ? "info"
+      : item.approvalStatus === "approved" || item.approvalStatus === "locked"
+      ? "positive"
+      : item.approvalStatus === "returned"
+        ? "danger"
+        : item.approvalStatus === "pending_review"
+          ? "warning"
+          : "neutral";
+  const statusLabel = isPlan
+    ? "计划草稿"
+    : item.approvalStatus === "not_requested"
+      ? "草稿"
+      : item.approvalStatus === "pending_review"
+        ? "待审核"
+        : item.approvalStatus === "approved"
+          ? "已批准"
+          : item.approvalStatus === "returned"
+            ? "已退回"
+            : "已锁定";
+  const projectLinks = item.projectLinks ?? [];
+  return (
+    <div className="work-row flex flex-col gap-3 px-2 py-4 first:pt-0 last:pb-0 sm:flex-row sm:items-center">
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-center gap-2">
+          <p className="truncate font-semibold">{item.content}</p>
+          <Badge tone={statusTone}>{statusLabel}</Badge>
+        </div>
+        <p className="mt-1 text-sm text-[var(--text-muted)]">
+          {formatDateTime(item.startAt)} – {formatDateTime(item.endAt)} ·{" "}
+          {formatDuration(item.netSeconds)} ·{" "}
+          {isPlan ? "未计入事实" : item.source === "timer" ? "计时" : "手工"}
+        </p>
+        {item.anomalyFlags?.length ? (
+          <div className="mt-2 flex flex-wrap gap-1.5" role="status">
+            {item.anomalyFlags.map((flag) => (
+              <span
+                className="rounded-lg bg-[var(--danger-soft)] px-2 py-1 text-xs font-semibold text-[var(--danger)]"
+                key={flag}
+              >
+                {formatWorkAnomaly(flag)}
+              </span>
+            ))}
+          </div>
+        ) : null}
+        {projectLinks.length ? (
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            {projectLinks.map((link) => (
+              <span
+                className="inline-flex max-w-full items-center gap-1 rounded-lg bg-[var(--surface-subtle)] px-2 py-1 text-xs text-[var(--text-muted)]"
+                key={link.projectNodeId}
+              >
+                <span
+                  className={
+                    link.isPrimary
+                      ? "size-1.5 shrink-0 rounded-full bg-[var(--accent)]"
+                      : "size-1.5 shrink-0 rounded-full bg-[var(--text-subtle)]"
+                  }
+                />
+                {link.isPrimary ? "主关联" : "关联"} ·{" "}
+                <span className="truncate">{link.projectNodeTitle}</span>
+              </span>
+            ))}
+          </div>
+        ) : null}
+      </div>
+      {action}
+    </div>
+  );
+}
 
+function dayHour(value: string | Date): number {
+  const date = new Date(value);
+  return date.getHours() + date.getMinutes() / 60;
+}
+
+function sameLocalDate(left: string | Date, right: string | Date): boolean {
+  const leftDate = new Date(left);
+  const rightDate = new Date(right);
+  return (
+    leftDate.getFullYear() === rightDate.getFullYear() &&
+    leftDate.getMonth() === rightDate.getMonth() &&
+    leftDate.getDate() === rightDate.getDate()
+  );
+}
+
+function WorkDayTimeline({
+  sessions,
+  startAt,
+  endAt,
+  content,
+  breaks,
+}: {
+  sessions: WorkSession[];
+  startAt: string;
+  endAt: string;
+  content: string;
+  breaks: Array<{ startAt: string; endAt: string }>;
+}) {
+  const startHour = 7;
+  const endHour = 22;
+  const totalHours = endHour - startHour;
+  const manualStart = new Date(startAt);
+  const manualEnd = new Date(endAt);
+  const hasPreview =
+    !Number.isNaN(manualStart.getTime()) &&
+    !Number.isNaN(manualEnd.getTime()) &&
+    manualEnd.getTime() > manualStart.getTime();
+  const breakPreviews = breaks
+    .map((entry) => ({
+      startAt: new Date(entry.startAt),
+      endAt: new Date(entry.endAt),
+    }))
+    .filter(
+      (entry) =>
+        !Number.isNaN(entry.startAt.getTime()) &&
+        !Number.isNaN(entry.endAt.getTime()) &&
+        entry.endAt > entry.startAt,
+    );
+  const toPosition = (value: string | Date) =>
+    Math.max(
+      0,
+      Math.min(100, ((dayHour(value) - startHour) / totalHours) * 100),
+    );
+  const toHeight = (from: string | Date, to: string | Date) =>
+    Math.max(
+      6,
+      Math.min(
+        100,
+        (((sameLocalDate(from, to) ? dayHour(to) : 24) - dayHour(from)) /
+          totalHours) *
+          100,
+      ),
+    );
+  const daySessions = hasPreview
+    ? sessions.filter((item) => sameLocalDate(item.startAt, manualStart))
+    : sessions.slice(0, 5);
+  const hours = ["07", "09", "11", "13", "15", "17", "19", "21"];
+
+  return (
+    <section className="work-day-timeline" aria-label="当日时间预览">
+      <div className="work-day-timeline-head">
+        <div>
+          <p className="app-section-label">当日时间轴</p>
+          <h3 className="mt-2 font-extrabold tracking-[-0.025em]">
+            录入区间预览
+          </h3>
+          <p className="mt-1 max-w-sm text-xs leading-5 text-[var(--text-muted)]">
+            时间预览随表单实时变化；保存时服务端会再次校验重叠、休息区间与净时长。
+          </p>
+        </div>
+        <Badge tone="info">
+          {hasPreview && !sameLocalDate(manualStart, manualEnd)
+            ? "跨日预览"
+            : "日内预览"}
+        </Badge>
+      </div>
+      <div className="work-timeline-frame">
+        <div className="work-timeline-hours">
+          {hours.map((hour) => (
+            <span key={hour}>{hour}:00</span>
+          ))}
+        </div>
+        <div className="work-timeline-track">
+          {daySessions.map((item) => (
+            <div
+              className="work-timeline-event"
+              key={item.id}
+              style={{
+                top: `${toPosition(item.startAt)}%`,
+                height: `${toHeight(item.startAt, item.endAt)}%`,
+              }}
+            >
+              <strong className="truncate">{item.content}</strong>
+              <small>
+                {formatDateTime(item.startAt)} ·{" "}
+                {formatDuration(item.netSeconds)}
+              </small>
+            </div>
+          ))}
+          {hasPreview ? (
+            <div
+              className="work-timeline-event is-preview"
+              style={{
+                top: `${toPosition(manualStart)}%`,
+                height: `${toHeight(manualStart, manualEnd)}%`,
+              }}
+            >
+              <strong className="truncate">
+                {content.trim() || "正在录入的工作"}
+              </strong>
+              <small>
+                {formatDateTime(manualStart)} – {formatDateTime(manualEnd)}
+              </small>
+            </div>
+          ) : null}
+          {breakPreviews.map((entry, index) => (
+            <div
+              className="work-timeline-break"
+              key={[entry.startAt.toISOString(), index].join("-")}
+              style={{
+                top: String(toPosition(entry.startAt)) + "%",
+                height: String(toHeight(entry.startAt, entry.endAt)) + "%",
+              }}
+            >
+              <span>
+                休息 · {formatDateTime(entry.startAt)} –{" "}
+                {formatDateTime(entry.endAt)}
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
+      {hasPreview && !sameLocalDate(manualStart, manualEnd) ? (
+        <p className="mt-3 text-xs leading-5 text-[var(--text-muted)]">
+          该记录跨越午夜：时间线仅显示开始日片段；精确区间、净时长和薪资切分均由服务端按带时区的时间戳计算。
+        </p>
+      ) : null}
+    </section>
+  );
+}
 function EvidencePanel({ sessionId }: { sessionId: string }) {
   const queryClient = useQueryClient();
   const [open, setOpen] = useState(false);
@@ -176,179 +2576,4763 @@ function EvidencePanel({ sessionId }: { sessionId: string }) {
   const [reference, setReference] = useState("");
   const [replacementFor, setReplacementFor] = useState<string | null>(null);
   const [replacementReason, setReplacementReason] = useState("");
-  const evidence = useQuery({ queryKey: ["evidence", sessionId], queryFn: () => api<{ items: EvidenceAttachment[] }>(`/api/work-sessions/${sessionId}/attachments`), enabled: open });
-  const refresh = async () => { await queryClient.invalidateQueries({ queryKey: ["evidence", sessionId] }); };
-  const upload = useMutation({ mutationFn: async () => {
-    if (!file) throw new Error("请选择要上传的证据文件。");
-    const bytes = await file.arrayBuffer();
-    const digest = await crypto.subtle.digest("SHA-256", bytes);
-    const sha256 = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
-    const fileInput = { originalName: file.name, mimeType: file.type || "text/plain", sizeBytes: file.size, sha256 };
-    const intent = await api<{ attachment: EvidenceAttachment; uploadUrl: string; requiredHeaders: Record<string, string> }>(replacementFor ? `/api/attachments/${replacementFor}/replacement-intent` : `/api/work-sessions/${sessionId}/attachments/upload-intent`, { method: "POST", body: replacementFor ? { ...fileInput, reason: replacementReason.trim() || "在工作台替换文件证据" } : { ...fileInput, visibility: "management_only" } });
-    const uploaded = await fetch(intent.uploadUrl, { method: "PUT", headers: intent.requiredHeaders, body: file });
-    if (!uploaded.ok) throw new Error("文件未能上传到受保护的对象存储。");
-    await api(`/api/attachments/${intent.attachment.id}/complete`, { method: "POST" });
-  }, onSuccess: async () => { setFile(null); setReplacementFor(null); setReplacementReason(""); await refresh(); } });
-  const addUrl = useMutation({ mutationFn: () => api(`/api/work-sessions/${sessionId}/attachments/reference`, { method: "POST", body: { kind: "url", externalUrl: reference, visibility: "management_only" } }), onSuccess: async () => { setReference(""); await refresh(); } });
-  const download = useMutation({ mutationFn: (id: string) => api<{ url: string }>(`/api/attachments/${id}/download`), onSuccess: (data) => window.open(data.url, "_blank", "noopener,noreferrer") });
-  const remove = useMutation({ mutationFn: (id: string) => api(`/api/attachments/${id}`, { method: "DELETE", body: { reason: "在工作台删除证据" } }), onSuccess: refresh });
-  return <div className="mt-3 rounded-xl border border-[var(--border)] bg-[var(--surface-subtle)] p-3"><Button onClick={() => setOpen((value) => !value)} size="compact" variant="secondary"><Paperclip size={15} />{open ? "收起证据" : "证据"}</Button>{open ? <div className="mt-3 space-y-3"><p className="text-xs leading-5 text-[var(--text-muted)]">文件直传对象存储后会核验 SHA-256；替换会保留不可篡改的版本链，下载强制作为附件处理。仅显示你有权查看的证据。</p><div className="flex flex-col gap-2 sm:flex-row"><input accept="application/pdf,application/json,application/zip,application/gzip,image/*,audio/*,video/*,text/*,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.7z,.rar" className="block min-w-0 flex-1 text-sm" onChange={(event) => setFile(event.target.files?.[0] ?? null)} type="file" /><Button disabled={!file || upload.isPending} onClick={() => upload.mutate()} size="compact">{upload.isPending ? "上传中…" : replacementFor ? "确认替换" : "上传文件"}</Button></div>{replacementFor ? <div className="flex gap-2"><input className={fieldClass} maxLength={1000} onChange={(event) => setReplacementReason(event.target.value)} placeholder="替换原因（将进入审计记录）" value={replacementReason} /><Button onClick={() => { setReplacementFor(null); setReplacementReason(""); }} size="compact" variant="secondary">取消替换</Button></div> : null}<div className="flex gap-2"><input className={fieldClass} onChange={(event) => setReference(event.target.value)} placeholder="https://… 关联外部证据" type="url" value={reference} /><Button disabled={!reference || addUrl.isPending} onClick={() => addUrl.mutate()} size="compact" variant="secondary">添加链接</Button></div><ErrorMessage error={upload.error ?? addUrl.error ?? download.error ?? remove.error ?? evidence.error} />{evidence.isPending ? <p className="text-sm text-[var(--text-muted)]">正在读取证据…</p> : evidence.data?.items.length ? <ul className="space-y-2">{evidence.data.items.map((item) => <li className="flex items-center justify-between gap-3 rounded-lg bg-[var(--surface)] px-3 py-2 text-sm" key={item.id}><span className="min-w-0 truncate">{item.kind === "file" ? item.originalName : item.kind === "url" ? item.externalUrl : item.textContent?.slice(0, 80)} <span className="ml-1 text-xs text-[var(--text-subtle)]">{item.status} · v{item.version}</span></span><span className="flex shrink-0 gap-1">{item.kind === "file" ? <><Button disabled={download.isPending || item.status !== "available"} onClick={() => download.mutate(item.id)} size="compact" variant="secondary"><FileText size={14} />下载</Button><Button onClick={() => { setReplacementFor(item.id); setFile(null); }} size="compact" variant="secondary">替换</Button></> : item.kind === "url" && item.externalUrl ? <a aria-label="打开外部证据" className="text-[var(--accent-strong)]" href={item.externalUrl} rel="noreferrer" target="_blank"><ExternalLink size={16} /></a> : null}<Button disabled={remove.isPending} onClick={() => { if (window.confirm("删除后将保留审计记录，确定继续？")) remove.mutate(item.id); }} size="compact" variant="secondary">删除</Button></span></li>)}</ul> : <p className="text-sm text-[var(--text-muted)]">暂无可见证据。</p>}</div> : null}</div>;
+  const evidence = useQuery({
+    queryKey: ["evidence", sessionId],
+    queryFn: () =>
+      api<{ items: EvidenceAttachment[] }>(
+        `/api/work-sessions/${sessionId}/attachments`,
+      ),
+    enabled: open,
+  });
+  const refresh = async () => {
+    await queryClient.invalidateQueries({ queryKey: ["evidence", sessionId] });
+  };
+  const upload = useMutation({
+    mutationFn: async () => {
+      if (!file) throw new Error("请选择要上传的证据文件。");
+      const bytes = await file.arrayBuffer();
+      const digest = await crypto.subtle.digest("SHA-256", bytes);
+      const sha256 = Array.from(new Uint8Array(digest), (byte) =>
+        byte.toString(16).padStart(2, "0"),
+      ).join("");
+      const fileInput = {
+        originalName: file.name,
+        mimeType: file.type || "text/plain",
+        sizeBytes: file.size,
+        sha256,
+      };
+      const intent = await api<{
+        attachment: EvidenceAttachment;
+        uploadUrl: string;
+        requiredHeaders: Record<string, string>;
+      }>(
+        replacementFor
+          ? `/api/attachments/${replacementFor}/replacement-intent`
+          : `/api/work-sessions/${sessionId}/attachments/upload-intent`,
+        {
+          method: "POST",
+          body: replacementFor
+            ? {
+                ...fileInput,
+                reason: replacementReason.trim() || "在工作台替换文件证据",
+              }
+            : { ...fileInput, visibility: "management_only" },
+        },
+      );
+      const uploaded = await fetch(intent.uploadUrl, {
+        method: "PUT",
+        headers: intent.requiredHeaders,
+        body: file,
+      });
+      if (!uploaded.ok) throw new Error("文件未能上传到受保护的对象存储。");
+      await api(`/api/attachments/${intent.attachment.id}/complete`, {
+        method: "POST",
+      });
+    },
+    onSuccess: async () => {
+      setFile(null);
+      setReplacementFor(null);
+      setReplacementReason("");
+      await refresh();
+    },
+  });
+  const addUrl = useMutation({
+    mutationFn: () =>
+      api(`/api/work-sessions/${sessionId}/attachments/reference`, {
+        method: "POST",
+        body: {
+          kind: "url",
+          externalUrl: reference,
+          visibility: "management_only",
+        },
+      }),
+    onSuccess: async () => {
+      setReference("");
+      await refresh();
+    },
+  });
+  const download = useMutation({
+    mutationFn: (id: string) =>
+      api<{ url: string }>(`/api/attachments/${id}/download`),
+    onSuccess: (data) => window.open(data.url, "_blank", "noopener,noreferrer"),
+  });
+  const remove = useMutation({
+    mutationFn: (id: string) =>
+      api(`/api/attachments/${id}`, {
+        method: "DELETE",
+        body: { reason: "在工作台删除证据" },
+      }),
+    onSuccess: refresh,
+  });
+  return (
+    <div className="mt-3 rounded-xl border border-[var(--border)] bg-[var(--surface-subtle)] p-3">
+      <Button
+        onClick={() => setOpen((value) => !value)}
+        size="compact"
+        variant="secondary"
+      >
+        <Paperclip size={15} />
+        {open ? "收起证据" : "证据"}
+      </Button>
+      {open ? (
+        <div className="mt-3 space-y-3">
+          <p className="text-xs leading-5 text-[var(--text-muted)]">
+            文件直传对象存储后会核验
+            SHA-256；替换会保留不可篡改的版本链，下载强制作为附件处理。仅显示你有权查看的证据。
+          </p>
+          <div className="flex flex-col gap-2 sm:flex-row">
+            <input
+              accept="application/pdf,application/json,application/zip,application/gzip,image/*,audio/*,video/*,text/*,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.7z,.rar"
+              className="block min-w-0 flex-1 text-sm"
+              onChange={(event) => setFile(event.target.files?.[0] ?? null)}
+              type="file"
+            />
+            <Button
+              disabled={!file || upload.isPending}
+              onClick={() => upload.mutate()}
+              size="compact"
+            >
+              {upload.isPending
+                ? "上传中…"
+                : replacementFor
+                  ? "确认替换"
+                  : "上传文件"}
+            </Button>
+          </div>
+          {replacementFor ? (
+            <div className="flex gap-2">
+              <input
+                className={fieldClass}
+                maxLength={1000}
+                onChange={(event) => setReplacementReason(event.target.value)}
+                placeholder="替换原因（将进入审计记录）"
+                value={replacementReason}
+              />
+              <Button
+                onClick={() => {
+                  setReplacementFor(null);
+                  setReplacementReason("");
+                }}
+                size="compact"
+                variant="secondary"
+              >
+                取消替换
+              </Button>
+            </div>
+          ) : null}
+          <div className="flex gap-2">
+            <input
+              className={fieldClass}
+              onChange={(event) => setReference(event.target.value)}
+              placeholder="https://… 关联外部证据"
+              type="url"
+              value={reference}
+            />
+            <Button
+              disabled={!reference || addUrl.isPending}
+              onClick={() => addUrl.mutate()}
+              size="compact"
+              variant="secondary"
+            >
+              添加链接
+            </Button>
+          </div>
+          <ErrorMessage
+            error={
+              upload.error ??
+              addUrl.error ??
+              download.error ??
+              remove.error ??
+              evidence.error
+            }
+          />
+          {evidence.isPending ? (
+            <p className="text-sm text-[var(--text-muted)]">正在读取证据…</p>
+          ) : evidence.data?.items.length ? (
+            <ul className="space-y-2">
+              {evidence.data.items.map((item) => (
+                <li
+                  className="flex items-center justify-between gap-3 rounded-lg bg-[var(--surface)] px-3 py-2 text-sm"
+                  key={item.id}
+                >
+                  <span className="min-w-0 truncate">
+                    {item.kind === "file"
+                      ? item.originalName
+                      : item.kind === "url"
+                        ? item.externalUrl
+                        : item.textContent?.slice(0, 80)}{" "}
+                    <span className="ml-1 text-xs text-[var(--text-subtle)]">
+                      {item.status} · v{item.version}
+                    </span>
+                  </span>
+                  <span className="flex shrink-0 gap-1">
+                    {item.kind === "file" ? (
+                      <>
+                        <Button
+                          disabled={
+                            download.isPending || item.status !== "available"
+                          }
+                          onClick={() => download.mutate(item.id)}
+                          size="compact"
+                          variant="secondary"
+                        >
+                          <FileText size={14} />
+                          下载
+                        </Button>
+                        <Button
+                          onClick={() => {
+                            setReplacementFor(item.id);
+                            setFile(null);
+                          }}
+                          size="compact"
+                          variant="secondary"
+                        >
+                          替换
+                        </Button>
+                      </>
+                    ) : item.kind === "url" && item.externalUrl ? (
+                      <a
+                        aria-label="打开外部证据"
+                        className="text-[var(--accent-strong)]"
+                        href={item.externalUrl}
+                        rel="noreferrer"
+                        target="_blank"
+                      >
+                        <ExternalLink size={16} />
+                      </a>
+                    ) : null}
+                    <Button
+                      disabled={remove.isPending}
+                      onClick={() => {
+                        if (window.confirm("删除后将保留审计记录，确定继续？"))
+                          remove.mutate(item.id);
+                      }}
+                      size="compact"
+                      variant="secondary"
+                    >
+                      删除
+                    </Button>
+                  </span>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="text-sm text-[var(--text-muted)]">暂无可见证据。</p>
+          )}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function TimerProjectAssociation({
+  projects,
+  projectId,
+  selectedNodes,
+  primaryProjectNodeId,
+  onProjectIdChange,
+  onSelectedNodesChange,
+  onPrimaryProjectNodeIdChange,
+}: {
+  projects: Project[];
+  projectId: string;
+  selectedNodes: LinkedProjectNode[];
+  primaryProjectNodeId: string;
+  onProjectIdChange: (projectId: string) => void;
+  onSelectedNodesChange: (nodes: LinkedProjectNode[]) => void;
+  onPrimaryProjectNodeIdChange: (nodeId: string) => void;
+}) {
+  const projectTree = useQuery({
+    queryKey: ["timer-project-tree", projectId],
+    queryFn: () =>
+      api<{ nodes: ProjectNode[] }>(`/api/projects/${projectId}/tree`),
+    enabled: Boolean(projectId),
+  });
+  const activeProject = projects.find((project) => project.id === projectId);
+  const activeProjectLabel = activeProject
+    ? `${activeProject.key} · ${activeProject.name}`
+    : "当前项目";
+  const activeNodeOptions: LinkedProjectNode[] = (
+    projectTree.data?.nodes ?? []
+  ).map((node) => ({
+    id: node.id,
+    projectId,
+    projectLabel: activeProjectLabel,
+    title: node.title,
+    type: node.type,
+    status: node.status,
+  }));
+  const primaryChoices = [...selectedNodes, ...activeNodeOptions].filter(
+    (node, index, nodes) =>
+      nodes.findIndex((candidate) => candidate.id === node.id) === index,
+  );
+  const addNode = (node: LinkedProjectNode, primary = false) => {
+    onSelectedNodesChange(
+      selectedNodes.some((candidate) => candidate.id === node.id)
+        ? selectedNodes
+        : [...selectedNodes, node],
+    );
+    if (primary || !primaryProjectNodeId) onPrimaryProjectNodeIdChange(node.id);
+  };
+  const removeNode = (nodeId: string) => {
+    const remaining = selectedNodes.filter((node) => node.id !== nodeId);
+    onSelectedNodesChange(remaining);
+    if (primaryProjectNodeId === nodeId)
+      onPrimaryProjectNodeIdChange(remaining[0]?.id ?? "");
+  };
+
+  return (
+    <details className="timer-project-disclosure">
+      <summary>
+        <span className="timer-project-disclosure-title">
+          <FolderKanban size={15} />
+          关联项目节点（可选）
+        </span>
+        <span className="timer-project-disclosure-state">
+          {selectedNodes.length
+            ? `已关联 ${selectedNodes.length} / 32`
+            : "未关联"}
+        </span>
+      </summary>
+      <div className="timer-project-disclosure-body">
+        <Field
+          hint="计时结束后会把关联写入同一条工作事实；可跨项目逐个添加节点。"
+          label="计时关联项目（可选）"
+        >
+          <select
+            aria-label="计时关联项目（可选）"
+            className={fieldClass}
+            onChange={(event) => onProjectIdChange(event.target.value)}
+            value={projectId}
+          >
+            <option value="">选择项目以添加节点</option>
+            {projects.map((project) => (
+              <option key={project.id} value={project.id}>
+                {project.key} · {project.name}
+              </option>
+            ))}
+          </select>
+        </Field>
+        {projectId ? (
+          <Field
+            hint={
+              projectTree.isPending
+                ? "正在读取该项目的可关联节点…"
+                : "首个勾选节点会自动成为主关联；其余节点只保留工作上下文。"
+            }
+            label="从当前项目添加节点"
+          >
+            <div className="timer-project-node-list">
+              {projectTree.isPending ? (
+                <p>正在读取节点…</p>
+              ) : activeNodeOptions.length ? (
+                activeNodeOptions.map((node) => {
+                  const selected = selectedNodes.some(
+                    (candidate) => candidate.id === node.id,
+                  );
+                  return (
+                    <label
+                      className={
+                        selected || selectedNodes.length < 32
+                          ? "timer-project-node-row"
+                          : "timer-project-node-row is-disabled"
+                      }
+                      key={node.id}
+                    >
+                      <input
+                        aria-label={`计时关联 ${node.title}`}
+                        checked={selected}
+                        disabled={!selected && selectedNodes.length >= 32}
+                        onChange={(event) =>
+                          event.target.checked
+                            ? addNode(node)
+                            : removeNode(node.id)
+                        }
+                        type="checkbox"
+                      />
+                      <span className="min-w-0 flex-1 truncate">
+                        {node.title}
+                      </span>
+                      <small>
+                        {node.type} · {node.status}
+                      </small>
+                    </label>
+                  );
+                })
+              ) : (
+                <p>该项目暂无可关联节点。</p>
+              )}
+            </div>
+          </Field>
+        ) : (
+          <p className="timer-project-association-note">
+            不关联项目也可以开始计时；稍后可从工作记录中补录。
+          </p>
+        )}
+        {projectId || selectedNodes.length ? (
+          <Field
+            hint="主关联用于项目投入归集；辅助关联不会重复计算时长。"
+            label="计时主项目节点"
+          >
+            <select
+              aria-label="计时主项目节点"
+              className={fieldClass}
+              onChange={(event) => {
+                const node = primaryChoices.find(
+                  (candidate) => candidate.id === event.target.value,
+                );
+                if (!node) {
+                  onPrimaryProjectNodeIdChange("");
+                  return;
+                }
+                addNode(node, true);
+              }}
+              required={selectedNodes.length > 0}
+              value={primaryProjectNodeId}
+            >
+              <option value="">选择主项目节点</option>
+              {primaryChoices.map((node) => (
+                <option key={node.id} value={node.id}>
+                  {node.projectLabel} · {node.title} · {node.type}
+                </option>
+              ))}
+            </select>
+          </Field>
+        ) : null}
+        {selectedNodes.length ? (
+          <div className="timer-project-link-summary">
+            <div>
+              <strong>已关联 {selectedNodes.length} / 32 个节点</strong>
+              <span>紫点表示主关联</span>
+            </div>
+            <div>
+              {selectedNodes.map((node) => (
+                <span key={node.id}>
+                  <i
+                    className={
+                      node.id === primaryProjectNodeId ? "is-primary" : ""
+                    }
+                  />
+                  <b className="truncate">{node.title}</b>
+                  <button
+                    aria-label={`移除计时关联 ${node.title}`}
+                    onClick={() => removeNode(node.id)}
+                    type="button"
+                  >
+                    ×
+                  </button>
+                </span>
+              ))}
+            </div>
+          </div>
+        ) : null}
+        <ErrorMessage error={projectTree.error} />
+      </div>
+    </details>
+  );
 }
 
 export function WorkPage() {
   const queryClient = useQueryClient();
   const [showForm, setShowForm] = useState(false);
   const now = new Date();
-  const [manual, setManual] = useState({ content: "", result: "", startAt: localInput(new Date(now.getTime() - 60 * 60_000)), endAt: localInput(now), visibility: "management_only" });
+  const [manual, setManual] = useState<ManualWorkDraft>({
+    content: "",
+    result: "",
+    blockers: "",
+    nextStep: "",
+    startAt: localInput(new Date(now.getTime() - 60 * 60_000)),
+    endAt: localInput(now),
+    visibility: "management_only",
+    parallelWork: false,
+  });
+  const [manualBreaks, setManualBreaks] = useState<
+    Array<{ id: string; startAt: string; endAt: string }>
+  >([]);
+  const [editingSession, setEditingSession] = useState<WorkSession | null>(
+    null,
+  );
+  const [correctionSession, setCorrectionSession] =
+    useState<WorkSession | null>(null);
+  const [correctionReason, setCorrectionReason] = useState("");
+  const [prefillMessage, setPrefillMessage] = useState<string | null>(null);
   const [timerContent, setTimerContent] = useState("");
-  const work = useQuery({ queryKey: ["work-sessions"], queryFn: () => api<{ items: WorkSession[] }>("/api/work-sessions?limit=100") });
-  const timer = useQuery({ queryKey: ["timer"], queryFn: () => api<{ timer: TimerState | null }>("/api/timer") });
-  const refresh = async () => { await Promise.all([queryClient.invalidateQueries({ queryKey: ["work-sessions"] }), queryClient.invalidateQueries({ queryKey: ["timer"] })]); };
-  const create = useMutation({ mutationFn: () => api("/api/work-sessions", { method: "POST", body: { startAt: new Date(manual.startAt).toISOString(), endAt: new Date(manual.endAt).toISOString(), timezone, source: "manual", content: manual.content, result: manual.result, blockers: "", nextStep: "", primaryProjectNodeId: null, visibility: manual.visibility, parallelWork: false, breaks: [] } }), onSuccess: async () => { setShowForm(false); setManual({ ...manual, content: "", result: "" }); await refresh(); } });
-  const startTimer = useMutation({ mutationFn: () => sendQueueableTimerEvent("/api/timer/start", { eventId: crypto.randomUUID(), occurredAt: new Date().toISOString(), content: timerContent, timezone, visibility: "management_only" }), onSuccess: refresh });
-  const transition = useMutation({ mutationFn: ({ timerId, eventType }: { timerId: string; eventType: string }) => sendQueueableTimerEvent(`/api/timer/${timerId}/events`, { eventId: crypto.randomUUID(), eventType, occurredAt: new Date().toISOString() }), onSuccess: refresh });
-  const submit = useMutation({ mutationFn: (item: WorkSession) => api(`/api/work-sessions/${item.id}/submit`, { method: "POST", body: { expectedVersion: item.version } }), onSuccess: refresh });
+  const [timerLinkedProjectId, setTimerLinkedProjectId] = useState("");
+  const [timerPrimaryProjectNodeId, setTimerPrimaryProjectNodeId] =
+    useState("");
+  const [timerLinkedProjectNodes, setTimerLinkedProjectNodes] = useState<
+    LinkedProjectNode[]
+  >([]);
+  const [linkedProjectId, setLinkedProjectId] = useState("");
+  const [primaryProjectNodeId, setPrimaryProjectNodeId] = useState("");
+  const [linkedProjectNodes, setLinkedProjectNodes] = useState<
+    LinkedProjectNode[]
+  >([]);
+  const work = useQuery({
+    queryKey: ["work-sessions", "work-editor", "all", 100],
+    queryFn: () =>
+      api<{ items: WorkSession[] }>("/api/work-sessions?limit=100"),
+  });
+  const corrections = useQuery({
+    queryKey: ["work-corrections-mine"],
+    queryFn: () =>
+      api<{ items: OwnWorkCorrection[] }>(
+        "/api/work-session-corrections/mine?limit=100",
+      ),
+  });
+  const timer = useQuery({
+    queryKey: ["timer"],
+    queryFn: () => api<{ timer: TimerState | null }>("/api/timer"),
+  });
+  const projects = useQuery({
+    queryKey: ["projects"],
+    queryFn: () => api<{ items: Project[] }>("/api/projects"),
+    enabled: showForm || !timer.data?.timer,
+  });
+  const linkedProjectTree = useQuery({
+    queryKey: ["project-tree", linkedProjectId],
+    queryFn: () =>
+      api<{ nodes: ProjectNode[] }>(
+        "/api/projects/" + linkedProjectId + "/tree",
+      ),
+    enabled: showForm && Boolean(linkedProjectId),
+  });
+  const activeProject = projects.data?.items.find(
+    (project) => project.id === linkedProjectId,
+  );
+  const activeProjectLabel = activeProject
+    ? `${activeProject.key} · ${activeProject.name}`
+    : "当前项目";
+  const activeProjectNodes = linkedProjectTree.data?.nodes ?? [];
+  const activeNodeOptions: LinkedProjectNode[] = activeProjectNodes.map(
+    (node) => ({
+      id: node.id,
+      projectId: linkedProjectId,
+      projectLabel: activeProjectLabel,
+      title: node.title,
+      type: node.type,
+      status: node.status,
+    }),
+  );
+  const primaryChoices = [...linkedProjectNodes, ...activeNodeOptions].filter(
+    (node, index, items) =>
+      items.findIndex((candidate) => candidate.id === node.id) === index,
+  );
+  const addLinkedNode = (node: LinkedProjectNode, primary = false) => {
+    setLinkedProjectNodes((current) =>
+      current.some((candidate) => candidate.id === node.id)
+        ? current
+        : [...current, node],
+    );
+    if (primary || !primaryProjectNodeId) setPrimaryProjectNodeId(node.id);
+  };
+  const removeLinkedNode = (nodeId: string) => {
+    const remaining = linkedProjectNodes.filter((node) => node.id !== nodeId);
+    setLinkedProjectNodes(remaining);
+    if (primaryProjectNodeId === nodeId)
+      setPrimaryProjectNodeId(remaining[0]?.id ?? "");
+  };
+  const toggleLinkedNode = (node: LinkedProjectNode, checked: boolean) => {
+    if (checked) addLinkedNode(node);
+    else removeLinkedNode(node.id);
+  };
+  const choosePrimaryNode = (nodeId: string) => {
+    const node = primaryChoices.find((candidate) => candidate.id === nodeId);
+    if (!node) {
+      setPrimaryProjectNodeId("");
+      return;
+    }
+    addLinkedNode(node, true);
+  };
+  const resetManualEditor = () => {
+    const resetAt = new Date();
+    setEditingSession(null);
+    setCorrectionSession(null);
+    setCorrectionReason("");
+    setManual({
+      content: "",
+      result: "",
+      blockers: "",
+      nextStep: "",
+      startAt: localInput(new Date(resetAt.getTime() - 60 * 60_000)),
+      endAt: localInput(resetAt),
+      visibility: "management_only",
+      parallelWork: false,
+    });
+    setManualBreaks([]);
+    setLinkedProjectId("");
+    setPrimaryProjectNodeId("");
+    setLinkedProjectNodes([]);
+    setPrefillMessage(null);
+  };
+  const refresh = async () => {
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ["work-sessions"] }),
+      queryClient.invalidateQueries({ queryKey: ["timer"] }),
+      queryClient.invalidateQueries({ queryKey: ["work-corrections-mine"] }),
+    ]);
+  };
+  const create = useMutation({
+    mutationFn: (recordKind: "fact" | "plan") => {
+      const incompleteBreak = manualBreaks.some(
+        (entry) => Boolean(entry.startAt) !== Boolean(entry.endAt),
+      );
+      if (incompleteBreak) {
+        throw new Error("每一段休息都需要同时填写开始与结束时间。");
+      }
+      if (correctionSession && correctionReason.trim().length < 5) {
+        throw new Error("请清楚说明原始事实、拟议更正及可核验依据（至少 5 个字）。");
+      }
+      const breaks = manualBreaks
+        .filter((entry) => entry.startAt && entry.endAt)
+        .map((entry) => ({
+          startAt: new Date(entry.startAt).toISOString(),
+          endAt: new Date(entry.endAt).toISOString(),
+        }));
+      const body = {
+        startAt: new Date(manual.startAt).toISOString(),
+        endAt: new Date(manual.endAt).toISOString(),
+        timezone:
+          editingSession?.timezone ?? correctionSession?.timezone ?? timezone,
+        source: correctionSession?.source ?? "manual",
+        content: manual.content,
+        result: manual.result,
+        blockers: manual.blockers,
+        nextStep: manual.nextStep,
+        primaryProjectNodeId: primaryProjectNodeId || null,
+        projectNodeIds: linkedProjectNodes.map((node) => node.id),
+        visibility:
+          recordKind === "plan" || editingSession?.recordKind === "plan"
+            ? "private"
+            : manual.visibility,
+        parallelWork: manual.parallelWork,
+        breaks,
+      };
+      return correctionSession
+        ? api(`/api/work-sessions/${correctionSession.id}/corrections`, {
+            method: "POST",
+            body: { ...body, reason: correctionReason.trim() },
+          })
+        : editingSession
+        ? api("/api/work-sessions/" + editingSession.id, {
+            method: "PATCH",
+            body: { ...body, expectedVersion: editingSession.version },
+          })
+        : api(
+            recordKind === "plan" ? "/api/work-plans" : "/api/work-sessions",
+            { method: "POST", body },
+          );
+    },
+    onSuccess: async () => {
+      setShowForm(false);
+      setEditingSession(null);
+      setCorrectionSession(null);
+      setCorrectionReason("");
+      try {
+        window.localStorage.removeItem(manualPrefillStorageKey);
+      } catch {
+        // The factual record has been saved; inability to clear an optional
+        // browser-only prefill must not make the successful write look failed.
+      }
+      setPrefillMessage(null);
+      setManual((current) => ({
+        ...current,
+        content: "",
+        result: "",
+        blockers: "",
+        nextStep: "",
+        parallelWork: false,
+      }));
+      setManualBreaks([]);
+      setLinkedProjectId("");
+      setPrimaryProjectNodeId("");
+      setLinkedProjectNodes([]);
+      await refresh();
+    },
+  });
+  const startTimer = useMutation({
+    mutationFn: () =>
+      sendQueueableTimerEvent("/api/timer/start", {
+        eventId: crypto.randomUUID(),
+        occurredAt: new Date().toISOString(),
+        content: timerContent,
+        timezone,
+        visibility: "management_only",
+        primaryProjectNodeId: timerPrimaryProjectNodeId || null,
+        projectNodeIds: timerLinkedProjectNodes.map((node) => node.id),
+      }),
+    onSuccess: async () => {
+      setTimerContent("");
+      setTimerLinkedProjectId("");
+      setTimerPrimaryProjectNodeId("");
+      setTimerLinkedProjectNodes([]);
+      await refresh();
+    },
+  });
+  const transition = useMutation({
+    mutationFn: ({
+      timerId,
+      eventType,
+    }: {
+      timerId: string;
+      eventType: string;
+    }) =>
+      sendQueueableTimerEvent(`/api/timer/${timerId}/events`, {
+        eventId: crypto.randomUUID(),
+        eventType,
+        occurredAt: new Date().toISOString(),
+      }),
+    onSuccess: refresh,
+  });
+  const submit = useMutation({
+    mutationFn: (item: WorkSession) =>
+      api(`/api/work-sessions/${item.id}/submit`, {
+        method: "POST",
+        body: { expectedVersion: item.version },
+      }),
+    onSuccess: refresh,
+  });
+  const realizePlan = useMutation({
+    mutationFn: (item: WorkSession) =>
+      api(`/api/work-plans/${item.id}/realize`, {
+        method: "POST",
+        body: { expectedVersion: item.version },
+      }),
+    onSuccess: refresh,
+  });
+  const openDraftEditor = (item: WorkSession) => {
+    setEditingSession(item);
+    setCorrectionSession(null);
+    setCorrectionReason("");
+    setManual({
+      content: item.content,
+      result: item.result,
+      blockers: item.blockers,
+      nextStep: item.nextStep,
+      startAt: localInput(new Date(item.startAt)),
+      endAt: localInput(new Date(item.endAt)),
+      visibility: item.visibility,
+      parallelWork: item.parallelWork,
+    });
+    setManualBreaks(
+      (item.breaks ?? []).map((entry) => ({
+        id: crypto.randomUUID(),
+        startAt: localInput(new Date(entry.startAt)),
+        endAt: localInput(new Date(entry.endAt)),
+      })),
+    );
+    const links = item.projectLinks ?? [];
+    setLinkedProjectNodes(
+      links.map((link) => ({
+        id: link.projectNodeId,
+        projectId: link.projectId,
+        projectLabel: "已关联项目",
+        title: link.projectNodeTitle,
+        type: "task",
+        status: "",
+      })),
+    );
+    setPrimaryProjectNodeId(item.primaryProjectNodeId ?? "");
+    setLinkedProjectId(
+      links.find((link) => link.isPrimary)?.projectId ?? links[0]?.projectId ?? "",
+    );
+    setShowForm(true);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+  const openCorrectionEditor = (item: WorkSession) => {
+    setEditingSession(null);
+    setCorrectionSession(item);
+    setCorrectionReason("");
+    setManual({
+      content: item.content,
+      result: item.result,
+      blockers: item.blockers,
+      nextStep: item.nextStep,
+      startAt: localInput(new Date(item.startAt)),
+      endAt: localInput(new Date(item.endAt)),
+      visibility: item.visibility,
+      parallelWork: item.parallelWork,
+    });
+    setManualBreaks(
+      (item.breaks ?? []).map((entry) => ({
+        id: crypto.randomUUID(),
+        startAt: localInput(new Date(entry.startAt)),
+        endAt: localInput(new Date(entry.endAt)),
+      })),
+    );
+    const links = item.projectLinks ?? [];
+    setLinkedProjectNodes(
+      links.map((link) => ({
+        id: link.projectNodeId,
+        projectId: link.projectId,
+        projectLabel: "已关联项目",
+        title: link.projectNodeTitle,
+        type: "task",
+        status: "",
+      })),
+    );
+    setPrimaryProjectNodeId(item.primaryProjectNodeId ?? "");
+    setLinkedProjectId(
+      links.find((link) => link.isPrimary)?.projectId ??
+        links[0]?.projectId ??
+        "",
+    );
+    setShowForm(true);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+  const saveLocalPrefill = () => {
+    if (editingSession || correctionSession) return;
+    const payload: LocalManualPrefill = {
+      version: 1,
+      savedAt: new Date().toISOString(),
+      manual,
+      breaks: manualBreaks,
+      linkedProjectId,
+      primaryProjectNodeId,
+      linkedProjectNodes,
+    };
+    try {
+      window.localStorage.setItem(manualPrefillStorageKey, JSON.stringify(payload));
+      setPrefillMessage(
+        "已仅保存在当前浏览器。本机预填写不会创建工时，也不会进入薪资、审核或团队同步。",
+      );
+    } catch {
+      setPrefillMessage("当前浏览器无法保存本机预填写，请检查隐私模式或存储权限。");
+    }
+  };
+  const restoreLocalPrefill = () => {
+    try {
+      const raw = window.localStorage.getItem(manualPrefillStorageKey);
+      if (!raw) {
+        setPrefillMessage("当前浏览器没有可恢复的预填写。");
+        return;
+      }
+      const candidate = JSON.parse(raw) as Partial<LocalManualPrefill>;
+      const storedManual = candidate.manual;
+      if (
+        candidate.version !== 1 ||
+        !storedManual ||
+        typeof storedManual.content !== "string" ||
+        typeof storedManual.result !== "string" ||
+        typeof storedManual.blockers !== "string" ||
+        typeof storedManual.nextStep !== "string" ||
+        typeof storedManual.startAt !== "string" ||
+        typeof storedManual.endAt !== "string" ||
+        typeof storedManual.visibility !== "string" ||
+        typeof storedManual.parallelWork !== "boolean"
+      ) {
+        throw new Error("invalid local prefill");
+      }
+      const storedBreaks = Array.isArray(candidate.breaks)
+        ? candidate.breaks.filter(
+            (entry): entry is { id: string; startAt: string; endAt: string } =>
+              Boolean(entry) &&
+              typeof entry.id === "string" &&
+              typeof entry.startAt === "string" &&
+              typeof entry.endAt === "string",
+          )
+        : [];
+      const storedNodes = Array.isArray(candidate.linkedProjectNodes)
+        ? candidate.linkedProjectNodes.filter(
+            (entry): entry is LinkedProjectNode =>
+              Boolean(entry) &&
+              typeof entry.id === "string" &&
+              typeof entry.projectId === "string" &&
+              typeof entry.projectLabel === "string" &&
+              typeof entry.title === "string" &&
+              typeof entry.type === "string" &&
+              typeof entry.status === "string",
+          )
+        : [];
+      setEditingSession(null);
+      setCorrectionSession(null);
+      setCorrectionReason("");
+      setManual(storedManual);
+      setManualBreaks(storedBreaks);
+      setLinkedProjectId(
+        typeof candidate.linkedProjectId === "string"
+          ? candidate.linkedProjectId
+          : "",
+      );
+      setPrimaryProjectNodeId(
+        typeof candidate.primaryProjectNodeId === "string"
+          ? candidate.primaryProjectNodeId
+          : "",
+      );
+      setLinkedProjectNodes(storedNodes);
+      setShowForm(true);
+      setPrefillMessage("已恢复本机预填写。保存草稿前请再次核验时间和项目关联。");
+    } catch {
+      setPrefillMessage("预填写内容无法读取，未写入任何工时。请重新填写。");
+    }
+  };
+  const discardLocalPrefill = () => {
+    try {
+      window.localStorage.removeItem(manualPrefillStorageKey);
+      setPrefillMessage("已删除当前浏览器中的预填写。");
+    } catch {
+      setPrefillMessage("当前浏览器无法删除该预填写，请检查存储权限。");
+    }
+  };
   const activeTimer = timer.data?.timer;
-  return <><PageHeader title="工作记录" description="记录真实工作区间、休息、结果与项目归属；提交后进入版本化审核链。" actions={<Button onClick={() => setShowForm((value) => !value)} variant={showForm ? "secondary" : "primary"}><Plus size={18} />{showForm ? "取消录入" : "手工录入"}</Button>} />
-    {showForm ? <Card className="mb-5"><CardHeader><h2 className="font-bold">新增手工工时</h2></CardHeader><CardContent><form className="grid gap-4 md:grid-cols-2" onSubmit={(event) => { event.preventDefault(); create.mutate(); }}><Field label="开始时间"><input className={fieldClass} onChange={(event) => setManual({ ...manual, startAt: event.target.value })} required type="datetime-local" value={manual.startAt} /></Field><Field label="结束时间"><input className={fieldClass} onChange={(event) => setManual({ ...manual, endAt: event.target.value })} required type="datetime-local" value={manual.endAt} /></Field><div className="md:col-span-2"><Field label="工作内容"><textarea className={textAreaClass} maxLength={10000} onChange={(event) => setManual({ ...manual, content: event.target.value })} required value={manual.content} /></Field></div><div className="md:col-span-2"><Field label="工作结果"><textarea className={textAreaClass} maxLength={10000} onChange={(event) => setManual({ ...manual, result: event.target.value })} value={manual.result} /></Field></div><Field label="可见范围"><select className={fieldClass} onChange={(event) => setManual({ ...manual, visibility: event.target.value })} value={manual.visibility}><option value="private">仅自己</option><option value="management_only">管理范围</option><option value="project_visible">项目成员</option></select></Field><div className="flex items-end justify-end"><Button disabled={create.isPending} type="submit">{create.isPending ? "正在保存…" : "保存草稿"}</Button></div><div className="md:col-span-2"><ErrorMessage error={create.error} /></div></form></CardContent></Card> : null}
-    <div className="grid gap-5 xl:grid-cols-[360px_minmax(0,1fr)]"><Card><CardHeader><h2 className="font-bold">主计时器</h2>{activeTimer ? <Badge tone={activeTimer.status === "running" ? "positive" : "warning"}>{activeTimer.status}</Badge> : null}</CardHeader><CardContent>{timer.isPending ? <LoadingBlock /> : activeTimer ? <div><p className="text-lg font-bold">{activeTimer.metadata.content}</p><p className="mt-2 text-sm text-[var(--text-muted)]">服务器累计 {formatDuration(activeTimer.accumulatedSeconds)}</p><div className="mt-5 grid grid-cols-2 gap-2">{activeTimer.status === "running" ? <Button onClick={() => transition.mutate({ timerId: activeTimer.id, eventType: "pause" })} variant="secondary"><Pause size={17} />暂停</Button> : activeTimer.status === "paused" ? <Button onClick={() => transition.mutate({ timerId: activeTimer.id, eventType: "resume" })}><Play size={17} />继续</Button> : <Button onClick={() => transition.mutate({ timerId: activeTimer.id, eventType: "break_end" })}><Play size={17} />结束休息</Button>}{activeTimer.status !== "on_break" ? <Button onClick={() => transition.mutate({ timerId: activeTimer.id, eventType: "break_start" })} variant="secondary"><TimerReset size={17} />休息</Button> : null}<Button className="col-span-2" onClick={() => transition.mutate({ timerId: activeTimer.id, eventType: "stop" })} variant="danger"><Square size={17} />结束并生成工时</Button></div><div className="mt-3"><ErrorMessage error={transition.error} /></div></div> : <form className="space-y-4" onSubmit={(event) => { event.preventDefault(); startTimer.mutate(); }}><Field label="准备做什么"><textarea className={textAreaClass} onChange={(event) => setTimerContent(event.target.value)} required value={timerContent} /></Field><Button className="w-full" disabled={startTimer.isPending} type="submit"><Play size={17} />开始计时</Button><ErrorMessage error={startTimer.error} /></form>}</CardContent></Card>
-      <Card><CardHeader><div><h2 className="font-bold">全部记录</h2><p className="mt-1 text-sm text-[var(--text-muted)]">当前账号本人范围</p></div><Badge>{work.data?.items.length ?? 0} 条</Badge></CardHeader><CardContent>{work.isPending ? <LoadingBlock /> : work.data?.items.length ? <div className="divide-y divide-[var(--border)]">{work.data.items.map((item) => <div key={item.id}><WorkRow action={item.submissionStatus === "draft" && item.approvalStatus !== "locked" ? <Button disabled={submit.isPending} onClick={() => submit.mutate(item)} size="compact" variant="secondary">提交审核</Button> : null} item={item} /><EvidencePanel sessionId={item.id} /></div>)}</div> : <EmptyState description="现在可以手工录入，或使用左侧主计时器。" icon={<Clock3 />} title="还没有工时记录" />}</CardContent></Card>
-    </div>
-  </>;
-}
+  const plannedWork = (work.data?.items ?? []).filter(
+    (item) => item.recordKind === "plan",
+  );
+  const factualWork = (work.data?.items ?? []).filter(
+    (item) => item.recordKind !== "plan",
+  );
+  const editingPlan = editingSession?.recordKind === "plan";
+  const timerLabel =
+    activeTimer?.status === "running"
+      ? "正在计时"
+      : activeTimer?.status === "paused"
+        ? "已暂停"
+        : activeTimer?.status === "on_break"
+          ? "休息中"
+          : "";
+  const pendingCorrectionIds = useMemo(
+    () =>
+      new Set(
+        (corrections.data?.items ?? [])
+          .filter((item) => item.correction.status === "pending")
+          .map((item) => item.correction.workSessionId),
+      ),
+    [corrections.data?.items],
+  );
+  const latestCorrectionBySession = useMemo(() => {
+    const result = new Map<string, OwnWorkCorrection["correction"]>();
+    for (const item of corrections.data?.items ?? []) {
+      if (!result.has(item.correction.workSessionId)) {
+        result.set(item.correction.workSessionId, item.correction);
+      }
+    }
+    return result;
+  }, [corrections.data?.items]);
 
-interface Project { id: string; key: string; name: string; description: string | null; color: string; status: string; version: number; updatedAt: string }
-interface ProjectNode { id: string; branchId: string; parentId: string | null; type: string; title: string; status: string; progress: string; version: number; sortOrder: number }
-interface Branch { id: string; name: string; isDefault: boolean }
-interface ProjectEdge { id: string; sourceNodeId: string; targetNodeId: string; type: string; label: string | null }
+  return (
+    <>
+      <PageHeader
+        title="工作记录"
+        description="记录真实工作区间、休息、结果与项目归属；提交后进入版本化审核链。"
+        actions={
+          <Button
+            onClick={() => {
+              if (
+                showForm &&
+                (editingSession || correctionSession) &&
+                !window.confirm(
+                  correctionSession
+                    ? "放弃本次未提交的更正申请？这不会影响已结算的原始记录。"
+                    : "放弃本次未保存的修改？这不会影响已保存的工作草稿。",
+                )
+              ) {
+                return;
+              }
+              if (showForm && (editingSession || correctionSession))
+                resetManualEditor();
+              setShowForm((value) => !value);
+            }}
+            variant={showForm ? "secondary" : "primary"}
+          >
+            <Plus size={18} />
+            {showForm ? "收起录入" : "手工录入"}
+          </Button>
+        }
+      />
+      {showForm ? (
+        <Card className="work-editor mb-5">
+          <div className="work-editor-grid">
+            <div className="work-editor-form">
+              <div className="mb-6 flex items-start justify-between gap-4">
+                <div>
+                  <p className="app-section-label">工作记录编辑器</p>
+                  <h2 className="mt-2 text-lg font-extrabold tracking-[-0.03em]">
+                    {editingSession
+                      ? editingPlan
+                        ? "编辑云端计划草稿"
+                        : "编辑手工草稿"
+                      : correctionSession
+                        ? "发起已结算记录更正"
+                        : "补录一段真实工作"}
+                  </h2>
+                  <p className="mt-2 max-w-xl text-sm leading-6 text-[var(--text-muted)]">
+                    {editingSession
+                      ? editingPlan
+                        ? "计划只在你自己的跨端草稿中可见，不会进入统计、AI、薪资、证据或审核；实际结束后需明确转换为真实工时草稿。"
+                        : "修改会生成新的版本快照；提交审核后的记录不可在此静默改写。"
+                      : correctionSession
+                        ? "原始锁定事实不会被改写。提交的是可审核的完整提案；若涉及已结算金额，审核人只能将明确金额放入后续开放周期。"
+                        : "先准确描述时间和内容，保存草稿后再按需要提交审核。"}
+                  </p>
+                </div>
+                <Badge>
+                  {editingSession
+                    ? editingPlan
+                      ? "计划草稿"
+                      : "编辑中"
+                    : correctionSession
+                      ? "更正申请"
+                      : "草稿"}
+                </Badge>
+              </div>
+              {!editingSession && !correctionSession ? (
+                <div className="mb-5 flex flex-col gap-3 rounded-2xl bg-[var(--surface-subtle)] px-4 py-3 sm:flex-row sm:items-center">
+                  <p className="min-w-0 flex-1 text-xs leading-5 text-[var(--text-muted)]">
+                    提前写可保存为云端计划草稿：跨设备同步并保留版本，但不会进入事实、统计、AI、薪资、证据或审核。实际结束后须主动转换并核对；本机预填写仍可作为离线临时备份。
+                  </p>
+                  <div className="flex shrink-0 flex-wrap gap-2">
+                    <button
+                      className="text-xs font-bold text-[var(--accent-strong)]"
+                      onClick={saveLocalPrefill}
+                      type="button"
+                    >
+                      本机保存预填写
+                    </button>
+                    <button
+                      className="text-xs font-bold text-[var(--accent-strong)]"
+                      onClick={restoreLocalPrefill}
+                      type="button"
+                    >
+                      恢复预填写
+                    </button>
+                    <button
+                      className="text-xs font-bold text-[var(--text-subtle)]"
+                      onClick={discardLocalPrefill}
+                      type="button"
+                    >
+                      删除
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+              {prefillMessage ? (
+                <p className="mb-5 text-xs leading-5 text-[var(--text-muted)]">
+                  {prefillMessage}
+                </p>
+              ) : null}
+              <form
+                className="grid gap-4 md:grid-cols-2"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  create.mutate(editingPlan ? "plan" : "fact");
+                }}
+              >
+                <Field label="开始时间">
+                  <input
+                    className={fieldClass}
+                    onChange={(event) =>
+                      setManual({ ...manual, startAt: event.target.value })
+                    }
+                    required
+                    step="1"
+                    type="datetime-local"
+                    value={manual.startAt}
+                  />
+                </Field>
+                <Field label="结束时间">
+                  <input
+                    className={fieldClass}
+                    onChange={(event) =>
+                      setManual({ ...manual, endAt: event.target.value })
+                    }
+                    required
+                    step="1"
+                    type="datetime-local"
+                    value={manual.endAt}
+                  />
+                </Field>
+                <div className="md:col-span-2">
+                  <Field
+                    hint="清楚描述正在推进的事项，便于后续关联项目和审核。"
+                    label="工作内容"
+                  >
+                    <textarea
+                      className={textAreaClass}
+                      maxLength={10000}
+                      onChange={(event) =>
+                        setManual({ ...manual, content: event.target.value })
+                      }
+                      placeholder="例如：梳理项目交付清单并更新节点状态"
+                      required
+                      value={manual.content}
+                    />
+                  </Field>
+                </div>
+                <div className="md:col-span-2">
+                  <Field hint="可留空，提交前也可以继续补充。" label="工作结果">
+                    <textarea
+                      className={textAreaClass}
+                      maxLength={10000}
+                      onChange={(event) =>
+                        setManual({ ...manual, result: event.target.value })
+                      }
+                      placeholder="已完成的结果、阻塞或下一步"
+                      value={manual.result}
+                    />
+                  </Field>
+                </div>
+                <Field
+                  hint="如依赖、风险或等待项；它会进入可追溯记录。"
+                  label="阻塞与风险（可选）"
+                >
+                  <textarea
+                    className={`${textAreaClass} min-h-24`}
+                    maxLength={5000}
+                    onChange={(event) =>
+                      setManual({ ...manual, blockers: event.target.value })
+                    }
+                    placeholder="例如：等待接口凭据批准"
+                    value={manual.blockers}
+                  />
+                </Field>
+                <Field
+                  hint="让下一位协作者能直接接续推进。"
+                  label="下一步（可选）"
+                >
+                  <textarea
+                    className={`${textAreaClass} min-h-24`}
+                    maxLength={5000}
+                    onChange={(event) =>
+                      setManual({ ...manual, nextStep: event.target.value })
+                    }
+                    placeholder="例如：拿到凭据后完成联调并补充验证"
+                    value={manual.nextStep}
+                  />
+                </Field>
+                {correctionSession ? (
+                  <div className="md:col-span-2">
+                    <Field
+                      hint="请写明原始事实、拟改为的事实，以及可供审核的证据或原因。原始锁定记录不会被直接覆盖。"
+                      label="更正说明与依据"
+                    >
+                      <textarea
+                        className={`${textAreaClass} min-h-28`}
+                        maxLength={2000}
+                        minLength={5}
+                        onChange={(event) =>
+                          setCorrectionReason(event.target.value)
+                        }
+                        placeholder="例如：原记录漏记 30 分钟客户会议；拟将结束时间由 18:00 更正为 18:30，会议纪要已附在证据中。"
+                        required
+                        value={correctionReason}
+                      />
+                    </Field>
+                  </div>
+                ) : null}
+                <div className="md:col-span-2">
+                  <div className="app-field">
+                    <span className="mb-1.5 block text-sm font-semibold">
+                      休息区间（可选）
+                    </span>
+                    <span className="mb-3 block text-xs text-[var(--text-muted)]">
+                      支持多段休息，系统会从净工时中扣除；每段都必须完整且落在工作时间内。
+                    </span>
+                    <div className="space-y-2">
+                      {manualBreaks.map((entry, index) => (
+                        <div
+                          className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]"
+                          key={entry.id}
+                        >
+                          <input
+                            aria-label={"第 " + (index + 1) + " 段休息开始"}
+                            className={fieldClass}
+                            onChange={(event) =>
+                              setManualBreaks((current) =>
+                                current.map((candidate) =>
+                                  candidate.id === entry.id
+                                    ? {
+                                        ...candidate,
+                                        startAt: event.target.value,
+                                      }
+                                    : candidate,
+                                ),
+                              )
+                            }
+                            step="1"
+                            type="datetime-local"
+                            value={entry.startAt}
+                          />
+                          <input
+                            aria-label={"第 " + (index + 1) + " 段休息结束"}
+                            className={fieldClass}
+                            onChange={(event) =>
+                              setManualBreaks((current) =>
+                                current.map((candidate) =>
+                                  candidate.id === entry.id
+                                    ? {
+                                        ...candidate,
+                                        endAt: event.target.value,
+                                      }
+                                    : candidate,
+                                ),
+                              )
+                            }
+                            step="1"
+                            type="datetime-local"
+                            value={entry.endAt}
+                          />
+                          <button
+                            aria-label={"移除第 " + (index + 1) + " 段休息"}
+                            className="rounded-xl px-3 text-xs font-bold text-[var(--text-muted)] transition hover:bg-[var(--surface-subtle)] hover:text-[var(--danger)]"
+                            onClick={() =>
+                              setManualBreaks((current) =>
+                                current.filter(
+                                  (candidate) => candidate.id !== entry.id,
+                                ),
+                              )
+                            }
+                            type="button"
+                          >
+                            移除
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                    <button
+                      className="mt-3 text-xs font-bold text-[var(--accent-strong)] disabled:cursor-not-allowed disabled:opacity-45"
+                      disabled={manualBreaks.length >= 100}
+                      onClick={() =>
+                        setManualBreaks((current) => [
+                          ...current,
+                          { id: crypto.randomUUID(), startAt: "", endAt: "" },
+                        ])
+                      }
+                      type="button"
+                    >
+                      + 添加休息区间（{manualBreaks.length}/100）
+                    </button>
+                  </div>
+                </div>
+                <Field label="可见范围">
+                  <select
+                    className={fieldClass}
+                    onChange={(event) =>
+                      setManual({ ...manual, visibility: event.target.value })
+                    }
+                    value={manual.visibility}
+                  >
+                    <option value="private">仅自己</option>
+                    <option value="management_only">管理范围</option>
+                    <option value="project_visible">项目成员</option>
+                  </select>
+                </Field>
+                <Field
+                  hint="可不关联；选定项目后，可将一条工作同时关联至多条任务节点。"
+                  label="关联项目（可选）"
+                >
+                  <select
+                    aria-label="关联项目（可选）"
+                    className={fieldClass}
+                    onChange={(event) => setLinkedProjectId(event.target.value)}
+                    value={linkedProjectId}
+                  >
+                    <option value="">选择项目以添加节点</option>
+                    {projects.data?.items.map((project) => (
+                      <option key={project.id} value={project.id}>
+                        {project.key} · {project.name}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+                {linkedProjectId ? (
+                  <div className="md:col-span-2">
+                    <Field
+                      hint={
+                        linkedProjectTree.isPending
+                          ? "正在读取该项目的可关联节点…"
+                          : "勾选辅助节点；首个勾选节点会自动成为主关联。"
+                      }
+                      label="从当前项目添加节点"
+                    >
+                      <div className="max-h-44 space-y-1 overflow-y-auto rounded-xl bg-[var(--surface-subtle)] p-2">
+                        {linkedProjectTree.isPending ? (
+                          <p className="px-2 py-3 text-sm text-[var(--text-muted)]">
+                            正在读取节点…
+                          </p>
+                        ) : activeNodeOptions.length ? (
+                          activeNodeOptions.map((node) => {
+                            const selected = linkedProjectNodes.some(
+                              (candidate) => candidate.id === node.id,
+                            );
+                            return (
+                              <label
+                                className={
+                                  selected || linkedProjectNodes.length < 32
+                                    ? "flex cursor-pointer items-center gap-3 rounded-lg px-2 py-2 text-sm transition hover:bg-[var(--surface)]"
+                                    : "flex cursor-not-allowed items-center gap-3 rounded-lg px-2 py-2 text-sm opacity-50"
+                                }
+                                key={node.id}
+                              >
+                                <input
+                                  aria-label={`关联 ${node.title}`}
+                                  checked={selected}
+                                  className="size-4 accent-[var(--accent)]"
+                                  disabled={
+                                    !selected && linkedProjectNodes.length >= 32
+                                  }
+                                  onChange={(event) =>
+                                    toggleLinkedNode(node, event.target.checked)
+                                  }
+                                  type="checkbox"
+                                />
+                                <span className="min-w-0 flex-1 truncate">
+                                  {node.title}
+                                </span>
+                                <span className="shrink-0 text-xs text-[var(--text-subtle)]">
+                                  {node.type} · {node.status}
+                                </span>
+                              </label>
+                            );
+                          })
+                        ) : (
+                          <p className="px-2 py-3 text-sm text-[var(--text-muted)]">
+                            该项目暂无可关联节点。
+                          </p>
+                        )}
+                      </div>
+                    </Field>
+                  </div>
+                ) : (
+                  <div className="flex items-end text-xs leading-5 text-[var(--text-muted)] md:col-span-2">
+                    <p>
+                      未关联时仍可保存个人工作草稿；后续可随时选择项目并添加多个节点。
+                    </p>
+                  </div>
+                )}
+                {linkedProjectId || linkedProjectNodes.length ? (
+                  <>
+                    <div className="md:col-span-2">
+                      <Field
+                        hint="主关联用于项目投入归集；其他关联保留工作上下文，不会重复计算时长。"
+                        label="主项目节点"
+                      >
+                        <select
+                          aria-label="主项目节点"
+                          className={fieldClass}
+                          onChange={(event) =>
+                            choosePrimaryNode(event.target.value)
+                          }
+                          required={linkedProjectNodes.length > 0}
+                          value={primaryProjectNodeId}
+                        >
+                          <option value="">选择主项目节点</option>
+                          {primaryChoices.map((node) => (
+                            <option key={node.id} value={node.id}>
+                              {node.projectLabel} · {node.title} · {node.type}
+                            </option>
+                          ))}
+                        </select>
+                      </Field>
+                    </div>
+                    {linkedProjectNodes.length ? (
+                      <div className="md:col-span-2">
+                        <div className="w-full rounded-xl bg-[var(--surface-subtle)] p-3">
+                          <div className="flex items-center justify-between gap-3">
+                            <p className="text-xs font-bold text-[var(--text-muted)]">
+                              已关联 {linkedProjectNodes.length} / 32 个节点
+                            </p>
+                            <span className="text-xs text-[var(--text-subtle)]">
+                              主关联以紫点标记
+                            </span>
+                          </div>
+                          <div className="mt-2 flex flex-wrap gap-1.5">
+                            {linkedProjectNodes.map((node) => (
+                              <span
+                                className="inline-flex max-w-full items-center gap-1.5 rounded-lg bg-[var(--surface)] px-2 py-1 text-xs text-[var(--text-muted)]"
+                                key={node.id}
+                              >
+                                <span
+                                  className={
+                                    node.id === primaryProjectNodeId
+                                      ? "size-1.5 shrink-0 rounded-full bg-[var(--accent)]"
+                                      : "size-1.5 shrink-0 rounded-full bg-[var(--text-subtle)]"
+                                  }
+                                />
+                                <span className="max-w-32 truncate">
+                                  {node.title}
+                                </span>
+                                <button
+                                  aria-label={`移除关联 ${node.title}`}
+                                  className="grid size-4 place-items-center rounded text-[var(--text-subtle)] transition hover:bg-[var(--surface-subtle)] hover:text-[var(--text)]"
+                                  onClick={() => removeLinkedNode(node.id)}
+                                  type="button"
+                                >
+                                  ×
+                                </button>
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="flex items-end text-xs leading-5 text-[var(--text-muted)] md:col-span-2">
+                        <p>
+                          请选择一条主项目节点，或在上方勾选辅助节点后由系统自动指定主关联。
+                        </p>
+                      </div>
+                    )}
+                  </>
+                ) : null}
+                <div className="flex items-end justify-end md:col-span-2">
+                  <label className="mr-auto flex max-w-52 items-start gap-2 text-xs leading-5 text-[var(--text-muted)]">
+                    <input
+                      checked={manual.parallelWork}
+                      className="mt-1 accent-[var(--accent)]"
+                      onChange={(event) =>
+                        setManual({
+                          ...manual,
+                          parallelWork: event.target.checked,
+                        })
+                      }
+                      type="checkbox"
+                    />
+                    <span>
+                      允许与另一条记录重叠。仅在确有并行工作时开启，服务端仍会保留事实与审计。
+                    </span>
+                  </label>
+                  {!editingSession && !correctionSession ? (
+                    <Button
+                      disabled={
+                        create.isPending ||
+                        (linkedProjectNodes.length > 0 && !primaryProjectNodeId)
+                      }
+                      onClick={() => create.mutate("plan")}
+                      type="button"
+                      variant="secondary"
+                    >
+                      {create.isPending ? "正在保存…" : "保存云端计划"}
+                    </Button>
+                  ) : null}
+                  <Button
+                    disabled={
+                      create.isPending ||
+                      (linkedProjectNodes.length > 0 && !primaryProjectNodeId)
+                    }
+                    type="submit"
+                  >
+                    {create.isPending
+                      ? "正在保存…"
+                      : correctionSession
+                        ? "提交更正申请"
+                        : editingPlan
+                          ? "保存计划修改"
+                          : editingSession
+                            ? "保存修改"
+                            : "保存真实工时草稿"}
+                  </Button>
+                </div>
+                <div className="md:col-span-2">
+                  <ErrorMessage
+                    error={
+                      create.error ?? projects.error ?? linkedProjectTree.error
+                    }
+                  />
+                </div>
+              </form>
+            </div>
+            <aside className="work-editor-preview">
+              <WorkDayTimeline
+                breaks={manualBreaks}
+                content={manual.content}
+                endAt={manual.endAt}
+                sessions={work.data?.items ?? []}
+                startAt={manual.startAt}
+              />
+            </aside>
+          </div>
+        </Card>
+      ) : null}
+      <div className="grid gap-5 xl:grid-cols-[minmax(19rem,0.45fr)_minmax(0,1fr)]">
+        <Card className="work-timer-card">
+          <CardHeader>
+            <div>
+              <p className="app-section-label">实时记录</p>
+              <h2 className="mt-2 font-extrabold tracking-[-0.025em]">
+                主计时器
+              </h2>
+            </div>
+            {activeTimer ? (
+              <Badge
+                tone={activeTimer.status === "running" ? "positive" : "warning"}
+              >
+                {timerLabel}
+              </Badge>
+            ) : (
+              <Badge>待开始</Badge>
+            )}
+          </CardHeader>
+          <CardContent>
+            {timer.isPending ? (
+              <LoadingBlock />
+            ) : activeTimer ? (
+              <div>
+                <p className="text-lg font-bold">
+                  {activeTimer.metadata.content || "未命名工作"}
+                </p>
+                <p className="mt-2 text-sm leading-6 text-[var(--text-muted)]">
+                  服务器累计 {formatDuration(activeTimer.accumulatedSeconds)}
+                  。跨设备状态以服务端事件为准。
+                </p>
+                {activeTimer.metadata.projectNodeIds?.length ? (
+                  <p className="mt-3 inline-flex items-center gap-1.5 rounded-lg bg-[var(--surface-subtle)] px-2.5 py-1.5 text-xs font-semibold text-[var(--text-muted)]">
+                    <FolderKanban size={14} />
+                    已关联 {activeTimer.metadata.projectNodeIds.length}{" "}
+                    个项目节点
+                    {activeTimer.metadata.primaryProjectNodeId
+                      ? " · 已指定主关联"
+                      : ""}
+                  </p>
+                ) : null}
+                <div className="mt-5 grid grid-cols-2 gap-2">
+                  {activeTimer.status === "running" ? (
+                    <Button
+                      onClick={() =>
+                        transition.mutate({
+                          timerId: activeTimer.id,
+                          eventType: "pause",
+                        })
+                      }
+                      variant="secondary"
+                    >
+                      <Pause size={17} />
+                      暂停
+                    </Button>
+                  ) : activeTimer.status === "paused" ? (
+                    <Button
+                      onClick={() =>
+                        transition.mutate({
+                          timerId: activeTimer.id,
+                          eventType: "resume",
+                        })
+                      }
+                    >
+                      <Play size={17} />
+                      继续
+                    </Button>
+                  ) : (
+                    <Button
+                      onClick={() =>
+                        transition.mutate({
+                          timerId: activeTimer.id,
+                          eventType: "break_end",
+                        })
+                      }
+                    >
+                      <Play size={17} />
+                      结束休息
+                    </Button>
+                  )}
+                  {activeTimer.status !== "on_break" ? (
+                    <Button
+                      onClick={() =>
+                        transition.mutate({
+                          timerId: activeTimer.id,
+                          eventType: "break_start",
+                        })
+                      }
+                      variant="secondary"
+                    >
+                      <TimerReset size={17} />
+                      休息
+                    </Button>
+                  ) : null}
+                  <Button
+                    className="col-span-2"
+                    onClick={() =>
+                      transition.mutate({
+                        timerId: activeTimer.id,
+                        eventType: "stop",
+                      })
+                    }
+                    variant="danger"
+                  >
+                    <Square size={17} />
+                    结束并生成工时
+                  </Button>
+                </div>
+                <div className="mt-3">
+                  <ErrorMessage error={transition.error} />
+                </div>
+              </div>
+            ) : (
+              <form
+                className="space-y-4"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  startTimer.mutate();
+                }}
+              >
+                <Field
+                  hint="开始后可暂停、休息或结束；每一次状态变化都会记录。"
+                  label="准备做什么"
+                >
+                  <textarea
+                    className={textAreaClass}
+                    onChange={(event) => setTimerContent(event.target.value)}
+                    placeholder="例如：实现项目画布的筛选交互"
+                    required
+                    value={timerContent}
+                  />
+                </Field>
+                <TimerProjectAssociation
+                  onPrimaryProjectNodeIdChange={setTimerPrimaryProjectNodeId}
+                  onProjectIdChange={setTimerLinkedProjectId}
+                  onSelectedNodesChange={setTimerLinkedProjectNodes}
+                  primaryProjectNodeId={timerPrimaryProjectNodeId}
+                  projectId={timerLinkedProjectId}
+                  projects={projects.data?.items ?? []}
+                  selectedNodes={timerLinkedProjectNodes}
+                />
+                <Button
+                  className="w-full"
+                  disabled={
+                    startTimer.isPending ||
+                    (timerLinkedProjectNodes.length > 0 &&
+                      !timerPrimaryProjectNodeId)
+                  }
+                  type="submit"
+                >
+                  <Play size={17} />
+                  开始计时
+                </Button>
+                <ErrorMessage error={startTimer.error ?? projects.error} />
+              </form>
+            )}
+          </CardContent>
+        </Card>
+        <Card className="work-list-card">
+          <CardHeader>
+            <div>
+              <p className="app-section-label">可追溯记录</p>
+              <h2 className="mt-2 font-extrabold tracking-[-0.025em]">
+                全部记录
+              </h2>
+              <p className="mt-1 text-sm text-[var(--text-muted)]">
+                当前账号本人范围
+              </p>
+            </div>
+            <Badge>
+              {factualWork.length} 条事实 · {plannedWork.length} 个计划
+            </Badge>
+          </CardHeader>
+          <CardContent>
+            {work.isPending ? (
+              <LoadingBlock />
+            ) : work.data?.items.length ? (
+              <div className="divide-y divide-[var(--border)]">
+                {work.data.items.map((item) => {
+                  const correction = latestCorrectionBySession.get(item.id);
+                  return (
+                  <div key={item.id}>
+                    <WorkRow
+                      action={
+                        item.recordKind === "plan" ? (
+                          <div className="flex flex-wrap gap-2">
+                            <Button
+                              disabled={create.isPending}
+                              onClick={() => openDraftEditor(item)}
+                              size="compact"
+                              variant="ghost"
+                            >
+                              编辑计划
+                            </Button>
+                            <Button
+                              disabled={realizePlan.isPending}
+                              onClick={() => realizePlan.mutate(item)}
+                              size="compact"
+                              variant="secondary"
+                            >
+                              转为真实草稿
+                            </Button>
+                          </div>
+                        ) : item.approvalStatus === "locked" ? (
+                          <Button
+                            disabled={
+                              create.isPending ||
+                              pendingCorrectionIds.has(item.id)
+                            }
+                            onClick={() => openCorrectionEditor(item)}
+                            size="compact"
+                            variant="secondary"
+                          >
+                            {pendingCorrectionIds.has(item.id)
+                              ? "更正审核中"
+                              : "发起更正"}
+                          </Button>
+                        ) : item.submissionStatus === "draft" ? (
+                          <div className="flex flex-wrap gap-2">
+                            {item.source === "manual" ? (
+                              <Button
+                                disabled={create.isPending}
+                                onClick={() => openDraftEditor(item)}
+                                size="compact"
+                                variant="ghost"
+                              >
+                                编辑草稿
+                              </Button>
+                            ) : null}
+                            <Button
+                              disabled={submit.isPending}
+                              onClick={() => submit.mutate(item)}
+                              size="compact"
+                              variant="secondary"
+                            >
+                              提交审核
+                            </Button>
+                          </div>
+                        ) : null
+                      }
+                      item={item}
+                    />
+                    {item.recordKind === "fact" ? (
+                      <EvidencePanel sessionId={item.id} />
+                    ) : null}
+                    <WorkVersionHistory sessionId={item.id} />
+                    {correction ? (
+                      <p
+                        className={
+                          correction.status === "rejected"
+                            ? "px-2 pb-3 text-xs text-[var(--danger)]"
+                            : "px-2 pb-3 text-xs text-[var(--text-muted)]"
+                        }
+                        role="status"
+                      >
+                        {formatCorrectionStatus(correction.status)} ·{" "}
+                        {formatDateTime(correction.createdAt)}
+                      </p>
+                    ) : null}
+                  </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <EmptyState
+                description="现在可以手工录入，或使用左侧主计时器。"
+                icon={<Clock3 />}
+                title="还没有工时记录"
+              />
+            )}
+            <ErrorMessage error={realizePlan.error} />
+          </CardContent>
+        </Card>
+      </div>
+    </>
+  );
+}
+interface Project {
+  id: string;
+  key: string;
+  name: string;
+  description: string | null;
+  color: string;
+  status: string;
+  version: number;
+  updatedAt: string;
+}
+interface ProjectNode {
+  id: string;
+  branchId: string;
+  parentId: string | null;
+  type: string;
+  title: string;
+  status: string;
+  progress: string;
+  version: number;
+  sortOrder: number;
+}
+interface LinkedProjectNode {
+  id: string;
+  projectId: string;
+  projectLabel: string;
+  title: string;
+  type: string;
+  status: string;
+}
+interface Branch {
+  id: string;
+  name: string;
+  isDefault: boolean;
+}
+interface ProjectEdge {
+  id: string;
+  sourceNodeId: string;
+  targetNodeId: string;
+  type: string;
+  label: string | null;
+}
 
 export function ProjectsPage({ me }: { me: Me }) {
   const queryClient = useQueryClient();
   const [showForm, setShowForm] = useState(false);
-  const [form, setForm] = useState({ key: "", name: "", description: "", color: "#3468f5" });
-  const projects = useQuery({ queryKey: ["projects"], queryFn: () => api<{ items: Project[] }>("/api/projects") });
-  const create = useMutation({ mutationFn: () => api("/api/projects", { method: "POST", body: form }), onSuccess: async () => { setShowForm(false); setForm({ ...form, key: "", name: "", description: "" }); await queryClient.invalidateQueries({ queryKey: ["projects"] }); } });
-  return <><PageHeader title="项目" description="项目由可版本化的分支和树节点组成；移动、回滚和删除都会留下活动轨迹。" actions={hasGrant(me, "project.create") ? <Button onClick={() => setShowForm((value) => !value)}><Plus size={18} />新建项目</Button> : undefined} />{showForm ? <Card className="mb-5"><CardContent><form className="grid gap-4 md:grid-cols-2" onSubmit={(event) => { event.preventDefault(); create.mutate(); }}><Field label="项目代号"><input className={fieldClass} maxLength={16} onChange={(event) => setForm({ ...form, key: event.target.value })} placeholder="例如 WIP" required value={form.key} /></Field><Field label="项目名称"><input className={fieldClass} maxLength={160} onChange={(event) => setForm({ ...form, name: event.target.value })} required value={form.name} /></Field><div className="md:col-span-2"><Field label="项目说明"><textarea className={textAreaClass} onChange={(event) => setForm({ ...form, description: event.target.value })} value={form.description} /></Field></div><div className="md:col-span-2 flex justify-end"><Button disabled={create.isPending} type="submit">创建项目与主分支</Button></div><div className="md:col-span-2"><ErrorMessage error={create.error} /></div></form></CardContent></Card> : null}{projects.isPending ? <Card><LoadingBlock /></Card> : projects.data?.items.length ? <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">{projects.data.items.map((project) => <Link key={project.id} to={`/projects/${project.id}`}><Card className="h-full transition hover:-translate-y-0.5 hover:border-[var(--accent)]"><CardContent><div className="flex items-start justify-between"><div className="grid size-10 place-items-center rounded-xl text-sm font-bold" style={{ background: project.color, color: readableForeground(project.color) }}>{project.key.slice(0, 2)}</div><Badge tone={project.status === "active" ? "positive" : "neutral"}>{project.status}</Badge></div><h2 className="mt-5 font-bold">{project.name}</h2><p className="mt-2 line-clamp-2 min-h-10 text-sm leading-5 text-[var(--text-muted)]">{project.description || "暂无项目说明"}</p><p className="mt-5 text-xs text-[var(--text-subtle)]">版本 {project.version} · 更新于 {formatDateTime(project.updatedAt)}</p></CardContent></Card></Link>)}</div> : <Card><EmptyState action={hasGrant(me, "project.create") ? <Button onClick={() => setShowForm(true)}>创建第一个项目</Button> : null} description="有权限的成员创建项目后，项目树会显示在这里。" icon={<FolderKanban />} title="没有可访问的项目" /></Card>}</>;
+  const [form, setForm] = useState({
+    key: "",
+    name: "",
+    description: "",
+    color: "#5b5ce2",
+  });
+  const projects = useQuery({
+    queryKey: ["projects"],
+    queryFn: () => api<{ items: Project[] }>("/api/projects"),
+  });
+  const create = useMutation({
+    mutationFn: () => api("/api/projects", { method: "POST", body: form }),
+    onSuccess: async () => {
+      setShowForm(false);
+      setForm({ ...form, key: "", name: "", description: "" });
+      await queryClient.invalidateQueries({ queryKey: ["projects"] });
+    },
+  });
+
+  return (
+    <>
+      <PageHeader
+        title="项目"
+        description="项目由可版本化的分支和树节点组成；移动、回滚和删除都会留下活动轨迹。"
+        actions={
+          hasGrant(me, "project.create") ? (
+            <Button onClick={() => setShowForm((value) => !value)}>
+              <Plus size={18} />
+              新建项目
+            </Button>
+          ) : undefined
+        }
+      />
+      {showForm ? (
+        <Card className="mb-5">
+          <CardContent>
+            <div className="mb-5">
+              <p className="app-section-label">新项目</p>
+              <h2 className="mt-2 font-extrabold tracking-[-0.025em]">
+                建立项目与默认主线
+              </h2>
+            </div>
+            <form
+              className="grid gap-4 md:grid-cols-2"
+              onSubmit={(event) => {
+                event.preventDefault();
+                create.mutate();
+              }}
+            >
+              <Field hint="用于节点、导出与筛选中的稳定标识。" label="项目代号">
+                <input
+                  className={fieldClass}
+                  maxLength={16}
+                  onChange={(event) =>
+                    setForm({ ...form, key: event.target.value })
+                  }
+                  placeholder="例如 WIP"
+                  required
+                  value={form.key}
+                />
+              </Field>
+              <Field label="项目名称">
+                <input
+                  className={fieldClass}
+                  maxLength={160}
+                  onChange={(event) =>
+                    setForm({ ...form, name: event.target.value })
+                  }
+                  required
+                  value={form.name}
+                />
+              </Field>
+              <div className="md:col-span-2">
+                <Field label="项目说明">
+                  <textarea
+                    className={textAreaClass}
+                    onChange={(event) =>
+                      setForm({ ...form, description: event.target.value })
+                    }
+                    placeholder="说明目标、范围或交付预期"
+                    value={form.description}
+                  />
+                </Field>
+              </div>
+              <div className="flex items-end gap-3 md:col-span-2 md:justify-end">
+                <span className="mr-auto text-xs text-[var(--text-muted)]">
+                  创建后可在树形画布中维护阶段、节点和分支。
+                </span>
+                <Button disabled={create.isPending} type="submit">
+                  {create.isPending ? "正在创建…" : "创建项目与主分支"}
+                </Button>
+              </div>
+              <div className="md:col-span-2">
+                <ErrorMessage error={create.error} />
+              </div>
+            </form>
+          </CardContent>
+        </Card>
+      ) : null}
+      {projects.isPending ? (
+        <Card>
+          <LoadingBlock />
+        </Card>
+      ) : projects.data?.items.length ? (
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+          {projects.data.items.map((project) => (
+            <Link key={project.id} to={`/projects/${project.id}`}>
+              <Card className="project-card">
+                <CardContent>
+                  <div className="flex items-start justify-between gap-3">
+                    <div
+                      className="project-color-mark grid size-11 place-items-center rounded-[0.9rem] text-sm font-bold"
+                      style={{
+                        background: project.color,
+                        color: readableForeground(project.color),
+                      }}
+                    >
+                      {project.key.slice(0, 2)}
+                    </div>
+                    <Badge
+                      tone={
+                        project.status === "active" ? "positive" : "neutral"
+                      }
+                    >
+                      {project.status === "active" ? "进行中" : project.status}
+                    </Badge>
+                  </div>
+                  <div className="mt-6">
+                    <p className="app-section-label">项目总览</p>
+                    <h2 className="mt-2 font-extrabold tracking-[-0.025em]">
+                      {project.name}
+                    </h2>
+                    <p className="mt-2 line-clamp-2 min-h-10 text-sm leading-5 text-[var(--text-muted)]">
+                      {project.description || "暂无项目说明"}
+                    </p>
+                  </div>
+                  <div className="mt-5 flex items-center justify-between border-t border-[var(--border)] pt-4 text-xs text-[var(--text-subtle)]">
+                    <span>版本 {project.version}</span>
+                    <span className="inline-flex items-center gap-1">
+                      更新于 {formatDateTime(project.updatedAt)}
+                      <ArrowUpRight size={13} />
+                    </span>
+                  </div>
+                </CardContent>
+              </Card>
+            </Link>
+          ))}
+        </div>
+      ) : (
+        <Card>
+          <EmptyState
+            action={
+              hasGrant(me, "project.create") ? (
+                <Button onClick={() => setShowForm(true)}>
+                  创建第一个项目
+                </Button>
+              ) : null
+            }
+            description="有权限的成员创建项目后，项目树会显示在这里。"
+            icon={<FolderKanban />}
+            title="没有可访问的项目"
+          />
+        </Card>
+      )}
+    </>
+  );
 }
 
-export function ProjectDetailPage({ me }: { me: Me }) {
+export function LegacyProjectDetailPage({ me }: { me: Me }) {
   const { projectId = "" } = useParams();
   const queryClient = useQueryClient();
   const [title, setTitle] = useState("");
   const [branchName, setBranchName] = useState("");
+  const [projectSearch, setProjectSearch] = useState("");
   const [view, setView] = useState<"canvas" | "list">("canvas");
-  const tree = useQuery({ queryKey: ["project-tree", projectId], queryFn: () => api<{ project: Project; branches: Branch[]; nodes: ProjectNode[]; edges: ProjectEdge[] }>(`/api/projects/${projectId}/tree`) });
-  const canManage = me.permissions.some((grant) => grant.permission === "project.manage" && (grant.scopeKind === "organization" || grant.scopeId === projectId));
-  const create = useMutation({ mutationFn: () => { const branch = tree.data?.branches.find((item) => item.isDefault) ?? tree.data?.branches[0]; if (!branch) throw new Error("项目没有可用分支"); return api(`/api/projects/${projectId}/nodes`, { method: "POST", body: { branchId: branch.id, parentId: null, type: "task", title, sortOrder: tree.data?.nodes.length ?? 0 } }); }, onSuccess: async () => { setTitle(""); await queryClient.invalidateQueries({ queryKey: ["project-tree", projectId] }); } });
-  const createBranch = useMutation({ mutationFn: () => api(`/api/projects/${projectId}/branches`, { method: "POST", body: { name: branchName, parentBranchId: tree.data?.branches.find((item) => item.isDefault)?.id } }), onSuccess: async () => { setBranchName(""); await queryClient.invalidateQueries({ queryKey: ["project-tree", projectId] }); } });
-  const ordered = useMemo(() => { const nodes = tree.data?.nodes ?? []; const result: Array<{ node: ProjectNode; depth: number }> = []; const visit = (parentId: string | null, depth: number) => nodes.filter((node) => node.parentId === parentId).sort((a, b) => a.sortOrder - b.sortOrder).forEach((node) => { result.push({ node, depth }); visit(node.id, depth + 1); }); visit(null, 0); return result; }, [tree.data?.nodes]);
-  if (tree.isPending) return <Card><LoadingBlock /></Card>;
-  if (tree.isError || !tree.data) return <Card><EmptyState description={tree.error?.message ?? "项目不存在或没有访问权限。"} icon={<AlertCircle />} title="无法打开项目" /></Card>;
-  return <><PageHeader title={tree.data.project.name} description={`${tree.data.project.key} · ${tree.data.branches.length} 个分支 · ${tree.data.nodes.length} 个有效节点`} actions={<Link to="/projects"><Button variant="secondary"><ArrowLeft size={17} />返回项目</Button></Link>} /><Card><CardHeader><div><h2 className="font-bold">项目结构</h2><p className="mt-1 text-sm text-[var(--text-muted)]">Canvas 可平移、缩放和概览；列表是移动端及无障碍兜底。所有结构修改均由版本控制。</p></div><div className="flex gap-2"><Button onClick={() => setView("canvas")} size="compact" variant={view === "canvas" ? "primary" : "secondary"}>画布</Button><Button onClick={() => setView("list")} size="compact" variant={view === "list" ? "primary" : "secondary"}>列表</Button><Badge tone="info">v{tree.data.project.version}</Badge></div></CardHeader><CardContent>{canManage ? <div className="mb-5 grid gap-3 md:grid-cols-2"><form className="flex gap-2" onSubmit={(event) => { event.preventDefault(); create.mutate(); }}><input className={fieldClass} onChange={(event) => setTitle(event.target.value)} placeholder="新增顶层任务" required value={title} /><Button disabled={create.isPending} type="submit"><Plus size={17} />添加</Button></form><form className="flex gap-2" onSubmit={(event) => { event.preventDefault(); createBranch.mutate(); }}><input className={fieldClass} onChange={(event) => setBranchName(event.target.value)} placeholder="从主线创建分支" required value={branchName} /><Button disabled={createBranch.isPending} type="submit">新分支</Button></form></div> : null}<ErrorMessage error={create.error ?? createBranch.error} />{ordered.length ? view === "canvas" ? <ProjectCanvas edges={tree.data.edges} nodes={tree.data.nodes} /> : <div className="mt-3 divide-y divide-[var(--border)]">{ordered.map(({ node, depth }) => <div className="flex items-center gap-3 py-3" key={node.id} style={{ paddingLeft: `${Math.min(depth, 8) * 22}px` }}><div className="grid size-8 shrink-0 place-items-center rounded-lg bg-[var(--surface-subtle)]"><ChevronRight size={16} /></div><div className="min-w-0 flex-1"><p className="truncate text-sm font-semibold">{node.title}</p><p className="text-xs text-[var(--text-muted)]">{node.type} · v{node.version}</p></div><Badge tone={node.status === "completed" ? "positive" : node.status === "blocked" ? "danger" : "neutral"}>{node.status}</Badge><span className="w-14 text-right text-xs text-[var(--text-muted)]">{Number(node.progress)}%</span></div>)}</div> : <EmptyState description="添加任务、阶段、里程碑或交付物，形成可追溯项目树。" icon={<FolderKanban />} title="项目树为空" />}</CardContent></Card></>;
+  const tree = useQuery({
+    queryKey: ["project-tree", projectId],
+    queryFn: () =>
+      api<{
+        project: Project;
+        branches: Branch[];
+        nodes: ProjectNode[];
+        edges: ProjectEdge[];
+      }>(`/api/projects/${projectId}/tree`),
+  });
+  const canManage = me.permissions.some(
+    (grant) =>
+      grant.permission === "project.manage" &&
+      (grant.scopeKind === "organization" || grant.scopeId === projectId),
+  );
+  const create = useMutation({
+    mutationFn: () => {
+      const branch =
+        tree.data?.branches.find((item) => item.isDefault) ??
+        tree.data?.branches[0];
+      if (!branch) throw new Error("项目没有可用分支");
+      return api(`/api/projects/${projectId}/nodes`, {
+        method: "POST",
+        body: {
+          branchId: branch.id,
+          parentId: null,
+          type: "task",
+          title,
+          sortOrder: tree.data?.nodes.length ?? 0,
+        },
+      });
+    },
+    onSuccess: async () => {
+      setTitle("");
+      await queryClient.invalidateQueries({
+        queryKey: ["project-tree", projectId],
+      });
+    },
+  });
+  const createBranch = useMutation({
+    mutationFn: () =>
+      api(`/api/projects/${projectId}/branches`, {
+        method: "POST",
+        body: {
+          name: branchName,
+          parentBranchId: tree.data?.branches.find((item) => item.isDefault)
+            ?.id,
+        },
+      }),
+    onSuccess: async () => {
+      setBranchName("");
+      await queryClient.invalidateQueries({
+        queryKey: ["project-tree", projectId],
+      });
+    },
+  });
+  const ordered = useMemo(() => {
+    const nodes = tree.data?.nodes ?? [];
+    const result: Array<{ node: ProjectNode; depth: number }> = [];
+    const visit = (parentId: string | null, depth: number) =>
+      nodes
+        .filter((node) => node.parentId === parentId)
+        .sort((a, b) => a.sortOrder - b.sortOrder)
+        .forEach((node) => {
+          result.push({ node, depth });
+          visit(node.id, depth + 1);
+        });
+    visit(null, 0);
+    return result;
+  }, [tree.data?.nodes]);
+  const normalizedSearch = projectSearch.trim().toLocaleLowerCase();
+  const filteredOrdered = normalizedSearch
+    ? ordered.filter(
+        ({ node }) =>
+          node.title.toLocaleLowerCase().includes(normalizedSearch) ||
+          node.type.toLocaleLowerCase().includes(normalizedSearch) ||
+          node.status.toLocaleLowerCase().includes(normalizedSearch),
+      )
+    : ordered;
+  const visibleNodeIds = new Set(filteredOrdered.map(({ node }) => node.id));
+  const canvasNodes = normalizedSearch
+    ? (tree.data?.nodes ?? []).filter((node) => visibleNodeIds.has(node.id))
+    : (tree.data?.nodes ?? []);
+  const canvasEdges = normalizedSearch
+    ? (tree.data?.edges ?? []).filter(
+        (edge) =>
+          visibleNodeIds.has(edge.sourceNodeId) &&
+          visibleNodeIds.has(edge.targetNodeId),
+      )
+    : (tree.data?.edges ?? []);
+
+  if (tree.isPending)
+    return (
+      <Card>
+        <LoadingBlock />
+      </Card>
+    );
+  if (tree.isError || !tree.data)
+    return (
+      <Card>
+        <EmptyState
+          description={tree.error?.message ?? "项目不存在或没有访问权限。"}
+          icon={<AlertCircle />}
+          title="无法打开项目"
+        />
+      </Card>
+    );
+  return (
+    <>
+      <PageHeader
+        title={tree.data.project.name}
+        description={`${tree.data.project.key} · ${tree.data.branches.length} 个分支 · ${tree.data.nodes.length} 个有效节点`}
+        actions={
+          <Link to="/projects">
+            <Button variant="secondary">
+              <ArrowLeft size={17} />
+              返回项目
+            </Button>
+          </Link>
+        }
+      />
+      <Card>
+        <CardHeader>
+          <div>
+            <p className="app-section-label">版本化项目演进图</p>
+            <h2 className="mt-2 font-extrabold tracking-[-0.025em]">
+              项目结构
+            </h2>
+            <p className="mt-1 text-sm text-[var(--text-muted)]">
+              画布用于理解层级和关系；列表是移动端及无障碍兜底。所有结构修改均由版本控制。
+            </p>
+          </div>
+          <Badge tone="info">v{tree.data.project.version}</Badge>
+        </CardHeader>
+        <CardContent>
+          <div className="project-toolbar">
+            <div className="flex gap-2">
+              <Button
+                onClick={() => setView("canvas")}
+                size="compact"
+                variant={view === "canvas" ? "primary" : "secondary"}
+              >
+                画布
+              </Button>
+              <Button
+                onClick={() => setView("list")}
+                size="compact"
+                variant={view === "list" ? "primary" : "secondary"}
+              >
+                列表
+              </Button>
+            </div>
+            <input
+              aria-label="搜索项目节点"
+              className={`${fieldClass} min-w-[12rem] flex-1 py-1.5`}
+              onChange={(event) => setProjectSearch(event.target.value)}
+              placeholder="搜索节点、状态或类型"
+              value={projectSearch}
+            />
+            <span className="whitespace-nowrap text-xs text-[var(--text-muted)]">
+              {filteredOrdered.length} / {tree.data.nodes.length} 个节点
+            </span>
+          </div>
+          {canManage ? (
+            <div className="mt-4 grid gap-3 md:grid-cols-2">
+              <form
+                className="flex gap-2"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  create.mutate();
+                }}
+              >
+                <input
+                  className={fieldClass}
+                  onChange={(event) => setTitle(event.target.value)}
+                  placeholder="新增顶层任务"
+                  required
+                  value={title}
+                />
+                <Button disabled={create.isPending} type="submit">
+                  <Plus size={17} />
+                  添加
+                </Button>
+              </form>
+              <form
+                className="flex gap-2"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  createBranch.mutate();
+                }}
+              >
+                <input
+                  className={fieldClass}
+                  onChange={(event) => setBranchName(event.target.value)}
+                  placeholder="从主线创建分支"
+                  required
+                  value={branchName}
+                />
+                <Button disabled={createBranch.isPending} type="submit">
+                  新分支
+                </Button>
+              </form>
+            </div>
+          ) : null}
+          <div className="mt-4">
+            <ErrorMessage error={create.error ?? createBranch.error} />
+          </div>
+          {filteredOrdered.length ? (
+            <div className="mt-5">
+              {view === "canvas" ? (
+                <ProjectCanvas
+                  accent={tree.data.project.color}
+                  edges={canvasEdges}
+                  nodes={canvasNodes}
+                />
+              ) : (
+                <div className="project-tree-list divide-y divide-[var(--border)]">
+                  {filteredOrdered.map(({ node, depth }) => (
+                    <div
+                      className="flex items-center gap-3 py-3"
+                      key={node.id}
+                      style={{ paddingLeft: `${Math.min(depth, 8) * 22}px` }}
+                    >
+                      <div className="grid size-8 shrink-0 place-items-center rounded-lg bg-[var(--surface-subtle)] text-[var(--accent-strong)]">
+                        <ChevronRight size={16} />
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-sm font-semibold">
+                          {node.title}
+                        </p>
+                        <p className="text-xs text-[var(--text-muted)]">
+                          {node.type} · v{node.version}
+                        </p>
+                      </div>
+                      <Badge
+                        tone={
+                          node.status === "completed"
+                            ? "positive"
+                            : node.status === "blocked"
+                              ? "danger"
+                              : "neutral"
+                        }
+                      >
+                        {node.status}
+                      </Badge>
+                      <span className="w-14 text-right text-xs text-[var(--text-muted)]">
+                        {Number(node.progress)}%
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          ) : (
+            <EmptyState
+              description={
+                normalizedSearch
+                  ? "没有匹配的节点，换个关键词试试。"
+                  : "添加任务、阶段、里程碑或交付物，形成可追溯项目树。"
+              }
+              icon={<FolderKanban />}
+              title={normalizedSearch ? "没有搜索结果" : "项目树为空"}
+            />
+          )}
+        </CardContent>
+      </Card>
+    </>
+  );
+}
+interface ApprovalItem {
+  request: {
+    id: string;
+    priority: string;
+    requestedAt: string;
+    anomalyFlags: string[];
+  };
+  session: WorkSession;
+  requesterOrgUnitId: string | null;
 }
 
-interface ApprovalItem { request: { id: string; priority: string; requestedAt: string; anomalyFlags: unknown[] }; session: WorkSession; requesterOrgUnitId: string | null }
+interface PendingWorkCorrection {
+  correction: {
+    id: string;
+    baseVersion: number;
+    proposedSnapshot: unknown;
+    reason: string;
+    status: string;
+    createdAt: string;
+  };
+  session: WorkSession;
+  requesterDisplayName: string;
+  nextOpenPeriod: {
+    id: string;
+    name: string;
+    startsAt: string;
+    endsAt: string;
+  } | null;
+}
+
+function readCorrectionProposal(snapshot: unknown): {
+  content: string | null;
+  startAt: string | null;
+  endAt: string | null;
+  breaks: number | null;
+} {
+  if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) {
+    return { content: null, startAt: null, endAt: null, breaks: null };
+  }
+  const root = snapshot as Record<string, unknown>;
+  const proposal = root.workSession;
+  if (!proposal || typeof proposal !== "object" || Array.isArray(proposal)) {
+    return { content: null, startAt: null, endAt: null, breaks: null };
+  }
+  const value = proposal as Record<string, unknown>;
+  return {
+    content: typeof value.content === "string" ? value.content : null,
+    startAt: typeof value.startAt === "string" ? value.startAt : null,
+    endAt: typeof value.endAt === "string" ? value.endAt : null,
+    breaks: Array.isArray(value.breaks) ? value.breaks.length : null,
+  };
+}
+
 export function ApprovalsPage() {
   const queryClient = useQueryClient();
-  const approvals = useQuery({ queryKey: ["approvals"], queryFn: () => api<{ items: ApprovalItem[] }>("/api/approvals?limit=100") });
-  const decide = useMutation({ mutationFn: ({ id, decision }: { id: string; decision: string }) => api(`/api/approvals/${id}/decision`, { method: "POST", body: { decision, ...(decision === "returned" ? { reason: "请补充工作结果后重新提交" } : {}) } }), onSuccess: async () => { await Promise.all([queryClient.invalidateQueries({ queryKey: ["approvals"] }), queryClient.invalidateQueries({ queryKey: ["work-sessions"] })]); } });
-  return <><PageHeader title="审批" description="仅显示当前角色和授权范围内的待审事实；批准、退回与更正均保留前后快照。" />{approvals.isPending ? <Card><LoadingBlock /></Card> : approvals.data?.items.length ? <div className="space-y-4">{approvals.data.items.map((item) => <Card key={item.request.id}><CardContent><div className="flex flex-col gap-4 md:flex-row md:items-center"><div className="min-w-0 flex-1"><div className="flex items-center gap-2"><h2 className="truncate font-bold">{item.session.content}</h2><Badge tone={item.request.priority === "high" ? "danger" : "warning"}>{item.request.priority === "high" ? "高优先级" : "待审核"}</Badge></div><p className="mt-2 text-sm text-[var(--text-muted)]">{formatDateTime(item.session.startAt)} – {formatDateTime(item.session.endAt)} · {formatDuration(item.session.netSeconds)} · 版本 {item.session.version}</p>{item.session.result ? <p className="mt-2 text-sm">结果：{item.session.result}</p> : null}</div><div className="flex gap-2"><Button disabled={decide.isPending} onClick={() => decide.mutate({ id: item.request.id, decision: "returned" })} variant="secondary"><RotateCcw size={17} />退回</Button><Button disabled={decide.isPending} onClick={() => decide.mutate({ id: item.request.id, decision: "approved" })}><Check size={17} />批准</Button></div></div></CardContent></Card>)}</div> : <Card><EmptyState description="新提交且位于你授权范围内的工时会出现在这里。" icon={<FileCheck2 />} title="没有待处理审批" /></Card>}<div className="mt-4"><ErrorMessage error={approvals.error ?? decide.error} /></div></>;
+  const [correctionInputs, setCorrectionInputs] = useState<
+    Record<string, { amount: string; reviewNote: string }>
+  >({});
+  const approvals = useQuery({
+    queryKey: ["approvals"],
+    queryFn: () => api<{ items: ApprovalItem[] }>("/api/approvals?limit=100"),
+  });
+  const corrections = useQuery({
+    queryKey: ["work-corrections-pending"],
+    queryFn: () =>
+      api<{ items: PendingWorkCorrection[] }>(
+        "/api/work-session-corrections/pending?limit=100",
+      ),
+  });
+  const decide = useMutation({
+    mutationFn: ({ id, decision }: { id: string; decision: string }) =>
+      api(`/api/approvals/${id}/decision`, {
+        method: "POST",
+        body: {
+          decision,
+          ...(decision === "returned"
+            ? { reason: "请补充工作结果后重新提交" }
+            : {}),
+        },
+      }),
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["approvals"] }),
+        queryClient.invalidateQueries({ queryKey: ["work-sessions"] }),
+      ]);
+    },
+  });
+  const decideCorrection = useMutation({
+    mutationFn: ({
+      item,
+      decision,
+    }: {
+      item: PendingWorkCorrection;
+      decision: "approved" | "rejected";
+    }) => {
+      const current = correctionInputs[item.correction.id] ?? {
+        amount: "",
+        reviewNote: "",
+      };
+      return api(
+        `/api/work-session-corrections/${item.correction.id}/decision`,
+        {
+          method: "POST",
+          body: {
+            decision,
+            ...(current.reviewNote.trim()
+              ? { reviewNote: current.reviewNote.trim() }
+              : {}),
+            ...(decision === "approved" && current.amount.trim()
+              ? {
+                  adjustmentAmount: current.amount.trim(),
+                }
+              : {}),
+          },
+        },
+      );
+    },
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["work-corrections-pending"] }),
+        queryClient.invalidateQueries({ queryKey: ["work-corrections-mine"] }),
+        queryClient.invalidateQueries({ queryKey: ["work-sessions"] }),
+        queryClient.invalidateQueries({ queryKey: ["payroll-me"] }),
+      ]);
+    },
+  });
+  return (
+    <>
+      <PageHeader
+        title="审批"
+        description="仅显示当前角色和授权范围内的待审事实；批准、退回与更正均保留前后快照。"
+      />
+      {approvals.isPending ? (
+        <Card>
+          <LoadingBlock />
+        </Card>
+      ) : approvals.data?.items.length ? (
+        <div className="space-y-4">
+          {approvals.data.items.map((item) => (
+            <Card key={item.request.id}>
+              <CardContent>
+                <div className="flex flex-col gap-4 md:flex-row md:items-center">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <h2 className="truncate font-bold">
+                        {item.session.content}
+                      </h2>
+                      <Badge
+                        tone={
+                          item.request.priority === "high"
+                            ? "danger"
+                            : "warning"
+                        }
+                      >
+                        {item.request.priority === "high"
+                          ? "高优先级"
+                          : "待审核"}
+                      </Badge>
+                    </div>
+                    <p className="mt-2 text-sm text-[var(--text-muted)]">
+                      {formatDateTime(item.session.startAt)} –{" "}
+                      {formatDateTime(item.session.endAt)} ·{" "}
+                      {formatDuration(item.session.netSeconds)} · 版本{" "}
+                      {item.session.version}
+                    </p>
+                    {item.request.anomalyFlags.length ? (
+                      <div className="mt-2 flex flex-wrap gap-1.5" role="status">
+                        {item.request.anomalyFlags.map((flag) => (
+                          <span
+                            className="rounded-lg bg-[var(--danger-soft)] px-2 py-1 text-xs font-semibold text-[var(--danger)]"
+                            key={flag}
+                          >
+                            {formatWorkAnomaly(flag)}
+                          </span>
+                        ))}
+                      </div>
+                    ) : null}
+                    {item.session.result ? (
+                      <p className="mt-2 text-sm">
+                        结果：{item.session.result}
+                      </p>
+                    ) : null}
+                  </div>
+                  <div className="flex gap-2">
+                    <Button
+                      disabled={decide.isPending}
+                      onClick={() =>
+                        decide.mutate({
+                          id: item.request.id,
+                          decision: "returned",
+                        })
+                      }
+                      variant="secondary"
+                    >
+                      <RotateCcw size={17} />
+                      退回
+                    </Button>
+                    <Button
+                      disabled={decide.isPending}
+                      onClick={() =>
+                        decide.mutate({
+                          id: item.request.id,
+                          decision: "approved",
+                        })
+                      }
+                    >
+                      <Check size={17} />
+                      批准
+                    </Button>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+      ) : (
+        <Card>
+          <EmptyState
+            description="新提交且位于你授权范围内的工时会出现在这里。"
+            icon={<FileCheck2 />}
+            title="没有待处理审批"
+          />
+        </Card>
+      )}
+      {corrections.isPending ? (
+        <Card className="mt-5">
+          <LoadingBlock />
+        </Card>
+      ) : corrections.data?.items.length ? (
+        <section className="mt-5 space-y-4" aria-label="已结算工时更正申请">
+          <div>
+            <p className="app-section-label">已结算记录更正</p>
+            <h2 className="mt-2 text-lg font-extrabold tracking-[-0.025em]">
+              不覆盖历史，只审核提案与下期调整
+            </h2>
+            <p className="mt-2 max-w-3xl text-sm leading-6 text-[var(--text-muted)]">
+              原始锁定工时与工资单始终保留。填写明确金额时，系统只会把经你确认的调整写入原周期之后的第一个开放周期，币种由该周期的有效薪资方案决定；留空则仅留存审核结论。
+            </p>
+          </div>
+          {corrections.data.items.map((item) => {
+            const proposal = readCorrectionProposal(
+              item.correction.proposedSnapshot,
+            );
+            const current = correctionInputs[item.correction.id] ?? {
+              amount: "",
+              reviewNote: "",
+            };
+            const setInput = (
+              patch: Partial<{ amount: string; reviewNote: string }>,
+            ) =>
+              setCorrectionInputs((all) => ({
+                ...all,
+                [item.correction.id]: { ...current, ...patch },
+              }));
+            return (
+              <Card key={item.correction.id}>
+                <CardContent className="space-y-4">
+                  <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <h3 className="font-bold">
+                          {item.requesterDisplayName} 的已结算更正申请
+                        </h3>
+                        <Badge tone="warning">原始版本 {item.correction.baseVersion}</Badge>
+                      </div>
+                      <p className="mt-2 text-sm text-[var(--text-muted)]">
+                        原始：{item.session.content} ·{" "}
+                        {formatDateTime(item.session.startAt)} –{" "}
+                        {formatDateTime(item.session.endAt)}
+                      </p>
+                      <p className="mt-2 text-sm leading-6">
+                        申请说明：{item.correction.reason}
+                      </p>
+                      {proposal.content ? (
+                        <p className="mt-2 text-sm leading-6 text-[var(--text-muted)]">
+                          拟议：{proposal.content}
+                          {proposal.startAt && proposal.endAt
+                            ? ` · ${formatDateTime(proposal.startAt)} – ${formatDateTime(proposal.endAt)}`
+                            : ""}
+                          {proposal.breaks !== null
+                            ? ` · ${proposal.breaks} 段休息`
+                            : ""}
+                        </p>
+                      ) : (
+                        <p className="mt-2 text-sm text-[var(--danger)]">
+                          提案快照结构异常，不能在此页面安全处理。
+                        </p>
+                      )}
+                    </div>
+                    <span className="shrink-0 text-xs text-[var(--text-subtle)]">
+                      申请于 {formatDateTime(item.correction.createdAt)}
+                    </span>
+                  </div>
+                  <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+                    <Field
+                      hint={
+                        item.nextOpenPeriod
+                          ? `可选；填写后会进入“${item.nextOpenPeriod.name}”的下期调整，币种由该成员在该周期的有效薪资方案决定。`
+                          : "当前找不到原周期后的开放薪资周期；留空可以仅确认申请。"
+                      }
+                      label="下期调整金额（可选）"
+                    >
+                      <input
+                        className={fieldClass}
+                        disabled={!item.nextOpenPeriod}
+                        inputMode="decimal"
+                        maxLength={22}
+                        onChange={(event) => setInput({ amount: event.target.value })}
+                        placeholder="例如 120.00 或 -120.00（最多 14 位整数）"
+                        value={current.amount}
+                      />
+                    </Field>
+                    <Field label="审核说明">
+                      <input
+                        className={fieldClass}
+                        maxLength={2000}
+                        onChange={(event) => setInput({ reviewNote: event.target.value })}
+                        placeholder="驳回时必填"
+                        value={current.reviewNote}
+                      />
+                    </Field>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      disabled={
+                        decideCorrection.isPending ||
+                        !proposal.content ||
+                        (Boolean(current.amount.trim()) && !item.nextOpenPeriod)
+                      }
+                      onClick={() =>
+                        decideCorrection.mutate({ item, decision: "approved" })
+                      }
+                    >
+                      <Check size={17} />
+                      {current.amount.trim()
+                        ? "批准并写入下期调整"
+                        : "批准并留存结论"}
+                    </Button>
+                    <Button
+                      disabled={
+                        decideCorrection.isPending ||
+                        current.reviewNote.trim().length === 0
+                      }
+                      onClick={() =>
+                        decideCorrection.mutate({ item, decision: "rejected" })
+                      }
+                      variant="secondary"
+                    >
+                      <RotateCcw size={17} />
+                      驳回申请
+                    </Button>
+                  </div>
+                </CardContent>
+              </Card>
+            );
+          })}
+        </section>
+      ) : null}
+      <div className="mt-4">
+        <ErrorMessage
+          error={approvals.error ?? decide.error ?? corrections.error ?? decideCorrection.error}
+        />
+      </div>
+    </>
+  );
 }
 
-interface PayrollRecord { item: { id: string; currency: string; approvedSeconds: number; pendingSeconds: number; grossAmount: string; adjustmentAmount: string; finalAmount: string; estimate: boolean; needsReview: boolean }; run: { id: string; runNumber: number; status: string; calculationVersion: string }; period: { name: string; startsAt: string; endsAt: string; status: string } }
+interface PayrollRecord {
+  item: {
+    id: string;
+    currency: string;
+    approvedSeconds: number;
+    pendingSeconds: number;
+    grossAmount: string;
+    adjustmentAmount: string;
+    finalAmount: string;
+    estimate: boolean;
+    needsReview: boolean;
+  };
+  run: {
+    id: string;
+    runNumber: number;
+    status: string;
+    calculationVersion: string;
+  };
+  period: { name: string; startsAt: string; endsAt: string; status: string };
+}
 export function PayrollPage() {
-  const payroll = useQuery({ queryKey: ["payroll-me"], queryFn: () => api<{ items: PayrollRecord[] }>("/api/payroll/me") });
-  return <><PageHeader title="我的薪资" description="只显示本人薪资明细；金额来自已保存的方案版本、工时版本与计算快照。" />{payroll.isPending ? <Card><LoadingBlock /></Card> : payroll.data?.items.length ? <div className="space-y-4">{payroll.data.items.map((record) => <Card key={record.item.id}><CardContent><div className="grid gap-5 md:grid-cols-[1fr_auto]"><div><div className="flex flex-wrap items-center gap-2"><h2 className="font-bold">{record.period.name}</h2><Badge tone={record.run.status === "settled" ? "positive" : record.item.needsReview ? "danger" : record.item.estimate ? "warning" : "info"}>{record.run.status}</Badge></div><p className="mt-2 text-sm text-[var(--text-muted)]">批次 #{record.run.runNumber} · {record.run.calculationVersion} · 已批 {formatDuration(record.item.approvedSeconds)}{record.item.pendingSeconds > 0 ? ` · 待审 ${formatDuration(record.item.pendingSeconds)}` : ""}</p><div className="mt-4 grid grid-cols-3 gap-3 text-sm"><StatusLine label="应计" value={`${record.item.currency} ${Number(record.item.grossAmount).toFixed(2)}`} /><StatusLine label="调整" value={`${record.item.currency} ${Number(record.item.adjustmentAmount).toFixed(2)}`} /><StatusLine label="最终" value={`${record.item.currency} ${Number(record.item.finalAmount).toFixed(2)}`} /></div></div><div className="flex items-center text-3xl font-bold tabular-nums">¥{Number(record.item.finalAmount).toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div></div></CardContent></Card>)}</div> : <Card><EmptyState description="管理员完成薪资计算后，本人的真实结算或预估结果会显示在这里。" icon={<CircleDollarSign />} title="暂无薪资批次" /></Card>}<div className="mt-4"><ErrorMessage error={payroll.error} /></div></>;
+  const payroll = useQuery({
+    queryKey: ["payroll-me"],
+    queryFn: () => api<{ items: PayrollRecord[] }>("/api/payroll/me"),
+  });
+  return (
+    <>
+      <PageHeader
+        title="我的薪资"
+        description="只显示本人薪资明细；金额来自已保存的方案版本、工时版本与计算快照。"
+      />
+      {payroll.isPending ? (
+        <Card>
+          <LoadingBlock />
+        </Card>
+      ) : payroll.data?.items.length ? (
+        <div className="space-y-4">
+          {payroll.data.items.map((record) => (
+            <Card key={record.item.id}>
+              <CardContent>
+                <div className="grid gap-5 md:grid-cols-[1fr_auto]">
+                  <div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <h2 className="font-bold">{record.period.name}</h2>
+                      <Badge
+                        tone={
+                          record.run.status === "settled"
+                            ? "positive"
+                            : record.item.needsReview
+                              ? "danger"
+                              : record.item.estimate
+                                ? "warning"
+                                : "info"
+                        }
+                      >
+                        {record.run.status}
+                      </Badge>
+                    </div>
+                    <p className="mt-2 text-sm text-[var(--text-muted)]">
+                      批次 #{record.run.runNumber} ·{" "}
+                      {record.run.calculationVersion} · 已批{" "}
+                      {formatDuration(record.item.approvedSeconds)}
+                      {record.item.pendingSeconds > 0
+                        ? ` · 待审 ${formatDuration(record.item.pendingSeconds)}`
+                        : ""}
+                    </p>
+                    <div className="mt-4 grid grid-cols-3 gap-3 text-sm">
+                      <StatusLine
+                        label="应计"
+                        value={`${record.item.currency} ${Number(record.item.grossAmount).toFixed(2)}`}
+                      />
+                      <StatusLine
+                        label="调整"
+                        value={`${record.item.currency} ${Number(record.item.adjustmentAmount).toFixed(2)}`}
+                      />
+                      <StatusLine
+                        label="最终"
+                        value={`${record.item.currency} ${Number(record.item.finalAmount).toFixed(2)}`}
+                      />
+                    </div>
+                  </div>
+                  <div className="flex items-center text-3xl font-bold tabular-nums">
+                    ¥
+                    {Number(record.item.finalAmount).toLocaleString("zh-CN", {
+                      minimumFractionDigits: 2,
+                      maximumFractionDigits: 2,
+                    })}
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+      ) : (
+        <Card>
+          <EmptyState
+            description="管理员完成薪资计算后，本人的真实结算或预估结果会显示在这里。"
+            icon={<CircleDollarSign />}
+            title="暂无薪资批次"
+          />
+        </Card>
+      )}
+      <div className="mt-4">
+        <ErrorMessage error={payroll.error} />
+      </div>
+    </>
+  );
 }
 
-export function CalendarPage() {
+type CalendarView = "day" | "week" | "month" | "list";
+
+function calendarStartOfDay(value: Date): Date {
+  return new Date(value.getFullYear(), value.getMonth(), value.getDate());
+}
+
+function addCalendarDays(value: Date, days: number): Date {
+  const next = new Date(value);
+  next.setDate(next.getDate() + days);
+  return next;
+}
+
+function calendarKey(value: Date): string {
+  return `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, "0")}-${String(value.getDate()).padStart(2, "0")}`;
+}
+
+function calendarTime(value: string): string {
+  return new Intl.DateTimeFormat("zh-CN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(new Date(value));
+}
+
+export function LegacyCalendarPageV2() {
   const queryClient = useQueryClient();
-  const [view, setView] = useState<"day" | "week" | "month">("week");
+  const [view, setView] = useState<CalendarView>("week");
   const [anchorDate, setAnchorDate] = useState(() => new Date());
-  const work = useQuery({ queryKey: ["work-sessions"], queryFn: () => api<{ items: WorkSession[] }>("/api/work-sessions?limit=100") });
-  const reschedule = useMutation({ mutationFn: ({ item, days }: { item: WorkSession; days: number }) => { const shift = days * 86_400_000; return api(`/api/work-sessions/${item.id}/schedule`, { method: "PATCH", body: { expectedVersion: item.version, startAt: new Date(new Date(item.startAt).getTime() + shift).toISOString(), endAt: new Date(new Date(item.endAt).getTime() + shift).toISOString() } }); }, onSuccess: async () => { await queryClient.invalidateQueries({ queryKey: ["work-sessions"] }); } });
-  const groups = useMemo(() => {
-    const dayStart = new Date(anchorDate.getFullYear(), anchorDate.getMonth(), anchorDate.getDate()).getTime();
-    const weekStart = dayStart - ((anchorDate.getDay() + 6) % 7) * 86_400_000;
-    const month = `${anchorDate.getFullYear()}-${anchorDate.getMonth()}`;
+  const work = useQuery({
+    queryKey: ["work-sessions"],
+    queryFn: () =>
+      api<{ items: WorkSession[] }>("/api/work-sessions?limit=100"),
+  });
+  const reschedule = useMutation({
+    mutationFn: ({ item, days }: { item: WorkSession; days: number }) => {
+      const shift = days * 86_400_000;
+      return api(`/api/work-sessions/${item.id}/schedule`, {
+        method: "PATCH",
+        body: {
+          expectedVersion: item.version,
+          startAt: new Date(
+            new Date(item.startAt).getTime() + shift,
+          ).toISOString(),
+          endAt: new Date(new Date(item.endAt).getTime() + shift).toISOString(),
+        },
+      });
+    },
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["work-sessions"] });
+    },
+  });
+  const today = useMemo(() => calendarStartOfDay(new Date()), []);
+  const dayStart = calendarStartOfDay(anchorDate);
+  const weekStart = addCalendarDays(dayStart, -((dayStart.getDay() + 6) % 7));
+  const monthStart = new Date(dayStart.getFullYear(), dayStart.getMonth(), 1);
+  const periodStart =
+    view === "month" ? monthStart : view === "day" ? dayStart : weekStart;
+  const periodEnd =
+    view === "month"
+      ? new Date(monthStart.getFullYear(), monthStart.getMonth() + 1, 1)
+      : addCalendarDays(periodStart, view === "day" ? 1 : 7);
+  const sessions = work.data?.items ?? [];
+  const periodSessions = sessions.filter((item) => {
+    const startsAt = new Date(item.startAt).getTime();
+    return startsAt >= periodStart.getTime() && startsAt < periodEnd.getTime();
+  });
+  const sessionsByDate = (() => {
     const result = new Map<string, WorkSession[]>();
-    for (const item of work.data?.items ?? []) {
-      const date = new Date(item.startAt); const timestamp = new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
-      if ((view === "day" && timestamp !== dayStart) || (view === "week" && (timestamp < weekStart || timestamp >= weekStart + 7 * 86_400_000)) || (view === "month" && `${date.getFullYear()}-${date.getMonth()}` !== month)) continue;
-      const key = new Intl.DateTimeFormat("zh-CN", { weekday: "short", month: "long", day: "numeric" }).format(date);
+    for (const item of periodSessions) {
+      const key = calendarKey(new Date(item.startAt));
+      result.set(key, [...(result.get(key) ?? []), item]);
+    }
+    return result;
+  })();
+  const listGroups = (() => {
+    const result = new Map<string, WorkSession[]>();
+    for (const item of periodSessions) {
+      const date = new Date(item.startAt);
+      const key = new Intl.DateTimeFormat("zh-CN", {
+        weekday: "short",
+        month: "long",
+        day: "numeric",
+      }).format(date);
       result.set(key, [...(result.get(key) ?? []), item]);
     }
     return [...result.entries()];
-  }, [anchorDate, view, work.data]);
-  const movePeriod = (direction: number) => setAnchorDate((date) => { const next = new Date(date); if (view === "month") next.setMonth(next.getMonth() + direction); else next.setDate(next.getDate() + direction * (view === "week" ? 7 : 1)); return next; });
-  const rangeLabel = view === "month" ? new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "long" }).format(anchorDate) : new Intl.DateTimeFormat("zh-CN", { month: "long", day: "numeric" }).format(anchorDate);
-  return <><PageHeader title="工作日历" description="浏览历史或未来周期；草稿改期由服务端保持时长、同步休息段、校验重叠并记录版本。" actions={<div className="flex flex-wrap gap-2"><Button onClick={() => movePeriod(-1)} size="compact" variant="secondary">上一周期</Button><Button onClick={() => setAnchorDate(new Date())} size="compact" variant="secondary">今天</Button><Button onClick={() => movePeriod(1)} size="compact" variant="secondary">下一周期</Button>{(["day", "week", "month"] as const).map((item) => <Button key={item} onClick={() => setView(item)} size="compact" variant={view === item ? "primary" : "secondary"}>{item === "day" ? "日" : item === "week" ? "周" : "月"}</Button>)}</div>} /><p className="mb-4 text-sm font-semibold text-[var(--text-muted)]">当前周期：{rangeLabel}</p>{work.isPending ? <Card><LoadingBlock /></Card> : groups.length ? <div className="space-y-5">{groups.map(([date, items]) => <Card key={date}><CardHeader><h2 className="font-bold">{date}</h2><Badge tone="info">{formatDuration(items.reduce((sum, item) => sum + item.netSeconds, 0))}</Badge></CardHeader><CardContent><div className="divide-y divide-[var(--border)]">{items.map((item) => <WorkRow action={item.submissionStatus === "draft" ? <span className="flex gap-1"><Button disabled={reschedule.isPending} onClick={() => reschedule.mutate({ item, days: -1 })} size="compact" variant="secondary">前一天</Button><Button disabled={reschedule.isPending} onClick={() => reschedule.mutate({ item, days: 1 })} size="compact" variant="secondary">后一天</Button></span> : null} item={item} key={item.id} />)}</div><ErrorMessage error={reschedule.error} /></CardContent></Card>)}</div> : <Card><EmptyState description={`当前${view === "day" ? "日" : view === "week" ? "周" : "月"}没有工时；创建记录后会按个人时区显示。`} icon={<CalendarDays />} title="日历中还没有记录" /></Card>}</>;
-}
+  })();
+  const weekDays = Array.from({ length: 7 }, (_, index) =>
+    addCalendarDays(weekStart, index),
+  );
+  const firstMonthGridDate = addCalendarDays(
+    monthStart,
+    -((monthStart.getDay() + 6) % 7),
+  );
+  const monthDays = Array.from({ length: 42 }, (_, index) =>
+    addCalendarDays(firstMonthGridDate, index),
+  );
+  const isToday = (date: Date) => calendarKey(date) === calendarKey(today);
+  const movePeriod = (direction: number) =>
+    setAnchorDate((date) => {
+      const next = new Date(date);
+      if (view === "month") next.setMonth(next.getMonth() + direction);
+      else next.setDate(next.getDate() + direction * (view === "day" ? 1 : 7));
+      return next;
+    });
+  const rangeLabel =
+    view === "month"
+      ? new Intl.DateTimeFormat("zh-CN", {
+          year: "numeric",
+          month: "long",
+        }).format(anchorDate)
+      : view === "day"
+        ? new Intl.DateTimeFormat("zh-CN", {
+            year: "numeric",
+            month: "long",
+            day: "numeric",
+            weekday: "long",
+          }).format(anchorDate)
+        : `${new Intl.DateTimeFormat("zh-CN", { month: "long", day: "numeric" }).format(weekStart)} – ${new Intl.DateTimeFormat("zh-CN", { month: "long", day: "numeric" }).format(addCalendarDays(weekStart, 6))}`;
+  const calendarEvent = (item: WorkSession) => (
+    <div className="calendar-event" key={item.id}>
+      <time>
+        {calendarTime(item.startAt)} – {calendarTime(item.endAt)}
+      </time>
+      <strong className="block truncate">{item.content}</strong>
+    </div>
+  );
 
+  return (
+    <>
+      <PageHeader
+        title="工作日历"
+        description="将真实工作放进可操作的时间视图；草稿改期由服务端保持时长、同步休息段、校验重叠并记录版本。"
+        actions={
+          <div className="flex flex-wrap gap-2">
+            <Button
+              onClick={() => movePeriod(-1)}
+              size="compact"
+              variant="secondary"
+            >
+              上一周期
+            </Button>
+            <Button
+              onClick={() => setAnchorDate(new Date())}
+              size="compact"
+              variant="secondary"
+            >
+              今天
+            </Button>
+            <Button
+              onClick={() => movePeriod(1)}
+              size="compact"
+              variant="secondary"
+            >
+              下一周期
+            </Button>
+            {(
+              [
+                ["day", "日"],
+                ["week", "周"],
+                ["month", "月"],
+                ["list", "列表"],
+              ] as const
+            ).map(([item, label]) => (
+              <Button
+                key={item}
+                onClick={() => setView(item)}
+                size="compact"
+                variant={view === item ? "primary" : "secondary"}
+              >
+                {label}
+              </Button>
+            ))}
+          </div>
+        }
+      />
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+        <p className="text-sm font-semibold text-[var(--text-muted)]">
+          当前周期：{rangeLabel}
+        </p>
+        <span className="text-xs text-[var(--text-subtle)]">
+          记录颜色与状态来自同一条工作事实链
+        </span>
+      </div>
+      {work.isPending ? (
+        <Card>
+          <LoadingBlock />
+        </Card>
+      ) : (
+        <>
+          <section aria-label="工作日历视图" className="calendar-shell">
+            {view === "week" ? (
+              <div className="calendar-week-scroll">
+                <div className="calendar-week-grid">
+                  {weekDays.map((date) => (
+                    <div
+                      className={`calendar-week-heading ${isToday(date) ? "is-today" : ""}`}
+                      key={calendarKey(date)}
+                    >
+                      <span>
+                        {new Intl.DateTimeFormat("zh-CN", {
+                          weekday: "short",
+                        }).format(date)}
+                      </span>
+                      <strong>{date.getDate()}</strong>
+                    </div>
+                  ))}
+                  {weekDays.map((date) => (
+                    <div
+                      className="calendar-week-column"
+                      key={`column-${calendarKey(date)}`}
+                    >
+                      {sessionsByDate
+                        .get(calendarKey(date))
+                        ?.map(calendarEvent)}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+            {view === "month" ? (
+              <div className="calendar-month-grid">
+                {["一", "二", "三", "四", "五", "六", "日"].map((label) => (
+                  <div className="calendar-month-weekday" key={label}>
+                    周{label}
+                  </div>
+                ))}
+                {monthDays.map((date) => (
+                  <div
+                    className={`calendar-month-day ${date.getMonth() !== monthStart.getMonth() ? "is-outside" : ""} ${isToday(date) ? "is-today" : ""}`}
+                    key={calendarKey(date)}
+                  >
+                    <span className="calendar-day-number">
+                      {date.getDate()}
+                    </span>
+                    {sessionsByDate
+                      .get(calendarKey(date))
+                      ?.slice(0, 3)
+                      .map(calendarEvent)}
+                  </div>
+                ))}
+              </div>
+            ) : null}
+            {view === "day" ? (
+              <div className="calendar-day-view">
+                <div className="calendar-day-hours">
+                  {[
+                    "07:00",
+                    "09:00",
+                    "11:00",
+                    "13:00",
+                    "15:00",
+                    "17:00",
+                    "19:00",
+                    "21:00",
+                  ].map((hour) => (
+                    <span key={hour}>{hour}</span>
+                  ))}
+                </div>
+                <div className="calendar-day-track">
+                  {periodSessions.map((item) => {
+                    const top = Math.max(
+                      0,
+                      Math.min(100, ((dayHour(item.startAt) - 7) / 15) * 100),
+                    );
+                    const height = Math.max(
+                      6,
+                      Math.min(
+                        100,
+                        ((dayHour(item.endAt) - dayHour(item.startAt)) / 15) *
+                          100,
+                      ),
+                    );
+                    return (
+                      <div
+                        className="calendar-event"
+                        key={item.id}
+                        style={{ top: `${top}%`, height: `${height}%` }}
+                      >
+                        <time>
+                          {calendarTime(item.startAt)} –{" "}
+                          {calendarTime(item.endAt)} ·{" "}
+                          {formatDuration(item.netSeconds)}
+                        </time>
+                        <strong className="block truncate">
+                          {item.content}
+                        </strong>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            ) : null}
+            {view === "list" ? (
+              <div className="p-5">
+                {listGroups.length ? (
+                  <div className="space-y-5">
+                    {listGroups.map(([date, items]) => (
+                      <section key={date}>
+                        <div className="mb-2 flex items-center justify-between">
+                          <h2 className="text-sm font-bold">{date}</h2>
+                          <Badge tone="info">
+                            {formatDuration(
+                              items.reduce(
+                                (sum, item) => sum + item.netSeconds,
+                                0,
+                              ),
+                            )}
+                          </Badge>
+                        </div>
+                        <div className="divide-y divide-[var(--border)]">
+                          {items.map((item) => (
+                            <WorkRow item={item} key={item.id} />
+                          ))}
+                        </div>
+                      </section>
+                    ))}
+                  </div>
+                ) : (
+                  <EmptyState
+                    description="当前周期没有工时；创建记录后会按个人时区显示。"
+                    icon={<CalendarDays />}
+                    title="日历中还没有记录"
+                  />
+                )}
+              </div>
+            ) : null}
+          </section>
+          <Card className="calendar-audit-card">
+            <CardHeader>
+              <div>
+                <p className="app-section-label">事实明细</p>
+                <h2 className="mt-2 font-extrabold tracking-[-0.025em]">
+                  当前周期的工作记录
+                </h2>
+                <p className="mt-1 text-sm text-[var(--text-muted)]">
+                  需要改期的草稿可在这里操作；已提交记录保持审核轨迹。
+                </p>
+              </div>
+              <Badge tone="info">
+                {formatDuration(
+                  periodSessions.reduce(
+                    (sum, item) => sum + item.netSeconds,
+                    0,
+                  ),
+                )}
+              </Badge>
+            </CardHeader>
+            <CardContent>
+              {periodSessions.length ? (
+                <div className="divide-y divide-[var(--border)]">
+                  {periodSessions.map((item) => (
+                    <div
+                      className="flex flex-col gap-3 px-2 py-4 first:pt-0 last:pb-0 sm:flex-row sm:items-center"
+                      key={item.id}
+                    >
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm font-semibold">
+                          {formatDateTime(item.startAt)} –{" "}
+                          {formatDateTime(item.endAt)}
+                        </p>
+                        <p className="mt-1 text-xs text-[var(--text-muted)]">
+                          {formatDuration(item.netSeconds)} ·{" "}
+                          {item.source === "timer" ? "计时记录" : "手工记录"} ·{" "}
+                          {item.submissionStatus === "draft"
+                            ? "草稿可改期"
+                            : "已进入提交流程"}
+                        </p>
+                      </div>
+                      <div className="flex shrink-0 items-center gap-2">
+                        <Badge
+                          tone={
+                            item.submissionStatus === "draft"
+                              ? "warning"
+                              : "neutral"
+                          }
+                        >
+                          {item.submissionStatus === "draft"
+                            ? "草稿"
+                            : "已提交"}
+                        </Badge>
+                        {item.submissionStatus === "draft" ? (
+                          <span className="flex gap-1">
+                            <Button
+                              disabled={reschedule.isPending}
+                              onClick={() =>
+                                reschedule.mutate({ item, days: -1 })
+                              }
+                              size="compact"
+                              variant="secondary"
+                            >
+                              前一天
+                            </Button>
+                            <Button
+                              disabled={reschedule.isPending}
+                              onClick={() =>
+                                reschedule.mutate({ item, days: 1 })
+                              }
+                              size="compact"
+                              variant="secondary"
+                            >
+                              后一天
+                            </Button>
+                          </span>
+                        ) : null}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <EmptyState
+                  description="当前周期没有工时；创建记录后会按个人时区显示。"
+                  icon={<CalendarDays />}
+                  title="没有可对账的记录"
+                />
+              )}
+              <ErrorMessage error={reschedule.error} />
+            </CardContent>
+          </Card>
+        </>
+      )}
+    </>
+  );
+}
 export function LegacyCalendarPage() {
   const queryClient = useQueryClient();
   const [view, setView] = useState<"day" | "week" | "month">("week");
-  const work = useQuery({ queryKey: ["work-sessions"], queryFn: () => api<{ items: WorkSession[] }>("/api/work-sessions?limit=100") });
-  const reschedule = useMutation({ mutationFn: ({ item, days }: { item: WorkSession; days: number }) => { const shift = days * 86_400_000; return api(`/api/work-sessions/${item.id}/schedule`, { method: "PATCH", body: { expectedVersion: item.version, startAt: new Date(new Date(item.startAt).getTime() + shift).toISOString(), endAt: new Date(new Date(item.endAt).getTime() + shift).toISOString() } }); }, onSuccess: async () => { await queryClient.invalidateQueries({ queryKey: ["work-sessions"] }); } });
-  const groups = useMemo(() => { const now = new Date(); const dayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime(); const weekStart = dayStart - ((now.getDay() + 6) % 7) * 86_400_000; const month = `${now.getFullYear()}-${now.getMonth()}`; const result = new Map<string, WorkSession[]>(); for (const item of work.data?.items ?? []) { const date = new Date(item.startAt); const timestamp = new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime(); if ((view === "day" && timestamp !== dayStart) || (view === "week" && (timestamp < weekStart || timestamp >= weekStart + 7 * 86_400_000)) || (view === "month" && `${date.getFullYear()}-${date.getMonth()}` !== month)) continue; const key = new Intl.DateTimeFormat("zh-CN", { weekday: "short", month: "long", day: "numeric" }).format(date); result.set(key, [...(result.get(key) ?? []), item]); } return [...result.entries()]; }, [view, work.data]);
-  return <><PageHeader title="工作日历" description="日/周/月视图只展示真实工时。草稿可向前或向后改期；服务端会保持时长、同步休息段、校验重叠并记录版本。" actions={<div className="flex gap-2">{(["day", "week", "month"] as const).map((item) => <Button key={item} onClick={() => setView(item)} size="compact" variant={view === item ? "primary" : "secondary"}>{item === "day" ? "日" : item === "week" ? "周" : "月"}</Button>)}</div>} />{work.isPending ? <Card><LoadingBlock /></Card> : groups.length ? <div className="space-y-5">{groups.map(([date, items]) => <Card key={date}><CardHeader><h2 className="font-bold">{date}</h2><Badge tone="info">{formatDuration(items.reduce((sum, item) => sum + item.netSeconds, 0))}</Badge></CardHeader><CardContent><div className="divide-y divide-[var(--border)]">{items.map((item) => <WorkRow action={item.submissionStatus === "draft" ? <span className="flex gap-1"><Button disabled={reschedule.isPending} onClick={() => reschedule.mutate({ item, days: -1 })} size="compact" variant="secondary">前一天</Button><Button disabled={reschedule.isPending} onClick={() => reschedule.mutate({ item, days: 1 })} size="compact" variant="secondary">后一天</Button></span> : null} item={item} key={item.id} />)}</div><ErrorMessage error={reschedule.error} /></CardContent></Card>)}</div> : <Card><EmptyState description={`当前${view === "day" ? "日" : view === "week" ? "周" : "月"}没有工时；创建记录后会按个人时区显示。`} icon={<CalendarDays />} title="日历中还没有记录" /></Card>}</>;
+  const work = useQuery({
+    queryKey: ["work-sessions"],
+    queryFn: () =>
+      api<{ items: WorkSession[] }>("/api/work-sessions?limit=100"),
+  });
+  const reschedule = useMutation({
+    mutationFn: ({ item, days }: { item: WorkSession; days: number }) => {
+      const shift = days * 86_400_000;
+      return api(`/api/work-sessions/${item.id}/schedule`, {
+        method: "PATCH",
+        body: {
+          expectedVersion: item.version,
+          startAt: new Date(
+            new Date(item.startAt).getTime() + shift,
+          ).toISOString(),
+          endAt: new Date(new Date(item.endAt).getTime() + shift).toISOString(),
+        },
+      });
+    },
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["work-sessions"] });
+    },
+  });
+  const groups = useMemo(() => {
+    const now = new Date();
+    const dayStart = new Date(
+      now.getFullYear(),
+      now.getMonth(),
+      now.getDate(),
+    ).getTime();
+    const weekStart = dayStart - ((now.getDay() + 6) % 7) * 86_400_000;
+    const month = `${now.getFullYear()}-${now.getMonth()}`;
+    const result = new Map<string, WorkSession[]>();
+    for (const item of work.data?.items ?? []) {
+      const date = new Date(item.startAt);
+      const timestamp = new Date(
+        date.getFullYear(),
+        date.getMonth(),
+        date.getDate(),
+      ).getTime();
+      if (
+        (view === "day" && timestamp !== dayStart) ||
+        (view === "week" &&
+          (timestamp < weekStart || timestamp >= weekStart + 7 * 86_400_000)) ||
+        (view === "month" &&
+          `${date.getFullYear()}-${date.getMonth()}` !== month)
+      )
+        continue;
+      const key = new Intl.DateTimeFormat("zh-CN", {
+        weekday: "short",
+        month: "long",
+        day: "numeric",
+      }).format(date);
+      result.set(key, [...(result.get(key) ?? []), item]);
+    }
+    return [...result.entries()];
+  }, [view, work.data]);
+  return (
+    <>
+      <PageHeader
+        title="工作日历"
+        description="日/周/月视图只展示真实工时。草稿可向前或向后改期；服务端会保持时长、同步休息段、校验重叠并记录版本。"
+        actions={
+          <div className="flex gap-2">
+            {(["day", "week", "month"] as const).map((item) => (
+              <Button
+                key={item}
+                onClick={() => setView(item)}
+                size="compact"
+                variant={view === item ? "primary" : "secondary"}
+              >
+                {item === "day" ? "日" : item === "week" ? "周" : "月"}
+              </Button>
+            ))}
+          </div>
+        }
+      />
+      {work.isPending ? (
+        <Card>
+          <LoadingBlock />
+        </Card>
+      ) : groups.length ? (
+        <div className="space-y-5">
+          {groups.map(([date, items]) => (
+            <Card key={date}>
+              <CardHeader>
+                <h2 className="font-bold">{date}</h2>
+                <Badge tone="info">
+                  {formatDuration(
+                    items.reduce((sum, item) => sum + item.netSeconds, 0),
+                  )}
+                </Badge>
+              </CardHeader>
+              <CardContent>
+                <div className="divide-y divide-[var(--border)]">
+                  {items.map((item) => (
+                    <WorkRow
+                      action={
+                        item.submissionStatus === "draft" ? (
+                          <span className="flex gap-1">
+                            <Button
+                              disabled={reschedule.isPending}
+                              onClick={() =>
+                                reschedule.mutate({ item, days: -1 })
+                              }
+                              size="compact"
+                              variant="secondary"
+                            >
+                              前一天
+                            </Button>
+                            <Button
+                              disabled={reschedule.isPending}
+                              onClick={() =>
+                                reschedule.mutate({ item, days: 1 })
+                              }
+                              size="compact"
+                              variant="secondary"
+                            >
+                              后一天
+                            </Button>
+                          </span>
+                        ) : null
+                      }
+                      item={item}
+                      key={item.id}
+                    />
+                  ))}
+                </div>
+                <ErrorMessage error={reschedule.error} />
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+      ) : (
+        <Card>
+          <EmptyState
+            description={`当前${view === "day" ? "日" : view === "week" ? "周" : "月"}没有工时；创建记录后会按个人时区显示。`}
+            icon={<CalendarDays />}
+            title="日历中还没有记录"
+          />
+        </Card>
+      )}
+    </>
+  );
 }
 
-interface TeamActivity { id: string; displayName: string; content: string; result: string; startAt: string; endAt: string; netSeconds: number; projectName: string | null }
+interface TeamActivity {
+  id: string;
+  displayName: string;
+  content: string;
+  result: string;
+  startAt: string;
+  endAt: string;
+  netSeconds: number;
+  projectName: string | null;
+}
 export function TeamPage() {
-  const activity = useQuery({ queryKey: ["team-activity"], queryFn: () => api<{ items: TeamActivity[] }>("/api/team-activity?limit=50") });
-  return <><PageHeader title="团队动态" description="仅展示授权范围内且明确标为“项目成员可见”的工作；私密和仅管理可见内容不会进入此流。" />{activity.isPending ? <Card><LoadingBlock /></Card> : activity.data?.items.length ? <div className="space-y-4">{activity.data.items.map((item) => <Card key={item.id}><CardContent><div className="flex gap-4"><div className="grid size-10 shrink-0 place-items-center rounded-full bg-[var(--accent-soft)] font-bold text-[var(--accent-strong)]">{item.displayName.slice(0, 1)}</div><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><h2 className="font-bold">{item.displayName}</h2>{item.projectName ? <Badge tone="info">{item.projectName}</Badge> : null}</div><p className="mt-2 text-sm font-semibold">{item.content}</p>{item.result ? <p className="mt-1 text-sm text-[var(--text-muted)]">结果：{item.result}</p> : null}<p className="mt-3 text-xs text-[var(--text-subtle)]">{formatDateTime(item.startAt)} · {formatDuration(item.netSeconds)}</p></div></div></CardContent></Card>)}</div> : <Card><EmptyState description="项目成员公开工作后，会按权限出现在这里。" icon={<Users />} title="没有团队公开动态" /></Card>}<div className="mt-4"><ErrorMessage error={activity.error} /></div></>;
+  const activity = useQuery({
+    queryKey: ["team-activity"],
+    queryFn: () =>
+      api<{ items: TeamActivity[] }>("/api/team-activity?limit=50"),
+  });
+  return (
+    <>
+      <PageHeader
+        title="团队动态"
+        description="仅展示授权范围内且明确标为“项目成员可见”的工作；私密和仅管理可见内容不会进入此流。"
+      />
+      {activity.isPending ? (
+        <Card>
+          <LoadingBlock />
+        </Card>
+      ) : activity.data?.items.length ? (
+        <div className="space-y-4">
+          {activity.data.items.map((item) => (
+            <Card key={item.id}>
+              <CardContent>
+                <div className="flex gap-4">
+                  <div className="grid size-10 shrink-0 place-items-center rounded-full bg-[var(--accent-soft)] font-bold text-[var(--accent-strong)]">
+                    {item.displayName.slice(0, 1)}
+                  </div>
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <h2 className="font-bold">{item.displayName}</h2>
+                      {item.projectName ? (
+                        <Badge tone="info">{item.projectName}</Badge>
+                      ) : null}
+                    </div>
+                    <p className="mt-2 text-sm font-semibold">{item.content}</p>
+                    {item.result ? (
+                      <p className="mt-1 text-sm text-[var(--text-muted)]">
+                        结果：{item.result}
+                      </p>
+                    ) : null}
+                    <p className="mt-3 text-xs text-[var(--text-subtle)]">
+                      {formatDateTime(item.startAt)} ·{" "}
+                      {formatDuration(item.netSeconds)}
+                    </p>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+      ) : (
+        <Card>
+          <EmptyState
+            description="项目成员公开工作后，会按权限出现在这里。"
+            icon={<Users />}
+            title="没有团队公开动态"
+          />
+        </Card>
+      )}
+      <div className="mt-4">
+        <ErrorMessage error={activity.error} />
+      </div>
+    </>
+  );
 }
 
-interface AnalyticsSummary { totals: { sessionCount: number; totalSeconds: number; approvedSeconds: number; pendingSeconds: number }; byDay: Array<{ date: string; seconds: number }>; byMember: Array<{ membershipId: string; displayName: string; seconds: number }>; byProject: Array<{ projectId: string | null; projectName: string; seconds: number }> }
+interface AnalyticsSummary {
+  totals: {
+    sessionCount: number;
+    totalSeconds: number;
+    approvedSeconds: number;
+    pendingSeconds: number;
+  };
+  byDay: Array<{ date: string; seconds: number }>;
+  byMember: Array<{
+    membershipId: string;
+    displayName: string;
+    seconds: number;
+  }>;
+  byProject: Array<{
+    projectId: string | null;
+    projectName: string;
+    seconds: number;
+  }>;
+}
 export function AnalyticsPage({ me }: { me: Me }) {
   const [days, setDays] = useState(30);
+  const chartPalette = useChartPalette();
   const to = useMemo(() => new Date(), []);
-  const from = useMemo(() => new Date(to.getTime() - days * 86_400_000), [days, to]);
-  const analytics = useQuery({ queryKey: ["analytics", days], queryFn: () => api<AnalyticsSummary>(`/api/analytics/summary?from=${encodeURIComponent(from.toISOString())}&to=${encodeURIComponent(to.toISOString())}`) });
-  const trendOption = useMemo<EChartsCoreOption>(() => ({
-    animationDuration: 220,
-    grid: { left: 52, right: 20, top: 24, bottom: 56 },
-    tooltip: { trigger: "axis", valueFormatter: (value: string | number) => formatDuration(Number(value)) },
-    xAxis: { type: "category", data: analytics.data?.byDay.map((item) => item.date.slice(5)) ?? [], axisLabel: { hideOverlap: true } },
-    yAxis: { type: "value", axisLabel: { formatter: (value: string | number) => `${Math.round(Number(value) / 3600)}h` } },
-    dataZoom: [{ type: "inside" }, { type: "slider", height: 18, bottom: 12 }],
-    series: [{ type: "line", name: "净工时", smooth: true, symbolSize: 7, data: analytics.data?.byDay.map((item) => item.seconds) ?? [], areaStyle: { color: "rgb(52 104 245 / 0.14)" }, lineStyle: { color: "#3468f5", width: 3 }, itemStyle: { color: "#3468f5" } }],
-  }), [analytics.data?.byDay]);
-  const projectOption = useMemo<EChartsCoreOption>(() => ({
-    animationDuration: 220,
-    grid: { left: 110, right: 24, top: 20, bottom: 24 },
-    tooltip: { trigger: "axis", axisPointer: { type: "shadow" }, valueFormatter: (value: string | number) => formatDuration(Number(value)) },
-    xAxis: { type: "value", axisLabel: { formatter: (value: string | number) => `${Math.round(Number(value) / 3600)}h` } },
-    yAxis: { type: "category", data: analytics.data?.byProject.map((item) => item.projectName) ?? [], axisLabel: { width: 95, overflow: "truncate" } },
-    series: [{ type: "bar", name: "净工时", data: analytics.data?.byProject.map((item) => item.seconds) ?? [], itemStyle: { color: "#3468f5", borderRadius: [0, 6, 6, 0] } }],
-  }), [analytics.data?.byProject]);
-  const exportCsv = () => { const params = new URLSearchParams({ from: from.toISOString(), to: to.toISOString() }); window.location.assign(`/api/exports/work-sessions.csv?${params.toString()}`); };
-  const canExportOrganization = me.permissions.some((grant) => grant.permission === "export.scope" && grant.scopeKind === "organization");
-  return <><PageHeader title="数据分析" description="所有指标均在服务端按当前角色、组织单元和项目范围裁剪；切换时间范围不会扩大权限。图表可拖拽缩放，金额和时长均有下方可对账明细。" actions={<><select aria-label="时间范围" className={fieldClass} onChange={(event) => setDays(Number(event.target.value))} value={days}><option value={7}>最近 7 天</option><option value={30}>最近 30 天</option><option value={90}>最近 90 天</option></select>{canExportOrganization ? <Button onClick={exportCsv} size="compact" variant="secondary">导出 CSV</Button> : null}</>} />
-    {analytics.isPending ? <Card><LoadingBlock /></Card> : analytics.data ? <><div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4"><Metric label="记录数" value={`${analytics.data.totals.sessionCount} 条`} /><Metric label="总工时" value={formatDuration(analytics.data.totals.totalSeconds)} /><Metric label="已批准" value={formatDuration(analytics.data.totals.approvedSeconds)} /><Metric label="待审核" value={formatDuration(analytics.data.totals.pendingSeconds)} /></div><div className="mt-5 grid gap-5 xl:grid-cols-2"><Card><CardHeader><div><h2 className="font-bold">每日净工时趋势</h2><p className="mt-1 text-sm text-[var(--text-muted)]">拖拽底部范围条缩放；Tooltip 显示精确时长。</p></div></CardHeader><CardContent>{analytics.data.byDay.length ? <AnalyticsChart ariaLabel="每日净工时趋势图" option={trendOption} /> : <EmptyState description="该区间没有工时。" icon={<CalendarDays />} title="没有趋势数据" />}</CardContent></Card><Card><CardHeader><div><h2 className="font-bold">项目投入分布</h2><p className="mt-1 text-sm text-[var(--text-muted)]">仅汇总当前授权范围内的项目。</p></div></CardHeader><CardContent>{analytics.data.byProject.length ? <AnalyticsChart ariaLabel="项目投入分布图" option={projectOption} /> : <EmptyState description="该区间没有项目归属数据。" icon={<FolderKanban />} title="没有项目分布" />}</CardContent></Card></div><Card className="mt-5"><CardHeader><h2 className="font-bold">项目投入明细</h2></CardHeader><CardContent>{analytics.data.byProject.length ? <div className="divide-y divide-[var(--border)]">{analytics.data.byProject.map((item) => <div className="flex items-center justify-between gap-4 py-3" key={item.projectId ?? "none"}><span className="truncate text-sm font-semibold">{item.projectName}</span><Badge tone="info">{formatDuration(item.seconds)}</Badge></div>)}</div> : <p className="text-sm text-[var(--text-muted)]">暂无可对账的项目投入。</p>}</CardContent></Card></> : null}<div className="mt-4"><ErrorMessage error={analytics.error} /></div></>;
+  const from = useMemo(
+    () => new Date(to.getTime() - days * 86_400_000),
+    [days, to],
+  );
+  const analytics = useQuery({
+    queryKey: ["analytics", days],
+    queryFn: () =>
+      api<AnalyticsSummary>(
+        `/api/analytics/summary?from=${encodeURIComponent(from.toISOString())}&to=${encodeURIComponent(to.toISOString())}`,
+      ),
+  });
+  const trendOption = useMemo<EChartsCoreOption>(
+    () => ({
+      animationDuration: 240,
+      grid: { left: 52, right: 20, top: 24, bottom: 56 },
+      tooltip: {
+        trigger: "axis",
+        backgroundColor: chartPalette.surface,
+        borderColor: chartPalette.border,
+        textStyle: { color: chartPalette.text },
+        valueFormatter: (value: string | number) =>
+          formatDuration(Number(value)),
+      },
+      xAxis: {
+        type: "category",
+        data: analytics.data?.byDay.map((item) => item.date.slice(5)) ?? [],
+        axisLabel: { hideOverlap: true, color: chartPalette.textSubtle },
+        axisLine: { lineStyle: { color: chartPalette.border } },
+      },
+      yAxis: {
+        type: "value",
+        axisLabel: {
+          formatter: (value: string | number) =>
+            `${Math.round(Number(value) / 3600)}h`,
+          color: chartPalette.textSubtle,
+        },
+        splitLine: { lineStyle: { color: chartPalette.grid } },
+      },
+      dataZoom: [
+        { type: "inside" },
+        {
+          type: "slider",
+          height: 18,
+          bottom: 12,
+          borderColor: "transparent",
+          fillerColor: hexWithAlpha(chartPalette.accent, 0.12),
+          handleStyle: { color: chartPalette.accent },
+        },
+      ],
+      series: [
+        {
+          type: "line",
+          name: "净工时",
+          smooth: true,
+          symbolSize: 7,
+          data: analytics.data?.byDay.map((item) => item.seconds) ?? [],
+          areaStyle: { color: hexWithAlpha(chartPalette.accent, 0.15) },
+          lineStyle: { color: chartPalette.accent, width: 3 },
+          itemStyle: { color: chartPalette.accent },
+        },
+      ],
+    }),
+    [analytics.data?.byDay, chartPalette],
+  );
+  const projectOption = useMemo<EChartsCoreOption>(
+    () => ({
+      animationDuration: 240,
+      grid: { left: 110, right: 24, top: 20, bottom: 24 },
+      tooltip: {
+        trigger: "axis",
+        axisPointer: { type: "shadow" },
+        backgroundColor: chartPalette.surface,
+        borderColor: chartPalette.border,
+        textStyle: { color: chartPalette.text },
+        valueFormatter: (value: string | number) =>
+          formatDuration(Number(value)),
+      },
+      xAxis: {
+        type: "value",
+        axisLabel: {
+          formatter: (value: string | number) =>
+            `${Math.round(Number(value) / 3600)}h`,
+          color: chartPalette.textSubtle,
+        },
+        splitLine: { lineStyle: { color: chartPalette.grid } },
+      },
+      yAxis: {
+        type: "category",
+        data: analytics.data?.byProject.map((item) => item.projectName) ?? [],
+        axisLabel: {
+          width: 95,
+          overflow: "truncate",
+          color: chartPalette.textMuted,
+        },
+        axisLine: { lineStyle: { color: chartPalette.border } },
+      },
+      series: [
+        {
+          type: "bar",
+          name: "净工时",
+          data: analytics.data?.byProject.map((item) => item.seconds) ?? [],
+          itemStyle: { color: chartPalette.accent, borderRadius: [0, 7, 7, 0] },
+        },
+      ],
+    }),
+    [analytics.data?.byProject, chartPalette],
+  );
+  const exportCsv = () => {
+    const params = new URLSearchParams({
+      from: from.toISOString(),
+      to: to.toISOString(),
+    });
+    window.location.assign(
+      `/api/exports/work-sessions.csv?${params.toString()}`,
+    );
+  };
+  const canExportOrganization = me.permissions.some(
+    (grant) =>
+      grant.permission === "export.scope" && grant.scopeKind === "organization",
+  );
+  const leadProject = analytics.data?.byProject.reduce<{
+    projectName: string;
+    seconds: number;
+  } | null>(
+    (current, item) =>
+      !current || item.seconds > current.seconds ? item : current,
+    null,
+  );
+  const maxProjectSeconds = Math.max(
+    ...(analytics.data?.byProject.map((item) => item.seconds) ?? [1]),
+    1,
+  );
+
+  return (
+    <>
+      <PageHeader
+        title="数据分析"
+        description="所有指标均在服务端按当前角色、组织单元和项目范围裁剪；切换时间范围不会扩大权限。图表可缩放，并提供可对账的事实明细。"
+        actions={
+          <>
+            <select
+              aria-label="时间范围"
+              className={fieldClass}
+              onChange={(event) => setDays(Number(event.target.value))}
+              value={days}
+            >
+              <option value={7}>最近 7 天</option>
+              <option value={30}>最近 30 天</option>
+              <option value={90}>最近 90 天</option>
+            </select>
+            {canExportOrganization ? (
+              <Button onClick={exportCsv} size="compact" variant="secondary">
+                导出 CSV
+              </Button>
+            ) : null}
+          </>
+        }
+      />
+      {analytics.isPending ? (
+        <Card>
+          <LoadingBlock />
+        </Card>
+      ) : analytics.data ? (
+        <>
+          <Card className="analytics-summary-strip">
+            <div className="analytics-summary-icon">
+              <CalendarDays size={21} />
+            </div>
+            <div>
+              <p className="app-section-label text-[var(--accent-strong)]">
+                授权范围内的真实聚合
+              </p>
+              <h2 className="mt-2 text-lg font-extrabold tracking-[-0.03em]">
+                最近 {days} 天的工作事实
+              </h2>
+              <p className="mt-1 text-sm leading-6 text-[var(--text-muted)]">
+                {leadProject
+                  ? `当前范围的最大单项目投入为 ${formatDuration(leadProject.seconds)}，完整项目名称与时长请见下方明细。`
+                  : "当前范围尚无可归属项目的投入数据。"}
+              </p>
+            </div>
+          </Card>
+          <div className="mt-5 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+            <Metric
+              hint="服务端已裁剪的有效会话"
+              label="记录数"
+              value={`${analytics.data.totals.sessionCount} 条`}
+            />
+            <Metric
+              hint="当前时间范围的净时长"
+              label="总工时"
+              value={formatDuration(analytics.data.totals.totalSeconds)}
+            />
+            <Metric
+              hint="已进入批准状态的时长"
+              label="已批准"
+              value={formatDuration(analytics.data.totals.approvedSeconds)}
+            />
+            <Metric
+              hint="仍待审核的时长"
+              label="待审核"
+              value={formatDuration(analytics.data.totals.pendingSeconds)}
+            />
+          </div>
+          <div className="mt-5 grid gap-5 xl:grid-cols-2">
+            <Card className="analytics-chart-card">
+              <CardHeader>
+                <div>
+                  <p className="app-section-label">时间维度</p>
+                  <h2 className="mt-2 font-extrabold tracking-[-0.025em]">
+                    每日净工时趋势
+                  </h2>
+                  <p className="mt-1 text-sm text-[var(--text-muted)]">
+                    拖拽底部范围条缩放；Tooltip 显示精确时长。
+                  </p>
+                </div>
+              </CardHeader>
+              <CardContent>
+                {analytics.data.byDay.length ? (
+                  <AnalyticsChart
+                    ariaLabel="每日净工时趋势图"
+                    option={trendOption}
+                  />
+                ) : (
+                  <EmptyState
+                    description="该区间没有工时。"
+                    icon={<CalendarDays />}
+                    title="没有趋势数据"
+                  />
+                )}
+              </CardContent>
+            </Card>
+            <Card className="analytics-chart-card">
+              <CardHeader>
+                <div>
+                  <p className="app-section-label">项目维度</p>
+                  <h2 className="mt-2 font-extrabold tracking-[-0.025em]">
+                    项目投入分布
+                  </h2>
+                  <p className="mt-1 text-sm text-[var(--text-muted)]">
+                    仅汇总当前授权范围内的项目。
+                  </p>
+                </div>
+              </CardHeader>
+              <CardContent>
+                {analytics.data.byProject.length ? (
+                  <AnalyticsChart
+                    ariaLabel="项目投入分布图"
+                    option={projectOption}
+                  />
+                ) : (
+                  <EmptyState
+                    description="该区间没有项目归属数据。"
+                    icon={<FolderKanban />}
+                    title="没有项目分布"
+                  />
+                )}
+              </CardContent>
+            </Card>
+          </div>
+          <Card className="mt-5">
+            <CardHeader>
+              <div>
+                <p className="app-section-label">逐项对账</p>
+                <h2 className="mt-2 font-extrabold tracking-[-0.025em]">
+                  项目投入明细
+                </h2>
+              </div>
+              <Badge tone="info">
+                {analytics.data.byProject.length} 个项目
+              </Badge>
+            </CardHeader>
+            <CardContent>
+              {analytics.data.byProject.length ? (
+                <div className="space-y-1">
+                  {analytics.data.byProject.map((item) => (
+                    <div
+                      className="analytics-breakdown-row flex items-center gap-4 p-3"
+                      key={item.projectId ?? "none"}
+                    >
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center justify-between gap-3">
+                          <span className="truncate text-sm font-semibold">
+                            {item.projectName}
+                          </span>
+                          <span className="shrink-0 text-xs font-semibold text-[var(--text-muted)]">
+                            {formatDuration(item.seconds)}
+                          </span>
+                        </div>
+                        <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-[var(--surface-subtle)]">
+                          <div
+                            className="h-full rounded-full bg-[var(--accent)]"
+                            style={{
+                              width: `${Math.max(4, (item.seconds / maxProjectSeconds) * 100)}%`,
+                            }}
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-sm text-[var(--text-muted)]">
+                  暂无可对账的项目投入。
+                </p>
+              )}
+            </CardContent>
+          </Card>
+        </>
+      ) : null}
+      <div className="mt-4">
+        <ErrorMessage error={analytics.error} />
+      </div>
+    </>
+  );
 }
-function Metric({ label, value }: { label: string; value: string }) { return <Card><CardContent><p className="text-sm text-[var(--text-muted)]">{label}</p><p className="mt-2 text-2xl font-bold tabular-nums">{value}</p></CardContent></Card>; }
-interface AiReportRecord { job: { id: string; status: string; errorSummary: string | null; queuedAt: string; scope: unknown }; report: { id: string; title: string; summary: string; structuredOutput: { highlights?: string[]; risks?: string[]; suggestions?: string[] }; sourceCount: number; generatedAt: string } | null }
+
+function Metric({
+  label,
+  value,
+  hint,
+}: {
+  label: string;
+  value: string;
+  hint: string;
+}) {
+  return (
+    <Card className="metric-card">
+      <CardContent>
+        <p className="text-sm font-semibold text-[var(--text-muted)]">
+          {label}
+        </p>
+        <p className="text-2xl font-extrabold tracking-[-0.04em] tabular-nums">
+          {value}
+        </p>
+        <p className="text-xs text-[var(--text-subtle)]">{hint}</p>
+      </CardContent>
+    </Card>
+  );
+}
+interface AiReportRecord {
+  job: {
+    id: string;
+    status: string;
+    errorSummary: string | null;
+    queuedAt: string;
+    scope: unknown;
+  };
+  report: {
+    id: string;
+    title: string;
+    summary: string;
+    structuredOutput: {
+      highlights?: string[];
+      risks?: string[];
+      suggestions?: string[];
+    };
+    sourceCount: number;
+    generatedAt: string;
+  } | null;
+}
+
+interface AiSettings {
+  source: "organization" | "deployment_default";
+  enabled: boolean;
+  baseUrl: string;
+  model: string;
+  hasApiKey: boolean;
+  encryptionReady: boolean;
+  usable: boolean;
+  dailyRequestLimit: number;
+  monthlyRequestLimit: number;
+  maxOutputTokens: number;
+  usage: { daily: number; monthly: number; timezone: string };
+}
+
+function AiSettingsPanel({ onClose }: { onClose: () => void }) {
+  const settings = useQuery({
+    queryKey: ["ai-settings"],
+    queryFn: () => api<AiSettings>("/api/ai/settings"),
+  });
+  if (settings.isPending) {
+    return (
+      <Card className="ai-settings-card">
+        <LoadingBlock />
+      </Card>
+    );
+  }
+  if (settings.isError) {
+    return (
+      <Card className="ai-settings-card">
+        <CardContent className="p-5">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <p className="app-section-label">Owner only</p>
+              <h2 className="mt-2 font-extrabold">组织级 AI 配置</h2>
+            </div>
+            <Button onClick={onClose} size="compact" variant="secondary">
+              关闭
+            </Button>
+          </div>
+          <ErrorMessage error={settings.error} />
+        </CardContent>
+      </Card>
+    );
+  }
+  const current = settings.data!;
+  const settingsKey = [
+    current.source,
+    current.enabled,
+    current.baseUrl,
+    current.model,
+    current.hasApiKey,
+    current.encryptionReady,
+    current.dailyRequestLimit,
+    current.monthlyRequestLimit,
+    current.maxOutputTokens,
+  ].join("|");
+  return <AiSettingsEditor current={current} key={settingsKey} onClose={onClose} />;
+}
+
+function AiSettingsEditor({
+  current,
+  onClose,
+}: {
+  current: AiSettings;
+  onClose: () => void;
+}) {
+  const queryClient = useQueryClient();
+  const [form, setForm] = useState(() => ({
+    enabled: current.enabled,
+    baseUrl: current.baseUrl,
+    model: current.model,
+    dailyRequestLimit: current.dailyRequestLimit,
+    monthlyRequestLimit: current.monthlyRequestLimit,
+    maxOutputTokens: current.maxOutputTokens,
+    apiKey: "",
+    clearApiKey: false,
+    password: "",
+    totpCode: "",
+  }));
+  const save = useMutation({
+    mutationFn: () =>
+      api<AiSettings>("/api/ai/settings", {
+        method: "PUT",
+        body: {
+          enabled: form.enabled,
+          baseUrl: form.baseUrl,
+          model: form.model,
+          dailyRequestLimit: form.dailyRequestLimit,
+          monthlyRequestLimit: form.monthlyRequestLimit,
+          maxOutputTokens: form.maxOutputTokens,
+          ...(form.apiKey.trim() ? { apiKey: form.apiKey.trim() } : {}),
+          clearApiKey: form.clearApiKey,
+          password: form.password,
+          ...(form.totpCode.trim() ? { totpCode: form.totpCode.trim() } : {}),
+        },
+      }),
+    onSuccess: async (updated) => {
+      setForm({
+        enabled: updated.enabled,
+        baseUrl: updated.baseUrl,
+        model: updated.model,
+        dailyRequestLimit: updated.dailyRequestLimit,
+        monthlyRequestLimit: updated.monthlyRequestLimit,
+        maxOutputTokens: updated.maxOutputTokens,
+        apiKey: "",
+        clearApiKey: false,
+        password: "",
+        totpCode: "",
+      });
+      queryClient.setQueryData<AiSettings>(["ai-settings"], updated);
+      await queryClient.invalidateQueries({ queryKey: ["ai-settings"] });
+    },
+  });
+  const updateNumber = (
+    field:
+      | "dailyRequestLimit"
+      | "monthlyRequestLimit"
+      | "maxOutputTokens",
+    value: string,
+  ) => {
+    const parsed = Number(value);
+    setForm((existing) => ({
+      ...existing,
+      [field]: Number.isFinite(parsed) ? Math.round(parsed) : 0,
+    }));
+  };
+
+  return (
+    <Card className="ai-settings-card">
+      <CardContent className="p-5 sm:p-6">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div>
+            <p className="app-section-label">Owner only · organization scope</p>
+            <h2 className="mt-2 text-xl font-extrabold tracking-[-0.035em]">
+              组织级 AI 与成本控制
+            </h2>
+            <p className="mt-2 max-w-3xl text-sm leading-6 text-[var(--text-muted)]">
+              员工不会接触 API Key。保存时会先做密码二次验证；已保存的密钥仅以加密形式存在服务端，页面永远只显示是否已配置。
+            </p>
+          </div>
+          <Button onClick={onClose} size="compact" variant="secondary">
+            关闭配置
+          </Button>
+        </div>
+        <div className="ai-settings-status-grid mt-5">
+          <div>
+            <small>配置来源</small>
+            <strong>
+              {current.source === "organization" ? "本组织配置" : "部署默认配置"}
+            </strong>
+          </div>
+          <div>
+            <small>密钥状态</small>
+            <strong>{current.hasApiKey ? "已配置（不回显）" : "未配置"}</strong>
+          </div>
+          <div>
+            <small>今日 / 本月请求</small>
+            <strong>
+              {current.usage.daily} / {current.dailyRequestLimit} · {current.usage.monthly} / {current.monthlyRequestLimit}
+            </strong>
+          </div>
+          <div>
+            <small>当前可用性</small>
+            <strong>{current.usable ? "可生成报告" : "尚不可用"}</strong>
+          </div>
+        </div>
+        {!current.encryptionReady ? (
+          <p className="mt-4 rounded-xl bg-[var(--warning-soft)] px-3 py-2 text-xs leading-5 text-[var(--warning)]">
+            生产服务尚未提供 AI_CONFIG_ENCRYPTION_KEY。可查看默认配置，但不能安全保存组织 API Key；请先在 API 服务和 Worker 中填入同一随机密钥。
+          </p>
+        ) : null}
+        <form
+          className="mt-5 grid gap-4 md:grid-cols-2"
+          onSubmit={(event) => {
+            event.preventDefault();
+            save.mutate();
+          }}
+        >
+          <label className="flex items-center gap-3 rounded-xl bg-[var(--surface-subtle)] px-3 py-3 text-sm font-semibold md:col-span-2">
+            <input
+              checked={form.enabled}
+              onChange={(event) =>
+                setForm((current) => ({ ...current, enabled: event.target.checked }))
+              }
+              type="checkbox"
+            />
+            启用本组织 AI 工作洞察
+          </label>
+          <Field
+            hint="生产环境必须是 HTTPS；使用 OpenAI 兼容的 /v4 或同类基础路径，不要填写 /chat/completions。"
+            label="AI Base URL"
+          >
+            <input
+              autoCapitalize="none"
+              className={fieldClass}
+              onChange={(event) =>
+                setForm((current) => ({ ...current, baseUrl: event.target.value }))
+              }
+              required
+              type="url"
+              value={form.baseUrl}
+            />
+          </Field>
+          <Field hint="例如 glm-4.7-flash；由你的 AI 供应商决定。" label="模型标识">
+            <input
+              autoCapitalize="none"
+              className={fieldClass}
+              onChange={(event) =>
+                setForm((current) => ({ ...current, model: event.target.value }))
+              }
+              required
+              value={form.model}
+            />
+          </Field>
+          <Field
+            hint={current.hasApiKey ? "留空会保留当前密钥；输入新值会安全替换它。" : "首次启用必须填写；保存后不可再次查看。"}
+            label="API Key"
+          >
+            <input
+              autoComplete="new-password"
+              className={fieldClass}
+              onChange={(event) =>
+                setForm((current) => ({ ...current, apiKey: event.target.value }))
+              }
+              placeholder={current.hasApiKey ? "已保存，输入新密钥才会替换" : "仅在服务端加密保存"}
+              type="password"
+              value={form.apiKey}
+            />
+          </Field>
+          <Field hint="限制单份报告长度，直接控制输出成本。" label="最大输出 Token">
+            <input
+              className={fieldClass}
+              max={16000}
+              min={128}
+              onChange={(event) => updateNumber("maxOutputTokens", event.target.value)}
+              required
+              type="number"
+              value={form.maxOutputTokens}
+            />
+          </Field>
+          <Field hint={`按 ${current.usage.timezone} 组织时区计数。重复相同事实的请求会复用已有任务。`} label="每日请求上限">
+            <input
+              className={fieldClass}
+              max={10000}
+              min={1}
+              onChange={(event) => updateNumber("dailyRequestLimit", event.target.value)}
+              required
+              type="number"
+              value={form.dailyRequestLimit}
+            />
+          </Field>
+          <Field hint="失败任务也会计入额度，避免供应商异常时反复消耗。" label="每月请求上限">
+            <input
+              className={fieldClass}
+              max={300000}
+              min={1}
+              onChange={(event) => updateNumber("monthlyRequestLimit", event.target.value)}
+              required
+              type="number"
+              value={form.monthlyRequestLimit}
+            />
+          </Field>
+          <Field hint="修改组织密钥、模型或额度需重新输入当前密码。" label="当前 Owner 密码">
+            <input
+              autoComplete="current-password"
+              className={fieldClass}
+              minLength={8}
+              onChange={(event) =>
+                setForm((current) => ({ ...current, password: event.target.value }))
+              }
+              required
+              type="password"
+              value={form.password}
+            />
+          </Field>
+          <Field hint="若当前 Owner 已启用双因素认证，则必填。" label="动态验证码（如已启用）">
+            <input
+              autoComplete="one-time-code"
+              className={fieldClass}
+              inputMode="numeric"
+              maxLength={6}
+              onChange={(event) =>
+                setForm((current) => ({ ...current, totpCode: event.target.value }))
+              }
+              placeholder="6 位"
+              value={form.totpCode}
+            />
+          </Field>
+          <label className="flex items-center gap-2 text-xs leading-5 text-[var(--text-muted)] md:col-span-2">
+            <input
+              checked={form.clearApiKey}
+              disabled={Boolean(form.apiKey.trim())}
+              onChange={(event) =>
+                setForm((current) => ({ ...current, clearApiKey: event.target.checked }))
+              }
+              type="checkbox"
+            />
+            清除已保存密钥并停用组织 AI（不能与替换密钥同时使用）
+          </label>
+          <div className="flex flex-wrap items-center gap-3 md:col-span-2">
+            <Button disabled={save.isPending} type="submit">
+              <KeyRound size={16} />
+              {save.isPending ? "正在安全保存…" : "验证并保存组织配置"}
+            </Button>
+            <span className="text-xs leading-5 text-[var(--text-subtle)]">
+              报告只接收服务端裁剪后的授权聚合事实，不会把原始附件或员工密码发送给模型。
+            </span>
+          </div>
+          <div className="md:col-span-2">
+            <ErrorMessage error={save.error} />
+          </div>
+        </form>
+      </CardContent>
+    </Card>
+  );
+}
+
 export function AiPage({ me }: { me: Me }) {
   const queryClient = useQueryClient();
-  const reports = useQuery({ queryKey: ["ai-reports"], queryFn: () => api<{ items: AiReportRecord[] }>("/api/ai/reports"), refetchInterval: (query) => query.state.data?.items.some((item) => ["queued", "running"].includes(item.job.status)) ? 5_000 : false });
+  const reports = useQuery({
+    queryKey: ["ai-reports"],
+    queryFn: () => api<{ items: AiReportRecord[] }>("/api/ai/reports"),
+    refetchInterval: (query) =>
+      query.state.data?.items.some((item) =>
+        ["queued", "running"].includes(item.job.status),
+      )
+        ? 5_000
+        : false,
+  });
   const [scope, setScope] = useState<"self" | "team">("self");
-  const create = useMutation({ mutationFn: () => { const to = new Date(); const from = new Date(to.getTime() - 7 * 86_400_000); return api("/api/ai/reports", { method: "POST", body: { scope, from: from.toISOString(), to: to.toISOString() } }); }, onSuccess: async () => { await queryClient.invalidateQueries({ queryKey: ["ai-reports"] }); } });
-  const canAnalyzeTeam = me.permissions.some((grant) => grant.permission === "ai.team_analysis" && grant.scopeKind === "organization");
-  return <><PageHeader title="AI 工作洞察" description="模型只接收服务端已裁剪的聚合事实，报告附来源数量；失败时明确降级，不影响工时、项目、审核和薪资。" actions={<><select className={fieldClass} onChange={(event) => setScope(event.target.value as "self" | "team")} value={scope}><option value="self">本人范围</option>{canAnalyzeTeam ? <option value="team">团队授权范围</option> : null}</select><Button disabled={create.isPending} onClick={() => create.mutate()}><Bot size={17} />生成近 7 天报告</Button></>} />{reports.isPending ? <Card><LoadingBlock /></Card> : reports.data?.items.length ? <div className="space-y-4">{reports.data.items.map((item) => <Card key={item.job.id}><CardContent>{item.report ? <div><div className="flex flex-wrap items-center gap-2"><h2 className="font-bold">{item.report.title}</h2><Badge tone="positive">{item.report.sourceCount} 个来源</Badge></div><p className="mt-3 text-sm leading-7 text-[var(--text-muted)]">{item.report.summary}</p><div className="mt-5 grid gap-4 md:grid-cols-3"><InsightList items={item.report.structuredOutput.highlights ?? []} title="进展亮点" tone="positive" /><InsightList items={item.report.structuredOutput.risks ?? []} title="风险提示" tone="danger" /><InsightList items={item.report.structuredOutput.suggestions ?? []} title="建议" tone="info" /></div><p className="mt-4 text-xs text-[var(--text-subtle)]">生成于 {formatDateTime(item.report.generatedAt)} · AI 解释，不是原始业务事实</p></div> : <div className="flex items-center justify-between gap-4"><div><h2 className="font-bold">报告任务</h2><p className="mt-1 text-sm text-[var(--text-muted)]">{item.job.status === "failed" ? item.job.errorSummary || "生成失败" : "后台正在基于聚合事实生成，不阻塞其他操作。"}</p></div><Badge tone={item.job.status === "failed" ? "danger" : "warning"}>{item.job.status}</Badge></div>}</CardContent></Card>)}</div> : <Card><EmptyState action={<Button onClick={() => create.mutate()}><Bot size={17} />生成第一份报告</Button>} description="报告基于近 7 天的真实聚合事实，并在后台异步生成。" icon={<Bot />} title="还没有 AI 报告" /></Card>}<div className="mt-4"><ErrorMessage error={reports.error ?? create.error} /></div></>;
+  const [activeReportId, setActiveReportId] = useState<string | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  // Keep one five-minute-aligned seven-day range for the lifetime of this
+  // screen. A double click, reconnect, or React Query retry then resolves to
+  // the same server-side job instead of paying for a nearly-identical prompt
+  // whose only difference is the current millisecond.
+  const reportRange = useMemo(() => {
+    const to = new Date();
+    to.setSeconds(0, 0);
+    to.setMinutes(Math.floor(to.getMinutes() / 5) * 5);
+    return {
+      from: new Date(to.getTime() - 7 * 86_400_000).toISOString(),
+      to: to.toISOString(),
+    };
+  }, []);
+  const create = useMutation({
+    mutationFn: () =>
+      api("/api/ai/reports", {
+        method: "POST",
+        body: { scope, ...reportRange },
+      }),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["ai-reports"] });
+    },
+  });
+  const canAnalyzeTeam = me.permissions.some(
+    (grant) =>
+      grant.permission === "ai.team_analysis" &&
+      grant.scopeKind === "organization",
+  );
+  const reportItems = reports.data?.items ?? [];
+  const selected =
+    reportItems.find((item) => item.job.id === activeReportId) ??
+    reportItems[0] ??
+    null;
+  const selectedReport = selected?.report ?? null;
+
+  return (
+    <>
+      <PageHeader
+        title="AI 工作洞察"
+        description="模型只接收服务端已裁剪的聚合事实，报告附来源数量；失败时明确降级，不影响工时、项目、审核和薪资。"
+        actions={
+          <>
+            {me.user.isOwner ? (
+              <Button onClick={() => setSettingsOpen((open) => !open)} variant="secondary">
+                <Settings2 size={16} />
+                组织 AI 配置
+              </Button>
+            ) : null}
+            <Button disabled={create.isPending} onClick={() => create.mutate()}>
+              <Bot size={17} />
+              {create.isPending ? "正在创建…" : "生成近 7 天报告"}
+            </Button>
+          </>
+        }
+      />
+      {settingsOpen ? <AiSettingsPanel onClose={() => setSettingsOpen(false)} /> : null}
+      {reports.isPending ? (
+        <Card>
+          <LoadingBlock />
+        </Card>
+      ) : (
+        <div className="ai-workspace">
+          <aside className="ai-history">
+            <Card>
+              <CardHeader>
+                <div>
+                  <p className="app-section-label">Report history</p>
+                  <h2 className="mt-2 font-extrabold tracking-[-0.025em]">
+                    报告历史
+                  </h2>
+                </div>
+                <Badge>{reportItems.length}</Badge>
+              </CardHeader>
+              <div className="ai-history-list">
+                {reportItems.length ? (
+                  reportItems.map((item) => (
+                    <button
+                      aria-pressed={selected?.job.id === item.job.id}
+                      className={`ai-history-item ${selected?.job.id === item.job.id ? "is-active" : ""}`}
+                      key={item.job.id}
+                      onClick={() => setActiveReportId(item.job.id)}
+                      type="button"
+                    >
+                      <strong>{item.report?.title || "报告任务"}</strong>
+                      <small>
+                        {item.report
+                          ? `${formatDateTime(item.report.generatedAt)} · ${item.report.sourceCount} 个来源`
+                          : item.job.status === "failed"
+                            ? "生成失败"
+                            : "正在生成"}
+                      </small>
+                    </button>
+                  ))
+                ) : (
+                  <p className="px-3 py-7 text-sm leading-6 text-[var(--text-muted)]">
+                    还没有报告。生成后会在这里保留历史与来源数量。
+                  </p>
+                )}
+              </div>
+            </Card>
+          </aside>
+          <section className="min-w-0">
+            <Card className="ai-compose-card">
+              <CardContent>
+                <div className="flex flex-col gap-5 sm:flex-row sm:items-start sm:justify-between">
+                  <div>
+                    <p className="app-section-label text-[var(--accent-strong)]">
+                      事实解释器
+                    </p>
+                    <h2 className="mt-2 text-xl font-extrabold tracking-[-0.04em]">
+                      把已授权的事实，变成可解释的工作总结
+                    </h2>
+                    <p className="mt-2 max-w-2xl text-sm leading-6 text-[var(--text-muted)]">
+                      AI
+                      不生成工时、修改审批或替你做人员判断；它只围绕服务端聚合结果提供摘要、风险和下一步建议。
+                    </p>
+                  </div>
+                  <div className="min-w-[10rem]">
+                    <label className="app-field block">
+                      <span className="mb-1.5 block text-xs font-semibold">
+                        分析范围
+                      </span>
+                      <select
+                        className={fieldClass}
+                        onChange={(event) =>
+                          setScope(event.target.value as "self" | "team")
+                        }
+                        value={scope}
+                      >
+                        <option value="self">本人范围</option>
+                        {canAnalyzeTeam ? (
+                          <option value="team">团队授权范围</option>
+                        ) : null}
+                      </select>
+                    </label>
+                  </div>
+                </div>
+                <div className="ai-preset-grid">
+                  <div className="ai-preset">
+                    <strong>近 7 天概览</strong>
+                    <span>当前生成入口读取过去一周的已授权聚合事实。</span>
+                  </div>
+                  <div className="ai-preset">
+                    <strong>来源可追溯</strong>
+                    <span>完成报告会标示输入记录或节点的来源数量。</span>
+                  </div>
+                  <div className="ai-preset">
+                    <strong>不篡改业务</strong>
+                    <span>
+                      洞察始终是建议，不能直接改写工资、审批或工作记录。
+                    </span>
+                  </div>
+                </div>
+                <div className="mt-5 flex flex-wrap items-center gap-3">
+                  <Button
+                    disabled={create.isPending}
+                    onClick={() => create.mutate()}
+                  >
+                    {create.isPending ? "正在提交任务…" : "生成当前范围报告"}
+                    <ArrowUpRight size={16} />
+                  </Button>
+                  <span className="text-xs leading-5 text-[var(--text-subtle)]">
+                    任务在后台运行；即使模型不可用，核心工作记录仍可正常使用。
+                  </span>
+                </div>
+              </CardContent>
+            </Card>
+            {selected ? (
+              <Card className="ai-report-card mt-5">
+                <CardHeader>
+                  {selectedReport ? (
+                    <div>
+                      <p className="app-section-label">已生成报告</p>
+                      <h2 className="mt-2 font-extrabold tracking-[-0.025em]">
+                        {selectedReport.title}
+                      </h2>
+                      <p className="mt-1 text-sm text-[var(--text-muted)]">
+                        生成于 {formatDateTime(selectedReport.generatedAt)} ·
+                        已引用 {selectedReport.sourceCount} 个授权来源
+                      </p>
+                    </div>
+                  ) : (
+                    <div>
+                      <p className="app-section-label">后台任务</p>
+                      <h2 className="mt-2 font-extrabold tracking-[-0.025em]">
+                        报告任务
+                      </h2>
+                      <p className="mt-1 text-sm text-[var(--text-muted)]">
+                        {selected.job.status === "failed"
+                          ? selected.job.errorSummary || "生成失败"
+                          : "后台正在基于聚合事实生成，不阻塞其他操作。"}
+                      </p>
+                    </div>
+                  )}
+                  <Badge
+                    tone={
+                      selectedReport
+                        ? "positive"
+                        : selected.job.status === "failed"
+                          ? "danger"
+                          : "warning"
+                    }
+                  >
+                    {selectedReport ? "可查看" : selected.job.status}
+                  </Badge>
+                </CardHeader>
+                <CardContent>
+                  {selectedReport ? (
+                    <>
+                      <p className="text-sm leading-7 text-[var(--text-muted)]">
+                        {selectedReport.summary}
+                      </p>
+                      <div className="mt-5 grid gap-4 md:grid-cols-3">
+                        <InsightList
+                          items={
+                            selectedReport.structuredOutput.highlights ?? []
+                          }
+                          title="进展亮点"
+                          tone="positive"
+                        />
+                        <InsightList
+                          items={selectedReport.structuredOutput.risks ?? []}
+                          title="风险提示"
+                          tone="danger"
+                        />
+                        <InsightList
+                          items={
+                            selectedReport.structuredOutput.suggestions ?? []
+                          }
+                          title="建议"
+                          tone="info"
+                        />
+                      </div>
+                      <p className="mt-5 text-xs text-[var(--text-subtle)]">
+                        AI
+                        解释，不是原始业务事实。请回到相关记录、项目节点或审批项完成业务操作。
+                      </p>
+                    </>
+                  ) : (
+                    <div className="min-h-48">
+                      <EmptyState
+                        description={
+                          selected.job.status === "failed"
+                            ? selected.job.errorSummary ||
+                              "生成失败，请稍后重新创建报告。"
+                            : "报告完成后，摘要、风险和建议会基于同一授权范围显示在这里。"
+                        }
+                        icon={<Bot />}
+                        title={
+                          selected.job.status === "failed"
+                            ? "报告未完成"
+                            : "正在整理事实"
+                        }
+                      />
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            ) : (
+              <Card className="ai-report-card mt-5">
+                <EmptyState
+                  action={
+                    <Button onClick={() => create.mutate()}>
+                      <Bot size={17} />
+                      生成第一份报告
+                    </Button>
+                  }
+                  description="报告基于近 7 天的真实聚合事实，并在后台异步生成。"
+                  icon={<Bot />}
+                  title="从一份可追溯的报告开始"
+                />
+              </Card>
+            )}
+          </section>
+          <aside className="ai-context">
+            <Card>
+              <CardHeader>
+                <div>
+                  <p className="app-section-label">数据边界</p>
+                  <h2 className="mt-2 font-extrabold tracking-[-0.025em]">
+                    上下文说明
+                  </h2>
+                </div>
+              </CardHeader>
+              <CardContent>
+                <div className="ai-context-line">
+                  <p className="text-xs font-semibold text-[var(--text-muted)]">
+                    当前范围
+                  </p>
+                  <p className="mt-1 text-sm font-bold">
+                    {scope === "team" ? "团队授权范围" : "本人范围"}
+                  </p>
+                </div>
+                <div className="ai-context-line">
+                  <p className="text-xs font-semibold text-[var(--text-muted)]">
+                    所选报告来源
+                  </p>
+                  <p className="mt-1 text-sm font-bold">
+                    {selectedReport
+                      ? `${selectedReport.sourceCount} 个授权来源`
+                      : "尚未生成"}
+                  </p>
+                </div>
+                <div className="ai-context-line">
+                  <p className="text-xs font-semibold text-[var(--text-muted)]">
+                    业务操作
+                  </p>
+                  <p className="mt-1 text-sm leading-6 text-[var(--text-muted)]">
+                    AI 不能直接批准工时、修改工资、删除记录或覆盖项目进度。
+                  </p>
+                </div>
+              </CardContent>
+            </Card>
+          </aside>
+        </div>
+      )}
+      <div className="mt-4">
+        <ErrorMessage error={reports.error ?? create.error} />
+      </div>
+    </>
+  );
 }
-function InsightList({ title, items, tone }: { title: string; items: string[]; tone: "positive" | "danger" | "info" }) { return <div className="rounded-xl bg-[var(--surface-subtle)] p-4"><Badge tone={tone}>{title}</Badge>{items.length ? <ul className="mt-3 space-y-2 text-sm leading-6">{items.map((item, index) => <li className="flex gap-2" key={`${title}-${index}`}><span aria-hidden="true">•</span><span>{item}</span></li>)}</ul> : <p className="mt-3 text-sm text-[var(--text-muted)]">没有足够事实支持此项结论。</p>}</div>; }
-interface OrganizationOverview { organization: { id: string; name: string; timezone: string } | null; units: Array<{ id: string; parentId: string | null; name: string }>; members: Array<{ membership: { id: string; status: string; positionTitle: string | null; orgUnitId: string | null }; user: { displayName: string }; positionTitle: string | null; unitName: string | null }>; roles: Array<{ id: string; name: string; kind: string; description: string | null }> }
-export function OrganizationPage() {
+
+function InsightList({
+  title,
+  items,
+  tone,
+}: {
+  title: string;
+  items: string[];
+  tone: "positive" | "danger" | "info";
+}) {
+  return (
+    <div className="rounded-xl border border-[var(--border)] bg-[var(--surface-tint)] p-4">
+      <Badge tone={tone}>{title}</Badge>
+      {items.length ? (
+        <ul className="mt-3 space-y-2 text-sm leading-6">
+          {items.map((item, index) => (
+            <li className="flex gap-2" key={`${title}-${index}`}>
+              <span aria-hidden="true">•</span>
+              <span>{item}</span>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="mt-3 text-sm text-[var(--text-muted)]">
+          没有足够事实支持此项结论。
+        </p>
+      )}
+    </div>
+  );
+}
+interface OrganizationOverview {
+  organization: { id: string; name: string; timezone: string } | null;
+  units: Array<{ id: string; parentId: string | null; name: string }>;
+  members: Array<{
+    membership: {
+      id: string;
+      status: string;
+      positionTitle: string | null;
+      orgUnitId: string | null;
+    };
+    user: { displayName: string };
+    positionTitle: string | null;
+    unitName: string | null;
+  }>;
+  roles: Array<{
+    id: string;
+    name: string;
+    kind: string;
+    description: string | null;
+  }>;
+}
+export function LegacyOrganizationPage() {
   const queryClient = useQueryClient();
-  const organization = useQuery({ queryKey: ["organization"], queryFn: () => api<OrganizationOverview>("/api/organization") });
+  const organization = useQuery({
+    queryKey: ["organization"],
+    queryFn: () => api<OrganizationOverview>("/api/organization"),
+  });
   const [unitName, setUnitName] = useState("");
-  const [invite, setInvite] = useState({ displayName: "", email: "", positionTitle: "", orgUnitId: "", roleId: "" });
-  const [invitationToken, setInvitationToken] = useState<string | null>(null);
-  const createUnit = useMutation({ mutationFn: () => api("/api/organization/units", { method: "POST", body: { name: unitName, parentId: null } }), onSuccess: async () => { setUnitName(""); await queryClient.invalidateQueries({ queryKey: ["organization"] }); } });
-  const inviteMember = useMutation({ mutationFn: () => api<{ invitationToken: string }>("/api/organization/invitations", { method: "POST", body: { displayName: invite.displayName, email: invite.email, positionTitle: invite.positionTitle || undefined, orgUnitId: invite.orgUnitId || null, roleId: invite.roleId } }), onSuccess: async (data) => { setInvitationToken(data.invitationToken); setInvite({ displayName: "", email: "", positionTitle: "", orgUnitId: "", roleId: "" }); await queryClient.invalidateQueries({ queryKey: ["organization"] }); } });
-  const setMemberStatus = useMutation({ mutationFn: ({ membershipId, status }: { membershipId: string; status: "active" | "inactive" }) => api(`/api/organization/members/${membershipId}/status`, { method: "PATCH", body: { status } }), onSuccess: async () => { await queryClient.invalidateQueries({ queryKey: ["organization"] }); } });
-  return <><PageHeader title="组织与人员" description="访问角色决定能做什么，组织单元决定管理范围，专业身份用于业务标签；三者不混用。" />{organization.isPending ? <Card><LoadingBlock /></Card> : organization.data ? <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_380px]"><div className="space-y-5"><Card><CardHeader><div><h2 className="font-bold">成员</h2><p className="mt-1 text-sm text-[var(--text-muted)]">{organization.data.organization?.name} · {organization.data.organization?.timezone}</p></div><Badge tone="info">{organization.data.members.length} 人</Badge></CardHeader><CardContent><div className="divide-y divide-[var(--border)]">{organization.data.members.map((item) => <div className="flex items-center gap-3 py-3" key={item.membership.id}><div className="grid size-9 place-items-center rounded-full bg-[var(--accent-soft)] font-bold text-[var(--accent-strong)]">{item.user.displayName.slice(0, 1)}</div><div className="min-w-0 flex-1"><p className="truncate text-sm font-semibold">{item.user.displayName}</p><p className="truncate text-xs text-[var(--text-muted)]">{item.positionTitle || "未设置岗位"} · {item.unitName || "未分配组织单元"}</p></div><Badge tone={item.membership.status === "active" ? "positive" : "warning"}>{item.membership.status === "active" ? "在职" : item.membership.status === "inactive" ? "已停用" : "待加入"}</Badge>{item.membership.status !== "invited" ? <Button disabled={setMemberStatus.isPending} onClick={() => setMemberStatus.mutate({ membershipId: item.membership.id, status: item.membership.status === "active" ? "inactive" : "active" })} size="compact" variant="secondary">{item.membership.status === "active" ? "停用" : "恢复"}</Button> : null}</div>)}</div><ErrorMessage error={setMemberStatus.error} /></CardContent></Card><Card><CardHeader><h2 className="font-bold">组织单元</h2></CardHeader><CardContent><form className="mb-4 flex gap-2" onSubmit={(event) => { event.preventDefault(); createUnit.mutate(); }}><input className={fieldClass} onChange={(event) => setUnitName(event.target.value)} placeholder="新增一级组织单元" required value={unitName} /><Button disabled={createUnit.isPending} type="submit"><Plus size={17} />添加</Button></form><div className="flex flex-wrap gap-2">{organization.data.units.map((unit) => <Badge key={unit.id}>{unit.name}</Badge>)}</div><ErrorMessage error={createUnit.error} /></CardContent></Card></div><Card className="h-fit"><CardHeader><h2 className="font-bold">邀请成员</h2></CardHeader><CardContent><form className="space-y-4" onSubmit={(event) => { event.preventDefault(); inviteMember.mutate(); }}><Field label="姓名"><input className={fieldClass} onChange={(event) => setInvite({ ...invite, displayName: event.target.value })} required value={invite.displayName} /></Field><Field label="邮箱"><input className={fieldClass} onChange={(event) => setInvite({ ...invite, email: event.target.value })} required type="email" value={invite.email} /></Field><Field label="岗位"><input className={fieldClass} onChange={(event) => setInvite({ ...invite, positionTitle: event.target.value })} value={invite.positionTitle} /></Field><Field label="组织单元"><select className={fieldClass} onChange={(event) => setInvite({ ...invite, orgUnitId: event.target.value })} value={invite.orgUnitId}><option value="">暂不分配</option>{organization.data.units.map((unit) => <option key={unit.id} value={unit.id}>{unit.name}</option>)}</select></Field><Field label="访问角色"><select className={fieldClass} onChange={(event) => setInvite({ ...invite, roleId: event.target.value })} required value={invite.roleId}><option value="">请选择</option>{organization.data.roles.filter((role) => role.kind !== "owner").map((role) => <option key={role.id} value={role.id}>{role.name}</option>)}</select></Field><Button className="w-full" disabled={inviteMember.isPending} type="submit">发送邀请</Button><ErrorMessage error={inviteMember.error} />{invitationToken ? <div className="rounded-xl bg-[var(--warning-soft)] p-3 text-xs leading-5 text-[var(--warning)]"><strong className="block">邀请令牌只显示一次</strong><code className="mt-1 block break-all select-all">{invitationToken}</code><span className="mt-1 block">邮件服务未配置时，请通过安全渠道交给受邀成员。</span></div> : null}</form></CardContent></Card></div> : null}<div className="mt-4"><ErrorMessage error={organization.error} /></div></>;
+  const [invite, setInvite] = useState({
+    displayName: "",
+    email: "",
+    positionTitle: "",
+    orgUnitId: "",
+    roleId: "",
+  });
+  const [inviteDelivery, setInviteDelivery] = useState<{
+    kind: "email" | "phone";
+    expiresAt: string;
+  } | null>(null);
+  const createUnit = useMutation({
+    mutationFn: () =>
+      api("/api/organization/units", {
+        method: "POST",
+        body: { name: unitName, parentId: null },
+      }),
+    onSuccess: async () => {
+      setUnitName("");
+      await queryClient.invalidateQueries({ queryKey: ["organization"] });
+    },
+  });
+  const inviteMember = useMutation({
+    mutationFn: () =>
+      api<{
+        delivery: { kind: "email" | "phone"; expiresAt: string };
+      }>("/api/organization/invitations", {
+        method: "POST",
+        body: {
+          displayName: invite.displayName,
+          identifier: invite.email,
+          kind: "email",
+          positionTitle: invite.positionTitle || undefined,
+          orgUnitId: invite.orgUnitId || null,
+          roleId: invite.roleId,
+        },
+      }),
+    onSuccess: async (data) => {
+      setInviteDelivery(data.delivery);
+      setInvite({
+        displayName: "",
+        email: "",
+        positionTitle: "",
+        orgUnitId: "",
+        roleId: "",
+      });
+      await queryClient.invalidateQueries({ queryKey: ["organization"] });
+    },
+  });
+  const setMemberStatus = useMutation({
+    mutationFn: ({
+      membershipId,
+      status,
+    }: {
+      membershipId: string;
+      status: "active" | "inactive";
+    }) =>
+      api(`/api/organization/members/${membershipId}/status`, {
+        method: "PATCH",
+        body: { status },
+      }),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["organization"] });
+    },
+  });
+  return (
+    <>
+      <PageHeader
+        title="组织与人员"
+        description="访问角色决定能做什么，组织单元决定管理范围，专业身份用于业务标签；三者不混用。"
+      />
+      {organization.isPending ? (
+        <Card>
+          <LoadingBlock />
+        </Card>
+      ) : organization.data ? (
+        <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_380px]">
+          <div className="space-y-5">
+            <Card>
+              <CardHeader>
+                <div>
+                  <h2 className="font-bold">成员</h2>
+                  <p className="mt-1 text-sm text-[var(--text-muted)]">
+                    {organization.data.organization?.name} ·{" "}
+                    {organization.data.organization?.timezone}
+                  </p>
+                </div>
+                <Badge tone="info">{organization.data.members.length} 人</Badge>
+              </CardHeader>
+              <CardContent>
+                <div className="divide-y divide-[var(--border)]">
+                  {organization.data.members.map((item) => (
+                    <div
+                      className="flex items-center gap-3 py-3"
+                      key={item.membership.id}
+                    >
+                      <div className="grid size-9 place-items-center rounded-full bg-[var(--accent-soft)] font-bold text-[var(--accent-strong)]">
+                        {item.user.displayName.slice(0, 1)}
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-sm font-semibold">
+                          {item.user.displayName}
+                        </p>
+                        <p className="truncate text-xs text-[var(--text-muted)]">
+                          {item.positionTitle || "未设置岗位"} ·{" "}
+                          {item.unitName || "未分配组织单元"}
+                        </p>
+                      </div>
+                      <Badge
+                        tone={
+                          item.membership.status === "active"
+                            ? "positive"
+                            : "warning"
+                        }
+                      >
+                        {item.membership.status === "active"
+                          ? "在职"
+                          : item.membership.status === "inactive"
+                            ? "已停用"
+                            : "待加入"}
+                      </Badge>
+                      {item.membership.status !== "invited" ? (
+                        <Button
+                          disabled={setMemberStatus.isPending}
+                          onClick={() =>
+                            setMemberStatus.mutate({
+                              membershipId: item.membership.id,
+                              status:
+                                item.membership.status === "active"
+                                  ? "inactive"
+                                  : "active",
+                            })
+                          }
+                          size="compact"
+                          variant="secondary"
+                        >
+                          {item.membership.status === "active"
+                            ? "停用"
+                            : "恢复"}
+                        </Button>
+                      ) : null}
+                    </div>
+                  ))}
+                </div>
+                <ErrorMessage error={setMemberStatus.error} />
+              </CardContent>
+            </Card>
+            <Card>
+              <CardHeader>
+                <h2 className="font-bold">组织单元</h2>
+              </CardHeader>
+              <CardContent>
+                <form
+                  className="mb-4 flex gap-2"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    createUnit.mutate();
+                  }}
+                >
+                  <input
+                    className={fieldClass}
+                    onChange={(event) => setUnitName(event.target.value)}
+                    placeholder="新增一级组织单元"
+                    required
+                    value={unitName}
+                  />
+                  <Button disabled={createUnit.isPending} type="submit">
+                    <Plus size={17} />
+                    添加
+                  </Button>
+                </form>
+                <div className="flex flex-wrap gap-2">
+                  {organization.data.units.map((unit) => (
+                    <Badge key={unit.id}>{unit.name}</Badge>
+                  ))}
+                </div>
+                <ErrorMessage error={createUnit.error} />
+              </CardContent>
+            </Card>
+          </div>
+          <Card className="h-fit">
+            <CardHeader>
+              <h2 className="font-bold">邀请成员</h2>
+            </CardHeader>
+            <CardContent>
+              <form
+                className="space-y-4"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  inviteMember.mutate();
+                }}
+              >
+                <Field label="姓名">
+                  <input
+                    className={fieldClass}
+                    onChange={(event) =>
+                      setInvite({ ...invite, displayName: event.target.value })
+                    }
+                    required
+                    value={invite.displayName}
+                  />
+                </Field>
+                <Field label="邮箱">
+                  <input
+                    className={fieldClass}
+                    onChange={(event) =>
+                      setInvite({ ...invite, email: event.target.value })
+                    }
+                    required
+                    type="email"
+                    value={invite.email}
+                  />
+                </Field>
+                <Field label="岗位">
+                  <input
+                    className={fieldClass}
+                    onChange={(event) =>
+                      setInvite({
+                        ...invite,
+                        positionTitle: event.target.value,
+                      })
+                    }
+                    value={invite.positionTitle}
+                  />
+                </Field>
+                <Field label="组织单元">
+                  <select
+                    className={fieldClass}
+                    onChange={(event) =>
+                      setInvite({ ...invite, orgUnitId: event.target.value })
+                    }
+                    value={invite.orgUnitId}
+                  >
+                    <option value="">暂不分配</option>
+                    {organization.data.units.map((unit) => (
+                      <option key={unit.id} value={unit.id}>
+                        {unit.name}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+                <Field label="访问角色">
+                  <select
+                    className={fieldClass}
+                    onChange={(event) =>
+                      setInvite({ ...invite, roleId: event.target.value })
+                    }
+                    required
+                    value={invite.roleId}
+                  >
+                    <option value="">请选择</option>
+                    {organization.data.roles
+                      .filter((role) => role.kind !== "owner")
+                      .map((role) => (
+                        <option key={role.id} value={role.id}>
+                          {role.name}
+                        </option>
+                      ))}
+                  </select>
+                </Field>
+                <Button
+                  className="w-full"
+                  disabled={inviteMember.isPending}
+                  type="submit"
+                >
+                  发送邀请
+                </Button>
+                <ErrorMessage error={inviteMember.error} />
+                {inviteDelivery ? (
+                  <div className="rounded-xl bg-[var(--warning-soft)] p-3 text-xs leading-5 text-[var(--warning)]">
+                    <strong className="block">白名单邀请已进入投递通道</strong>
+                    <span className="mt-1 block">
+                      邀请链接只会发送至受邀成员的邮箱，且将在
+                      {" "}
+                      {new Date(inviteDelivery.expiresAt).toLocaleString("zh-CN")}
+                      {" "}
+                      后过期。服务未配置时会明确报错，绝不会展示令牌。
+                    </span>
+                  </div>
+                ) : null}
+              </form>
+            </CardContent>
+          </Card>
+        </div>
+      ) : null}
+      <div className="mt-4">
+        <ErrorMessage error={organization.error} />
+      </div>
+    </>
+  );
 }
-export function NotFoundPage() { return <div className="grid min-h-dvh place-items-center bg-[var(--canvas)] p-6 text-center"><div><p className="text-6xl font-bold text-[var(--accent)]">404</p><h1 className="mt-4 text-xl font-bold">页面不存在</h1><Link className="mt-5 inline-block" to="/"><Button>返回工作台</Button></Link></div></div>; }
+export function NotFoundPage() {
+  return (
+    <div className="grid min-h-dvh place-items-center bg-[var(--canvas)] p-6 text-center">
+      <div>
+        <p className="text-6xl font-bold text-[var(--accent)]">404</p>
+        <h1 className="mt-4 text-xl font-bold">页面不存在</h1>
+        <Link className="mt-5 inline-block" to="/">
+          <Button>返回工作台</Button>
+        </Link>
+      </div>
+    </div>
+  );
+}
+
+export { OrganizationPage } from "./organization-workbench.js";
+export { CalendarPage } from "./calendar-workbench.js";
+export { ProjectDetailPage } from "./project-workbench.js";

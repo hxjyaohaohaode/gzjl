@@ -71,6 +71,10 @@ export const aiJobs = pgTable(
     attempt: integer("attempt").notNull().default(0),
     maxAttempts: integer("max_attempts").notNull().default(3),
     errorSummary: text("error_summary"),
+    maxOutputTokens: integer("max_output_tokens").notNull().default(1_200),
+    inputTokens: integer("input_tokens"),
+    outputTokens: integer("output_tokens"),
+    providerRequestId: text("provider_request_id"),
     queuedAt: timestamp("queued_at", { withTimezone: true }).notNull().defaultNow(),
     startedAt: timestamp("started_at", { withTimezone: true }),
     completedAt: timestamp("completed_at", { withTimezone: true }),
@@ -330,5 +334,14 @@ export const outboxEvents = pgTable(
     publishedAt: timestamp("published_at", { withTimezone: true }),
     attempt: integer("attempt").notNull().default(0),
   },
-  (table) => [index("outbox_events_unpublished_idx").on(table.publishedAt, table.createdAt)],
+  (table) => [
+    index("outbox_events_unpublished_idx").on(table.publishedAt, table.createdAt),
+    // WebSocket clients consume by organization and a stable time/id cursor.
+    // This prevents a growing multi-tenant outbox from becoming a table scan.
+    index("outbox_events_org_created_idx").on(
+      table.organizationId,
+      table.createdAt,
+      table.id,
+    ),
+  ],
 );

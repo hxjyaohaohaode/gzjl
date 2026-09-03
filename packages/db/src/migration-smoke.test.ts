@@ -21,7 +21,19 @@ describe("generated PostgreSQL migration", () => {
       const tables = await database.query<{ count: number }>(
         "select count(*)::int as count from information_schema.tables where table_schema = 'public' and table_type = 'BASE TABLE'",
       );
-      expect(tables.rows[0]?.count).toBe(66);
+      expect(tables.rows[0]?.count).toBe(67);
+      const planKindColumn = await database.query<{
+        column_default: string | null;
+        is_nullable: string;
+      }>(
+        "select column_default, is_nullable from information_schema.columns where table_schema = 'public' and table_name = 'work_sessions' and column_name = 'record_kind'",
+      );
+      expect(planKindColumn.rows).toEqual([
+        expect.objectContaining({
+          column_default: "'fact'::text",
+          is_nullable: "NO",
+        }),
+      ]);
     } finally {
       await database.close();
     }

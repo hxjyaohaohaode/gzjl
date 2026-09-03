@@ -5,6 +5,7 @@ import {
   approvalRequests,
   auditLogs,
   orgMemberships,
+  workBreaks,
   workSessions,
   workSessionProjectLinks,
   workSessionVersions,
@@ -85,6 +86,7 @@ export class ApprovalService {
         and(
           eq(approvalRequests.organizationId, actor.organizationId),
           eq(approvalRequests.status, "pending"),
+          eq(workSessions.recordKind, "fact"),
         ),
       )
       .orderBy(desc(approvalRequests.priority), desc(approvalRequests.requestedAt))
@@ -93,6 +95,7 @@ export class ApprovalService {
     const visible = [];
     for (const candidate of candidates) {
       if (
+        candidate.request.requestedBy !== actor.membershipId &&
         (candidate.request.assignedReviewerId === null ||
           candidate.request.assignedReviewerId === actor.membershipId) &&
         (await this.canReviewSession(
@@ -128,11 +131,13 @@ export class ApprovalService {
         and(
           eq(approvalRequests.id, requestId),
           eq(approvalRequests.organizationId, actor.organizationId),
+          eq(workSessions.recordKind, "fact"),
         ),
       )
       .limit(1);
     if (
       !record ||
+      record.request.requestedBy === actor.membershipId ||
       (record.request.assignedReviewerId !== null &&
         record.request.assignedReviewerId !== actor.membershipId) ||
       !(await this.canReviewSession(actor, record.requesterOrgUnitId, record.session.id))
@@ -155,6 +160,21 @@ export class ApprovalService {
     }
 
     return this.db.transaction(async (tx) => {
+      const [breaks, projectLinks] = await Promise.all([
+        tx
+          .select()
+          .from(workBreaks)
+          .where(eq(workBreaks.workSessionId, reviewable.session.id)),
+        tx
+          .select()
+          .from(workSessionProjectLinks)
+          .where(eq(workSessionProjectLinks.workSessionId, reviewable.session.id)),
+      ]);
+      const beforeSnapshot = {
+        ...reviewable.session,
+        breaks,
+        projectLinks,
+      };
       const [request] = await tx
         .update(approvalRequests)
         .set({ status: decision, resolvedAt: new Date() })
@@ -170,10 +190,15 @@ export class ApprovalService {
         .update(workSessions)
         .set(
           decision === "approved"
-            ? { approvalStatus: "approved", updatedAt: new Date() }
+            ? {
+                approvalStatus: "approved",
+                version: reviewable.session.version + 1,
+                updatedAt: new Date(),
+              }
             : {
                 approvalStatus: "returned",
                 submissionStatus: "draft",
+                version: reviewable.session.version + 1,
                 updatedAt: new Date(),
               },
         )
@@ -181,17 +206,27 @@ export class ApprovalService {
           and(
             eq(workSessions.id, request.entityId),
             eq(workSessions.approvalStatus, "pending_review"),
+            eq(workSessions.recordKind, "fact"),
+            eq(workSessions.version, reviewable.session.version),
           ),
         )
         .returning();
       if (!session) throw new ApprovalConflictError("关联工时已不在待审核状态。")
+      const afterSnapshot = { ...session, breaks, projectLinks };
+      await tx.insert(workSessionVersions).values({
+        workSessionId: session.id,
+        version: session.version,
+        snapshot: afterSnapshot,
+        changeReason: decision === "approved" ? "approval_approved" : "approval_returned",
+        changedBy: actor.membershipId,
+      });
       await tx.insert(approvalActions).values({
         approvalRequestId: request.id,
         actorMembershipId: actor.membershipId,
         action: decision,
         reason,
-        beforeSnapshot: reviewable.session,
-        afterSnapshot: session,
+        beforeSnapshot,
+        afterSnapshot,
       });
       await tx.insert(auditLogs).values({
         organizationId: actor.organizationId,
@@ -199,11 +234,11 @@ export class ApprovalService {
         action: `approval.${decision}`,
         entityType: "approval_request",
         entityId: request.id,
-        before: reviewable.request,
-        after: request,
+        before: { request: reviewable.request, session: beforeSnapshot },
+        after: { request, session: afterSnapshot },
         reason,
       });
-      return { request, session };
+      return { request, session: afterSnapshot };
     });
   }
 
@@ -222,6 +257,21 @@ export class ApprovalService {
     const reviewable = await this.loadReviewable(actor, requestId);
     if (reviewable.request.status !== "pending") throw new ApprovalConflictError();
     return this.db.transaction(async (tx) => {
+      const [breaks, projectLinks] = await Promise.all([
+        tx
+          .select()
+          .from(workBreaks)
+          .where(eq(workBreaks.workSessionId, reviewable.session.id)),
+        tx
+          .select()
+          .from(workSessionProjectLinks)
+          .where(eq(workSessionProjectLinks.workSessionId, reviewable.session.id)),
+      ]);
+      const beforeSnapshot = {
+        ...reviewable.session,
+        breaks,
+        projectLinks,
+      };
       const [session] = await tx
         .update(workSessions)
         .set({
@@ -234,15 +284,17 @@ export class ApprovalService {
             eq(workSessions.id, reviewable.session.id),
             eq(workSessions.version, expectedVersion),
             eq(workSessions.approvalStatus, "pending_review"),
+            eq(workSessions.recordKind, "fact"),
             isNull(workSessions.lockedAt),
           ),
-        )
+      )
         .returning();
       if (!session) throw new ApprovalConflictError("工时版本已变化，管理更正未应用。")
+      const afterSnapshot = { ...session, breaks, projectLinks };
       await tx.insert(workSessionVersions).values({
         workSessionId: session.id,
         version: session.version,
-        snapshot: session,
+        snapshot: afterSnapshot,
         changeReason: `管理更正：${reason}`,
         changedBy: actor.membershipId,
       });
@@ -251,8 +303,8 @@ export class ApprovalService {
         actorMembershipId: actor.membershipId,
         action: "management_corrected",
         reason,
-        beforeSnapshot: reviewable.session,
-        afterSnapshot: session,
+        beforeSnapshot,
+        afterSnapshot,
       });
       await tx.insert(auditLogs).values({
         organizationId: actor.organizationId,
@@ -260,11 +312,11 @@ export class ApprovalService {
         action: "work_session.management_corrected",
         entityType: "work_session",
         entityId: session.id,
-        before: reviewable.session,
-        after: session,
+        before: beforeSnapshot,
+        after: afterSnapshot,
         reason,
       });
-      return session;
+      return afterSnapshot;
     });
   }
 }

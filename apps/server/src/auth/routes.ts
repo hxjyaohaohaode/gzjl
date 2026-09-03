@@ -96,6 +96,7 @@ export async function registerAuthRoutes(
             membershipId: result.context.membershipId,
             organizationId: result.context.organizationId,
             displayName: result.context.displayName,
+            isOwner: result.context.isOwner,
           },
           permissions: result.context.grants,
         };
@@ -123,7 +124,13 @@ export async function registerAuthRoutes(
         const result = await service.completeTotpLogin(input.challengeToken, input.code);
         reply.setCookie(cookieName, result.token, { ...cookieOptions, expires: result.expiresAt, maxAge: config.SESSION_TTL_SECONDS });
         return {
-          user: { id: result.context.userId, membershipId: result.context.membershipId, organizationId: result.context.organizationId, displayName: result.context.displayName },
+          user: {
+            id: result.context.userId,
+            membershipId: result.context.membershipId,
+            organizationId: result.context.organizationId,
+            displayName: result.context.displayName,
+            isOwner: result.context.isOwner,
+          },
           permissions: result.context.grants,
         };
       } catch (error) {
@@ -199,12 +206,23 @@ export async function registerAuthRoutes(
     async (request, reply) => {
       const { identifier } = passwordResetRequestSchema.parse(request.body);
       try {
-        const reset = await service.requestPasswordReset(identifier);
+        const reset = await service.requestPasswordReset(
+          identifier,
+          (kind) => mailer.assertDeliveryConfigured(kind),
+        );
         if (reset) await mailer.sendPasswordReset(reset);
-        return reply.code(202).send({ accepted: true, message: "若该邮箱对应有效账号，重置链接将发送至邮箱。" });
+        return reply.code(202).send({ accepted: true, message: "若该邮箱或手机号对应有效账号，重置链接将通过已验证渠道发送。" });
       } catch (error) {
         if (error instanceof AuthDeliveryUnavailableError) {
-          return reply.code(503).send({ error: "password_reset_unavailable", message: error.message });
+          // Keep the public reset endpoint indistinguishable for existing,
+          // unknown, disabled, and temporarily undeliverable identities. The
+          // service has already avoided persisting a reset token for a
+          // plainly unconfigured channel; exposing that distinction here
+          // would turn a recovery affordance into an account-enumeration API.
+          return reply.code(202).send({
+            accepted: true,
+            message: "若该邮箱或手机号对应有效账号，重置链接将通过已验证渠道发送。",
+          });
         }
         throw error;
       }
@@ -237,6 +255,7 @@ export async function registerAuthRoutes(
             membershipId: request.auth.membershipId,
             organizationId: request.auth.organizationId,
             displayName: request.auth.displayName,
+            isOwner: request.auth.isOwner,
           }
         : null,
       permissions: request.auth?.grants ?? [],

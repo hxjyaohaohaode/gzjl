@@ -200,6 +200,7 @@ export class EvidenceService {
         and(
           eq(workSessions.id, sessionId),
           eq(workSessions.organizationId, actor.organizationId),
+          eq(workSessions.recordKind, "fact"),
           isNull(workSessions.deletedAt),
         ),
       )

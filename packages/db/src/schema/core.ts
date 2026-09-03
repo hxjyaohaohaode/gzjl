@@ -162,6 +162,47 @@ export const organizations = pgTable(
   ],
 );
 
+/**
+ * One organization-owned, OpenAI-compatible provider configuration. The API
+ * key is encrypted before it reaches this table and is never selected into a
+ * browser response. A missing row intentionally falls back to the deployment
+ * default, while an explicitly disabled row turns AI off for that company.
+ */
+export const organizationAiSettings = pgTable(
+  "organization_ai_settings",
+  {
+    organizationId: uuid("organization_id")
+      .primaryKey()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    enabled: boolean("enabled").notNull().default(false),
+    baseUrl: text("base_url")
+      .notNull()
+      .default("https://open.bigmodel.cn/api/paas/v4"),
+    model: text("model").notNull().default("glm-4.7-flash"),
+    apiKeyCiphertext: text("api_key_ciphertext"),
+    dailyRequestLimit: integer("daily_request_limit").notNull().default(20),
+    monthlyRequestLimit: integer("monthly_request_limit").notNull().default(300),
+    maxOutputTokens: integer("max_output_tokens").notNull().default(1_200),
+    version: integer("version").notNull().default(1),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    check(
+      "organization_ai_settings_daily_limit_check",
+      sql`${table.dailyRequestLimit} between 1 and 10000`,
+    ),
+    check(
+      "organization_ai_settings_monthly_limit_check",
+      sql`${table.monthlyRequestLimit} between 1 and 300000`,
+    ),
+    check(
+      "organization_ai_settings_max_output_check",
+      sql`${table.maxOutputTokens} between 128 and 16000`,
+    ),
+  ],
+);
+
 export const orgUnits = pgTable(
   "org_units",
   {

@@ -1,14 +1,198 @@
 import type { FastifyInstance, preHandlerHookHandler } from "fastify";
 import { z } from "zod";
 
-import { AiUnavailableError, type AiService } from "./service.js";
 import { isAuthorized } from "../auth/authorization.js";
+import {
+  InvalidCredentialsError,
+  TotpCodeError,
+  type AuthService,
+} from "../auth/service.js";
+import {
+  AiConfigurationError,
+  AiConfigurationForbiddenError,
+  AiQuotaExceededError,
+} from "./configuration.js";
+import type { AiConfigurationService } from "./configuration.js";
+import { AiUnavailableError, type AiService } from "./service.js";
 
-const requestSchema = z.object({ scope: z.enum(["self", "team"]).default("self"), from: z.iso.datetime({ offset: true }), to: z.iso.datetime({ offset: true }) }).refine((value) => new Date(value.to) > new Date(value.from), { message: "结束时间必须晚于开始时间" });
+const requestSchema = z
+  .object({
+    scope: z.enum(["self", "team"]).default("self"),
+    from: z.iso.datetime({ offset: true }),
+    to: z.iso.datetime({ offset: true }),
+  })
+  .superRefine((value, context) => {
+    const from = new Date(value.from);
+    const to = new Date(value.to);
+    if (to <= from) {
+      context.addIssue({
+        code: "custom",
+        path: ["to"],
+        message: "结束时间必须晚于开始时间。",
+      });
+    }
+    if (to.getTime() - from.getTime() > 366 * 86_400_000) {
+      context.addIssue({
+        code: "custom",
+        path: ["from"],
+        message: "单次 AI 分析最多覆盖 366 天，避免无界成本与失真结论。",
+      });
+    }
+  });
 const reportParams = z.object({ reportId: z.uuid() });
+const settingsSchema = z
+  .object({
+    enabled: z.boolean(),
+    baseUrl: z.string().trim().min(8).max(512),
+    model: z.string().trim().min(1).max(160),
+    dailyRequestLimit: z.number().int().min(1).max(10_000),
+    monthlyRequestLimit: z.number().int().min(1).max(300_000),
+    maxOutputTokens: z.number().int().min(128).max(16_000),
+    apiKey: z.string().trim().min(8).max(2_000).optional(),
+    clearApiKey: z.boolean().default(false),
+  })
+  .superRefine((input, context) => {
+    if (input.clearApiKey && input.apiKey) {
+      context.addIssue({
+        code: "custom",
+        path: ["apiKey"],
+        message: "清除密钥与填写新密钥不能同时进行。",
+      });
+    }
+    if (input.monthlyRequestLimit < input.dailyRequestLimit) {
+      context.addIssue({
+        code: "custom",
+        path: ["monthlyRequestLimit"],
+        message: "月度请求上限不能低于每日请求上限。",
+      });
+    }
+  });
+const updateSettingsSchema = settingsSchema.extend({
+  password: z.string().min(8).max(1_024),
+  totpCode: z.string().regex(/^\d{6}$/).optional(),
+});
 
-export async function registerAiRoutes(app: FastifyInstance, service: AiService, authenticate: preHandlerHookHandler): Promise<void> {
-  app.get("/api/ai/reports", { preHandler: authenticate }, async (request) => ({ items: await service.list(request.auth!) }));
-  app.get("/api/ai/reports/:reportId", { preHandler: authenticate }, async (request, reply) => { const { reportId } = reportParams.parse(request.params); const result = await service.detail(request.auth!, reportId); return result ?? reply.code(404).send({ error: "report_not_found", message: "报告不存在。" }); });
-  app.post("/api/ai/reports", { preHandler: [app.csrfProtection, authenticate] }, async (request, reply) => { const input = requestSchema.parse(request.body); if (input.scope === "team" && (!request.auth || !isAuthorized(request.auth.grants, "ai.team_analysis", { scopeKind: "organization" }))) return reply.code(403).send({ error: "forbidden", message: "当前账号没有组织级团队 AI 分析权限。" }); try { const job = await service.requestReport(request.auth!, input.scope, new Date(input.from), new Date(input.to)); return reply.code(202).send({ job }); } catch (error) { if (error instanceof AiUnavailableError) return reply.code(503).send({ error: "ai_unavailable", message: error.message }); throw error; } });
+function sendConfigurationError(error: unknown, reply: {
+  code: (statusCode: number) => { send: (payload: object) => unknown };
+}) {
+  // Changing an organization-wide provider key is a sensitive action. Keep a
+  // bad current password and a bad TOTP code indistinguishable to callers,
+  // while returning a deliberate authentication failure instead of letting it
+  // fall through to Fastify's generic 500 handler.
+  if (error instanceof InvalidCredentialsError || error instanceof TotpCodeError) {
+    return reply.code(401).send({
+      error: "sensitive_action_denied",
+      message: "当前密码或动态验证码不正确。",
+    });
+  }
+  if (error instanceof AiConfigurationForbiddenError) {
+    return reply.code(403).send({
+      error: "ai_configuration_forbidden",
+      message: error.message,
+    });
+  }
+  if (error instanceof AiConfigurationError) {
+    return reply.code(409).send({
+      error: "ai_configuration_invalid",
+      message: error.message,
+    });
+  }
+  throw error;
+}
+
+export async function registerAiRoutes(
+  app: FastifyInstance,
+  service: AiService,
+  configuration: AiConfigurationService,
+  authService: AuthService,
+  authenticate: preHandlerHookHandler,
+): Promise<void> {
+  app.get(
+    "/api/ai/reports",
+    { preHandler: authenticate },
+    async (request) => ({ items: await service.list(request.auth!) }),
+  );
+  app.get(
+    "/api/ai/reports/:reportId",
+    { preHandler: authenticate },
+    async (request, reply) => {
+      const { reportId } = reportParams.parse(request.params);
+      const result = await service.detail(request.auth!, reportId);
+      return result ?? reply.code(404).send({
+        error: "report_not_found",
+        message: "报告不存在。",
+      });
+    },
+  );
+  app.post(
+    "/api/ai/reports",
+    { preHandler: [app.csrfProtection, authenticate] },
+    async (request, reply) => {
+      const input = requestSchema.parse(request.body);
+      if (
+        input.scope === "team" &&
+        (!request.auth ||
+          !isAuthorized(request.auth.grants, "ai.team_analysis", {
+            scopeKind: "organization",
+          }))
+      ) {
+        return reply.code(403).send({
+          error: "forbidden",
+          message: "当前账号没有组织级团队 AI 分析权限。",
+        });
+      }
+      try {
+        const job = await service.requestReport(
+          request.auth!,
+          input.scope,
+          new Date(input.from),
+          new Date(input.to),
+        );
+        return reply.code(202).send({ job });
+      } catch (error) {
+        if (error instanceof AiUnavailableError) {
+          return reply.code(503).send({
+            error: "ai_unavailable",
+            message: error.message,
+          });
+        }
+        if (error instanceof AiQuotaExceededError) {
+          return reply.code(429).send({
+            error: "ai_quota_exceeded",
+            message: error.message,
+          });
+        }
+        throw error;
+      }
+    },
+  );
+  app.get(
+    "/api/ai/settings",
+    { preHandler: authenticate },
+    async (request, reply) => {
+      try {
+        return await configuration.getSettings(request.auth!);
+      } catch (error) {
+        return sendConfigurationError(error, reply);
+      }
+    },
+  );
+  app.put(
+    "/api/ai/settings",
+    { preHandler: [app.csrfProtection, authenticate] },
+    async (request, reply) => {
+      const input = updateSettingsSchema.parse(request.body);
+      try {
+        await configuration.assertOwner(request.auth!);
+        await authService.verifySensitiveAction(
+          request.auth!,
+          input.password,
+          input.totpCode,
+        );
+        return await configuration.updateSettings(request.auth!, input);
+      } catch (error) {
+        return sendConfigurationError(error, reply);
+      }
+    },
+  );
 }

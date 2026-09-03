@@ -99,6 +99,7 @@ export class AnalyticsService {
           access,
           gte(workSessions.startAt, from),
           lt(workSessions.startAt, to),
+          eq(workSessions.recordKind, "fact"),
           isNull(workSessions.deletedAt),
         ),
       )
@@ -173,6 +174,7 @@ export class AnalyticsService {
         and(
           access,
           eq(workSessions.visibility, "project_visible"),
+          eq(workSessions.recordKind, "fact"),
           isNull(workSessions.deletedAt),
         ),
       )

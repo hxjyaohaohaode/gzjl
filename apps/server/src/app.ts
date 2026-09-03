@@ -11,14 +11,17 @@ import websocket from "@fastify/websocket";
 import Fastify, { type FastifyInstance } from "fastify";
 import { ZodError } from "zod";
 import type { Database } from "@workbench/db";
+import { outboxEvents } from "@workbench/db/schema";
 
 import { registerAiRoutes } from "./ai/routes.js";
+import { AiConfigurationService } from "./ai/configuration.js";
 import { AiService } from "./ai/service.js";
 import { registerApprovalRoutes } from "./approvals/routes.js";
 import { ApprovalService } from "./approvals/service.js";
 import { registerAnalyticsRoutes } from "./analytics/routes.js";
 import { AnalyticsService } from "./analytics/service.js";
 import { createAuthenticationPreHandler, registerAuthRoutes } from "./auth/routes.js";
+import { AuthMailer } from "./auth/mailer.js";
 import { AuthService } from "./auth/service.js";
 import type { ServerConfig } from "./config.js";
 import { registerEvidenceRoutes } from "./evidence/routes.js";
@@ -37,6 +40,8 @@ import { SetupService } from "./setup/service.js";
 import { registerRealtimeRoutes } from "./realtime/routes.js";
 import { registerTimerRoutes } from "./timer/routes.js";
 import { TimerService } from "./timer/service.js";
+import { registerWorkCorrectionRoutes } from "./work/correction-routes.js";
+import { WorkCorrectionService } from "./work/correction-service.js";
 import { registerWorkRoutes } from "./work/routes.js";
 import { WorkSessionService } from "./work/service.js";
 
@@ -151,67 +156,118 @@ export async function buildApp({
       config.PASSWORD_RESET_TTL_SECONDS,
       config.SESSION_SECRET,
     );
+    /**
+     * Every successful authenticated write emits a privacy-safe organization
+     * invalidation event. The browser never receives request bodies or record
+     * contents, only a signal to refetch the facts it is authorized to read.
+     * Services that already emit a more specific event may coexist with this;
+     * query invalidation is idempotent.
+     */
+    app.addHook("onSend", async (request, reply, payload) => {
+      const method = request.method.toUpperCase();
+      const isWrite = ["POST", "PUT", "PATCH", "DELETE"].includes(method);
+      const path = request.url.split("?")[0] ?? request.url;
+      const auth = request.auth;
+      if (
+        !isWrite ||
+        !auth ||
+        reply.statusCode < 200 ||
+        reply.statusCode >= 300 ||
+        !path.startsWith("/api/") ||
+        path.startsWith("/api/auth/") ||
+        path === "/api/realtime"
+      ) {
+        return payload;
+      }
+      try {
+        await database.insert(outboxEvents).values({
+          organizationId: auth.organizationId,
+          eventType: "organization.data.changed",
+          entityType: "organization_sync",
+          entityId: auth.membershipId,
+          entityVersion: 1,
+          payload: { method, route: request.routeOptions.url ?? path },
+        });
+      } catch (error) {
+        // The business mutation has already committed. Do not turn a durable
+        // user action into a confusing 5xx merely because a follower needs to
+        // fall back to normal query refresh after an outbox transient failure.
+        request.log.error({ error, path }, "realtime invalidation enqueue failed");
+      }
+      return payload;
+    });
     await registerAuthRoutes(
       app,
       authService,
       config,
     );
+    const authenticate = createAuthenticationPreHandler(authService, config);
+    const workService = new WorkSessionService(database);
     await registerWorkRoutes(
       app,
-      new WorkSessionService(database),
-      createAuthenticationPreHandler(authService, config),
+      workService,
+      authenticate,
+    );
+    await registerWorkCorrectionRoutes(
+      app,
+      new WorkCorrectionService(database),
+      authenticate,
     );
     await registerTimerRoutes(
       app,
       new TimerService(database),
-      createAuthenticationPreHandler(authService, config),
+      authenticate,
     );
     await registerProjectRoutes(
       app,
       new ProjectService(database),
-      createAuthenticationPreHandler(authService, config),
+      authenticate,
     );
     await registerApprovalRoutes(
       app,
       new ApprovalService(database),
-      createAuthenticationPreHandler(authService, config),
+      authenticate,
     );
     await registerPayrollRoutes(
       app,
       new PayrollService(database),
-      createAuthenticationPreHandler(authService, config),
+      authenticate,
     );
     const analyticsService = new AnalyticsService(database);
     await registerAnalyticsRoutes(
       app,
       analyticsService,
-      createAuthenticationPreHandler(authService, config),
+      authenticate,
     );
     await registerOrganizationRoutes(
       app,
-      new OrganizationService(database),
-      createAuthenticationPreHandler(authService, config),
+      new OrganizationService(database, new AuthMailer(config)),
+      authService,
+      authenticate,
     );
+    const aiConfigurationService = new AiConfigurationService(database, config);
     await registerAiRoutes(
       app,
-      new AiService(database, analyticsService, config),
-      createAuthenticationPreHandler(authService, config),
+      new AiService(database, analyticsService, aiConfigurationService),
+      aiConfigurationService,
+      authService,
+      authenticate,
     );
     await registerNotificationRoutes(
       app,
       database,
-      createAuthenticationPreHandler(authService, config),
+      authenticate,
     );
     await registerRealtimeRoutes(app, database, authService, config);
     await registerOperationsRoutes(
       app,
-      new OperationsService(database, analyticsService, new WorkSessionService(database)),
-      createAuthenticationPreHandler(authService, config),
+      new OperationsService(database, analyticsService, workService),
+      authenticate,
     );
     await registerEvidenceRoutes(
       app,
       new EvidenceService(database, config),
-      createAuthenticationPreHandler(authService, config),
+      authenticate,
     );
   }
 

@@ -18,6 +18,37 @@ export interface WorkDuration {
   netSeconds: number;
 }
 
+/**
+ * These flags intentionally do not reject a factual record.  A very short
+ * activity or a long on-call/incident window can be legitimate, but both need
+ * a human reviewer to see the exception before it affects an approval or a
+ * payroll lock.
+ */
+export const workDurationReviewRules = {
+  minimumNetSeconds: 60,
+  maximumGrossSecondsWithoutReview: 16 * 60 * 60,
+} as const;
+
+export type WorkDurationAnomalyFlag =
+  | "net_duration_under_60_seconds"
+  | "gross_duration_over_16_hours";
+
+export function workDurationAnomalyFlags(
+  duration: WorkDuration,
+): WorkDurationAnomalyFlag[] {
+  const flags: WorkDurationAnomalyFlag[] = [];
+  if (duration.netSeconds < workDurationReviewRules.minimumNetSeconds) {
+    flags.push("net_duration_under_60_seconds");
+  }
+  if (
+    duration.grossSeconds >
+    workDurationReviewRules.maximumGrossSecondsWithoutReview
+  ) {
+    flags.push("gross_duration_over_16_hours");
+  }
+  return flags;
+}
+
 function secondsBetween(startAt: Date, endAt: Date): number {
   return Math.floor((endAt.getTime() - startAt.getTime()) / 1_000);
 }

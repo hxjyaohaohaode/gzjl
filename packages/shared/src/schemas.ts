@@ -30,6 +30,7 @@ export const createWorkSessionSchema = z
     blockers: z.string().trim().max(5_000).default(""),
     nextStep: z.string().trim().max(5_000).default(""),
     primaryProjectNodeId: uuidSchema.nullable().default(null),
+    projectNodeIds: z.array(uuidSchema).max(32).default([]),
     visibility: z.enum(workSessionVisibilities).default("management_only"),
     parallelWork: z.boolean().default(false),
     breaks: z
@@ -39,16 +40,44 @@ export const createWorkSessionSchema = z
           endAt: isoDateTimeSchema,
         }),
       )
+      .max(100, "单条工作记录最多包含 100 段休息。")
       .default([]),
   })
-  .superRefine(({ startAt, endAt }, context) => {
-    if (new Date(endAt) <= new Date(startAt)) {
-      context.addIssue({
-        code: "custom",
-        path: ["endAt"],
-        message: "结束时间必须晚于开始时间",
-      });
-    }
-  });
+  .superRefine(
+    ({ startAt, endAt, primaryProjectNodeId, projectNodeIds }, context) => {
+      if (new Date(endAt) <= new Date(startAt)) {
+        context.addIssue({
+          code: "custom",
+          path: ["endAt"],
+          message: "结束时间必须晚于开始时间",
+        });
+      }
+      if (new Set(projectNodeIds).size !== projectNodeIds.length) {
+        context.addIssue({
+          code: "custom",
+          path: ["projectNodeIds"],
+          message: "关联项目节点不能重复。",
+        });
+      }
+      if (projectNodeIds.length > 0 && !primaryProjectNodeId) {
+        context.addIssue({
+          code: "custom",
+          path: ["primaryProjectNodeId"],
+          message: "关联项目节点时必须指定主项目节点。",
+        });
+      }
+      if (
+        primaryProjectNodeId &&
+        projectNodeIds.length > 0 &&
+        !projectNodeIds.includes(primaryProjectNodeId)
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: ["primaryProjectNodeId"],
+          message: "主项目节点必须包含在关联项目节点中。",
+        });
+      }
+    },
+  );
 
 export type CreateWorkSessionInput = z.infer<typeof createWorkSessionSchema>;

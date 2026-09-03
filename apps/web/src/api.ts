@@ -63,7 +63,13 @@ export interface PermissionGrant {
 }
 
 export interface Me {
-  user: { id: string; membershipId: string; organizationId: string; displayName: string };
+  user: {
+    id: string;
+    membershipId: string;
+    organizationId: string;
+    displayName: string;
+    isOwner: boolean;
+  };
   permissions: PermissionGrant[];
 }
 

@@ -4,13 +4,18 @@ import { and, eq, gt, isNull, lt, sql } from "drizzle-orm";
 import { PgBoss } from "pg-boss";
 import pino from "pino";
 import { z } from "zod";
-import { createDatabase } from "@workbench/db";
+import {
+  createDatabase,
+  decryptSecret,
+  SecretCipherError,
+} from "@workbench/db";
 import {
   aiJobs,
   aiReports,
   aiReportSources,
   notifications,
   notificationPreferences,
+  organizationAiSettings,
   outboxEvents,
   payPeriods,
   reminderRules,
@@ -25,8 +30,10 @@ const config = z.object({
   LOG_LEVEL: z.enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"]).default("info"),
   ZHIPU_API_KEY: z.string().min(1).optional(),
   ZHIPU_API_BASE_URL: z.url().default("https://open.bigmodel.cn/api/paas/v4"),
-  ZHIPU_MODEL: z.string().min(1).default("glm-5.3-flash"),
-  AI_REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().default(60_000),
+  ZHIPU_MODEL: z.string().min(1).default("glm-4.7-flash"),
+  AI_ENABLED: z.stringbool().default(false),
+  AI_CONFIG_ENCRYPTION_KEY: z.string().min(32).optional(),
+  AI_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(5_000).max(180_000).default(60_000),
 }).parse(process.env);
 
 const logger = pino({ level: config.LOG_LEVEL, redact: ["DATABASE_URL", "apiKey", "token", "password", "req.headers.authorization"] });
@@ -47,6 +54,47 @@ function parseAiJson(content: string) {
   return aiOutputSchema.parse(JSON.parse(cleaned));
 }
 
+async function resolveAiProvider(organizationId: string) {
+  const [settings] = await database.db
+    .select()
+    .from(organizationAiSettings)
+    .where(eq(organizationAiSettings.organizationId, organizationId))
+    .limit(1);
+  if (settings) {
+    if (!settings.enabled || !settings.apiKeyCiphertext) {
+      throw new Error("Organization AI is disabled or has no configured key");
+    }
+    if (!config.AI_CONFIG_ENCRYPTION_KEY) {
+      throw new Error("AI_CONFIG_ENCRYPTION_KEY is not configured in the worker");
+    }
+    try {
+      return {
+        baseUrl: settings.baseUrl.replace(/\/$/, ""),
+        apiKey: decryptSecret(
+          settings.apiKeyCiphertext,
+          config.AI_CONFIG_ENCRYPTION_KEY,
+        ),
+        model: settings.model,
+      };
+    } catch (error) {
+      if (error instanceof SecretCipherError) {
+        throw new Error("Organization AI key cannot be decrypted", {
+          cause: error,
+        });
+      }
+      throw error;
+    }
+  }
+  if (!config.AI_ENABLED || !config.ZHIPU_API_KEY) {
+    throw new Error("No organization or deployment-default AI key is configured");
+  }
+  return {
+    baseUrl: config.ZHIPU_API_BASE_URL.replace(/\/$/, ""),
+    apiKey: config.ZHIPU_API_KEY,
+    model: config.ZHIPU_MODEL,
+  };
+}
+
 async function inAppNotificationEnabled(membershipId: string, category: string): Promise<boolean> {
   const [preference] = await database.db.select().from(notificationPreferences).where(and(eq(notificationPreferences.membershipId, membershipId), eq(notificationPreferences.category, category))).limit(1);
   if (!preference) return true;
@@ -54,10 +102,36 @@ async function inAppNotificationEnabled(membershipId: string, category: string):
   return preference.inAppEnabled;
 }
 
+async function enqueueAiJob(jobId: string): Promise<void> {
+  const [job] = await database.db
+    .select({
+      id: aiJobs.id,
+      status: aiJobs.status,
+      maxAttempts: aiJobs.maxAttempts,
+    })
+    .from(aiJobs)
+    .where(eq(aiJobs.id, jobId))
+    .limit(1);
+  if (!job || job.status === "completed" || job.status === "cancelled") return;
+  await boss.send(
+    "ai-generate-report",
+    { jobId: job.id },
+    {
+      singletonKey: job.id,
+      retryLimit: Math.max(0, job.maxAttempts - 1),
+      retryDelay: 30,
+    },
+  );
+}
+
 async function dispatchAiJobs(): Promise<void> {
-  const queued = await database.db.select({ id: aiJobs.id }).from(aiJobs).where(eq(aiJobs.status, "queued")).limit(50);
+  const queued = await database.db
+    .select({ id: aiJobs.id })
+    .from(aiJobs)
+    .where(eq(aiJobs.status, "queued"))
+    .limit(50);
   for (const job of queued) {
-    await boss.send("ai-generate-report", { jobId: job.id }, { singletonKey: job.id, retryLimit: 3, retryDelay: 30 });
+    await enqueueAiJob(job.id);
   }
 }
 
@@ -67,21 +141,25 @@ async function processAiJob(jobId: string): Promise<void> {
   const attempt = job.attempt + 1;
   await database.db.update(aiJobs).set({ status: "running", attempt, startedAt: new Date(), errorSummary: null }).where(eq(aiJobs.id, job.id));
   try {
-    if (!config.ZHIPU_API_KEY) throw new Error("ZHIPU_API_KEY is not configured");
+    const provider = await resolveAiProvider(job.organizationId);
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), config.AI_REQUEST_TIMEOUT_MS);
     let response: Response;
     try {
-      response = await fetch(`${config.ZHIPU_API_BASE_URL.replace(/\/$/, "")}/chat/completions`, {
+      response = await fetch(`${provider.baseUrl}/chat/completions`, {
         method: "POST",
-        headers: { authorization: `Bearer ${config.ZHIPU_API_KEY}`, "content-type": "application/json" },
+        headers: { authorization: `Bearer ${provider.apiKey}`, "content-type": "application/json" },
         signal: controller.signal,
         body: JSON.stringify({
-          model: job.model || config.ZHIPU_MODEL,
+          model: job.model || provider.model,
           temperature: 0.2,
-          response_format: { type: "json_object" },
+          max_tokens: job.maxOutputTokens,
+          // An Owner may choose any OpenAI-compatible provider. `response_format`
+          // is not implemented consistently across that ecosystem, so use the
+          // portable strict prompt below and validate the returned JSON locally
+          // instead of turning a provider dialect difference into a paid 400.
           messages: [
-            { role: "system", content: "你是一个自小便受相关专业教育且极其严谨极其认真极其注重细节与变化的资深工作分析助理。你只能依据输入的聚合事实生成报告，不能推测个人品格，不编造数据。强制要求输出严格 JSON：title、summary、highlights、risks、suggestions。风险与建议必须严苛准确清楚区分事实和解释。你必须以极其严苛乃至完全变态的高严苛程度查看用户的所有全部完整数据，深度分析所有相关数据之间的显性联系以及各类可能出现的隐性联系，深度整理分析对比预测用户完整的数据并提供非常专业且个性化的智能服务与建议，需要深度考虑用户可能出现的各类显性需求以及各类在未来的工作之中可能出现的隐性需求。严禁你凭空捏造任何不能通过已有数据分析到的人格性格工作等各方面的信息，你所有的输出内容都必须有完整的证据链且证据链的每一个证据节点都必须是真实的不能是你的幻觉，必须指出其完整的出处。强制要求你在输出之前对自己的内容进行不低于两轮的核对与检查，确保无误之后才能够输出。" },
+            { role: "system", content: "你是工作事实分析助手。只能依据输入 JSON 的已授权聚合事实，不能编造数据、推测人格或把建议表述成事实。只输出一个可解析的 JSON 对象，不能输出 Markdown、代码围栏或对象外文字。对象必须且只能包含 title、summary、highlights、risks、suggestions；每一条风险和建议都应说明所依据的可见事实；内容简洁、可执行、避免重复。" },
             { role: "user", content: JSON.stringify(job.sourceSummary) },
           ],
         }),
@@ -90,7 +168,11 @@ async function processAiJob(jobId: string): Promise<void> {
       clearTimeout(timeout);
     }
     if (!response.ok) throw new Error(`AI provider returned ${response.status}`);
-    const payload = (await response.json()) as { choices?: Array<{ message?: { content?: string } }> };
+    const payload = (await response.json()) as {
+      id?: string;
+      choices?: Array<{ message?: { content?: string } }>;
+      usage?: { prompt_tokens?: number; completion_tokens?: number };
+    };
     const content = payload.choices?.[0]?.message?.content;
     if (!content) throw new Error("AI provider returned no content");
     const output = parseAiJson(content);
@@ -100,13 +182,19 @@ async function processAiJob(jobId: string): Promise<void> {
       if (report && sourceSummary.sources?.length) {
         await tx.insert(aiReportSources).values(sourceSummary.sources.map((source) => ({ aiReportId: report.id, entityType: source.entityType, entityId: source.entityId, entityVersion: source.entityVersion, label: source.label }))).onConflictDoNothing();
       }
-      await tx.update(aiJobs).set({ status: "completed", completedAt: new Date(), errorSummary: null }).where(eq(aiJobs.id, job.id));
+      await tx.update(aiJobs).set({ status: "completed", completedAt: new Date(), errorSummary: null, inputTokens: payload.usage?.prompt_tokens ?? null, outputTokens: payload.usage?.completion_tokens ?? null, providerRequestId: payload.id ?? null }).where(eq(aiJobs.id, job.id));
+      await tx.insert(outboxEvents).values({ organizationId: job.organizationId, eventType: "ai.report.completed", entityType: "ai_job", entityId: job.id, entityVersion: attempt, payload: { jobId: job.id, reportId: report?.id ?? null } });
       if (await inAppNotificationEnabled(job.requestedBy, "ai_report_ready")) await tx.insert(notifications).values({ organizationId: job.organizationId, recipientMembershipId: job.requestedBy, category: "ai_report_ready", severity: "info", title: "AI 工作洞察已生成", body: output.title, actionUrl: report ? `/ai?report=${report.id}` : "/ai", dedupeKey: `ai-report:${job.id}` }).onConflictDoNothing();
     });
   } catch (error) {
     const finalFailure = attempt >= job.maxAttempts;
     const errorSummary = error instanceof Error ? error.message.slice(0, 2_000) : "Unknown AI error";
-    await database.db.update(aiJobs).set({ status: finalFailure ? "failed" : "queued", errorSummary, completedAt: finalFailure ? new Date() : null }).where(eq(aiJobs.id, job.id));
+    await database.db.transaction(async (tx) => {
+      await tx.update(aiJobs).set({ status: finalFailure ? "failed" : "queued", errorSummary, completedAt: finalFailure ? new Date() : null }).where(eq(aiJobs.id, job.id));
+      if (finalFailure) {
+        await tx.insert(outboxEvents).values({ organizationId: job.organizationId, eventType: "ai.report.failed", entityType: "ai_job", entityId: job.id, entityVersion: attempt, payload: { jobId: job.id } });
+      }
+    });
     if (finalFailure) {
       if (await inAppNotificationEnabled(job.requestedBy, "ai_report_failed")) await database.db.insert(notifications).values({ organizationId: job.organizationId, recipientMembershipId: job.requestedBy, category: "ai_report_failed", severity: "warning", title: "AI 报告生成失败", body: "事实数据未受影响，可以稍后重试生成报告。", actionUrl: "/ai", dedupeKey: `ai-report-failed:${job.id}` }).onConflictDoNothing();
     }
@@ -130,7 +218,18 @@ async function evaluateReminders(): Promise<void> {
       const days = typeof conditions.daysBeforeCutoff === "number" ? conditions.daysBeforeCutoff : 3;
       const periods = await database.db.select().from(payPeriods).where(and(eq(payPeriods.organizationId, rule.organizationId), eq(payPeriods.status, "open"), gt(payPeriods.cutoffAt, now), lt(payPeriods.cutoffAt, new Date(now.getTime() + days * 86_400_000))));
       for (const period of periods) {
-        const pending = await database.db.select({ membershipId: workSessions.membershipId }).from(workSessions).where(and(eq(workSessions.organizationId, rule.organizationId), eq(workSessions.approvalStatus, "pending_review"), lt(workSessions.startAt, period.endsAt), gt(workSessions.endAt, period.startsAt)));
+        const pending = await database.db
+          .select({ membershipId: workSessions.membershipId })
+          .from(workSessions)
+          .where(
+            and(
+              eq(workSessions.organizationId, rule.organizationId),
+              eq(workSessions.recordKind, "fact"),
+              eq(workSessions.approvalStatus, "pending_review"),
+              lt(workSessions.startAt, period.endsAt),
+              gt(workSessions.endAt, period.startsAt),
+            ),
+          );
         for (const item of pending) {
           if (await inAppNotificationEnabled(item.membershipId, rule.category)) await database.db.insert(notifications).values({ organizationId: rule.organizationId, recipientMembershipId: item.membershipId, reminderRuleId: rule.id, category: rule.category, severity: rule.severity, title: "结算截止前仍有待审工时", body: `${period.name} 即将截止，请联系审核人处理。`, actionUrl: "/work", dedupeKey: `payroll-cutoff:${period.id}:${item.membershipId}` }).onConflictDoNothing();
         }
@@ -143,7 +242,7 @@ async function publishOutbox(): Promise<void> {
   const events = await database.db.select().from(outboxEvents).where(isNull(outboxEvents.publishedAt)).limit(100);
   for (const event of events) {
     if (event.eventType === "ai.job.queued") {
-      await boss.send("ai-generate-report", { jobId: event.entityId }, { singletonKey: event.entityId, retryLimit: 3, retryDelay: 30 });
+      await enqueueAiJob(event.entityId);
     }
     await database.db.update(outboxEvents).set({ publishedAt: new Date(), attempt: sql`${outboxEvents.attempt} + 1` }).where(eq(outboxEvents.id, event.id));
   }

@@ -19,13 +19,15 @@ const config: ServerConfig = {
   DATABASE_SSL: false,
   AI_ENABLED: false,
   ZHIPU_API_BASE_URL: "https://open.bigmodel.cn/api/paas/v4",
-  ZHIPU_MODEL: "glm-5.3-flash",
+  ZHIPU_MODEL: "glm-4.7-flash",
+  AI_REQUEST_TIMEOUT_MS: 60_000,
   AI_MAX_RETRIES: 3,
   S3_REGION: "auto",
   S3_FORCE_PATH_STYLE: false,
   ATTACHMENT_MAX_BYTES: 20 * 1024 * 1024,
   SMTP_PORT: 587,
   SMTP_SECURE: false,
+  SMS_PROVIDER: "disabled",
 };
 
 const apps: Awaited<ReturnType<typeof buildApp>>[] = [];

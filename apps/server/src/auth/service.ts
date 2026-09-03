@@ -3,6 +3,7 @@ import type { Database } from "@workbench/db";
 import {
   memberRoles,
   auditLogs,
+  organizationOwners,
   orgMemberships,
   rolePermissions,
   sessions,
@@ -32,12 +33,15 @@ import {
   encryptTotpSecret,
   verifyTotp,
 } from "./totp.js";
+import type { CredentialDeliveryKind } from "./mailer.js";
 
 export interface AuthContext {
   userId: string;
   membershipId: string;
   organizationId: string;
   displayName: string;
+  /** The unique organization owner; used only for owner-gated UI affordances. */
+  isOwner: boolean;
   grants: PermissionGrant[];
 }
 
@@ -98,18 +102,23 @@ export class AuthService {
     private readonly sessionSecret: string,
   ) {}
 
-  async requestPasswordReset(identifier: string) {
+  async requestPasswordReset(
+    identifier: string,
+    assertDeliveryConfigured?: (kind: CredentialDeliveryKind) => void,
+  ) {
     const normalizedIdentifier = normalizeLoginIdentifier(identifier);
     const [account] = await this.db.select({
       credentialId: userCredentials.id,
-      email: userCredentials.normalizedIdentifier,
+      identifier: userCredentials.normalizedIdentifier,
+      kind: userCredentials.kind,
       membershipId: orgMemberships.id,
       organizationId: orgMemberships.organizationId,
       userId: users.id,
       userStatus: users.status,
       membershipStatus: orgMemberships.status,
-    }).from(userCredentials).innerJoin(users, eq(users.id, userCredentials.userId)).innerJoin(orgMemberships, eq(orgMemberships.userId, users.id)).where(and(eq(userCredentials.normalizedIdentifier, normalizedIdentifier), eq(userCredentials.kind, "email"))).limit(1);
+    }).from(userCredentials).innerJoin(users, eq(users.id, userCredentials.userId)).innerJoin(orgMemberships, eq(orgMemberships.userId, users.id)).where(eq(userCredentials.normalizedIdentifier, normalizedIdentifier)).limit(1);
     if (!account || account.userStatus !== "active" || account.membershipStatus !== "active") return null;
+    assertDeliveryConfigured?.(account.kind);
     const token = createOpaqueToken();
     const expiresAt = new Date(Date.now() + this.passwordResetTtlSeconds * 1_000);
     await this.db.transaction(async (tx) => {
@@ -117,7 +126,7 @@ export class AuthService {
       await tx.insert(verificationTokens).values({ credentialId: account.credentialId, purpose: "password_reset", tokenHash: hashOpaqueToken(token), expiresAt });
       await tx.insert(auditLogs).values({ organizationId: account.organizationId, actorMembershipId: account.membershipId, action: "auth.password_reset_requested", entityType: "user", entityId: account.userId });
     });
-    return { email: account.email, token, expiresAt };
+    return { identifier: account.identifier, kind: account.kind, token, expiresAt };
   }
 
   async resetPassword(token: string, password: string) {
@@ -278,6 +287,61 @@ export class AuthService {
     return { enabled: Boolean(factor?.enabledAt), pending: Boolean(factor && !factor.enabledAt) };
   }
 
+  /**
+   * Re-establishes intent immediately before a high-risk action. A valid
+   * session is not enough for an irreversible ownership change: password is
+   * always required and an enabled TOTP factor is consumed as well.
+   */
+  async verifySensitiveAction(
+    context: AuthContext,
+    password: string,
+    code?: string,
+  ) {
+    const now = new Date();
+    return this.db.transaction(async (tx) => {
+      const [credential] = await tx
+        .select({ passwordHash: userCredentials.passwordHash })
+        .from(userCredentials)
+        .where(eq(userCredentials.userId, context.userId))
+        .for("update")
+        .limit(1);
+      if (!credential || !(await verifyPassword(credential.passwordHash, password))) {
+        throw new InvalidCredentialsError();
+      }
+
+      const [factor] = await tx
+        .select()
+        .from(userTotpFactors)
+        .where(eq(userTotpFactors.userId, context.userId))
+        .for("update")
+        .limit(1);
+      if (factor?.enabledAt) {
+        const secret = decryptTotpSecret(factor.secretCiphertext, this.sessionSecret);
+        const counter = secret ? verifyTotp(secret, code ?? "", now) : null;
+        if (
+          counter === null ||
+          (factor.lastUsedCounter !== null && counter <= factor.lastUsedCounter)
+        ) {
+          throw new TotpCodeError();
+        }
+        await tx
+          .update(userTotpFactors)
+          .set({ lastUsedCounter: counter, updatedAt: now })
+          .where(eq(userTotpFactors.userId, context.userId));
+      }
+
+      await tx.insert(auditLogs).values({
+        organizationId: context.organizationId,
+        actorMembershipId: context.membershipId,
+        action: "auth.sensitive_action_verified",
+        entityType: "user",
+        entityId: context.userId,
+        after: { mfaVerified: Boolean(factor?.enabledAt) },
+      });
+      return { verifiedAt: now, mfaVerified: Boolean(factor?.enabledAt) };
+    });
+  }
+
   async beginTotpSetup(context: AuthContext) {
     const [existing] = await this.db.select({ enabledAt: userTotpFactors.enabledAt }).from(userTotpFactors).where(eq(userTotpFactors.userId, context.userId)).limit(1);
     if (existing?.enabledAt) throw new TotpSetupError("双因素认证已经启用。请先验证后再撤销。");
@@ -359,21 +423,35 @@ export class AuthService {
       .where(and(eq(sessions.tokenHash, hashOpaqueToken(token)), isNull(sessions.revokedAt)));
   }
 
-  private async createContext(base: Omit<AuthContext, "grants">): Promise<AuthContext> {
-    const rows = await this.db
-      .select({
-        permission: rolePermissions.permissionCode,
-        scopeKind: memberRoles.scopeKind,
-        scopeId: memberRoles.scopeId,
-      })
-      .from(memberRoles)
-      .innerJoin(rolePermissions, eq(rolePermissions.roleId, memberRoles.roleId))
-      .where(
-        and(
-          eq(memberRoles.membershipId, base.membershipId),
-          or(isNull(memberRoles.expiresAt), gt(memberRoles.expiresAt, new Date())),
+  private async createContext(
+    base: Omit<AuthContext, "grants" | "isOwner">,
+  ): Promise<AuthContext> {
+    const [rows, owners] = await Promise.all([
+      this.db
+        .select({
+          permission: rolePermissions.permissionCode,
+          scopeKind: memberRoles.scopeKind,
+          scopeId: memberRoles.scopeId,
+        })
+        .from(memberRoles)
+        .innerJoin(rolePermissions, eq(rolePermissions.roleId, memberRoles.roleId))
+        .where(
+          and(
+            eq(memberRoles.membershipId, base.membershipId),
+            or(isNull(memberRoles.expiresAt), gt(memberRoles.expiresAt, new Date())),
+          ),
         ),
-      );
+      this.db
+        .select({ membershipId: organizationOwners.membershipId })
+        .from(organizationOwners)
+        .where(
+          and(
+            eq(organizationOwners.organizationId, base.organizationId),
+            eq(organizationOwners.membershipId, base.membershipId),
+          ),
+        )
+        .limit(1),
+    ]);
 
     const permissionSet = new Set<string>(permissions);
     const grants = rows
@@ -384,7 +462,7 @@ export class AuthService {
         scopeId: row.scopeId,
       }));
 
-    return { ...base, grants };
+    return { ...base, isOwner: Boolean(owners[0]), grants };
   }
 
   async revokeAllOtherSessions(userId: string, currentToken: string): Promise<number> {

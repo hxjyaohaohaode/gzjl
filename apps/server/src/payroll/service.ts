@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import { and, desc, eq, gt, inArray, isNull, lt, or } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import type { Database } from "@workbench/db";
 import {
   auditLogs,
@@ -15,7 +15,9 @@ import {
   payslips,
   rateRules,
   workBreaks,
+  workSessionProjectLinks,
   workSessions,
+  workSessionVersions,
 } from "@workbench/db/schema";
 import {
   addDecimalAmounts,
@@ -184,6 +186,7 @@ export class PayrollService {
           eq(workSessions.organizationId, actor.organizationId),
           lt(workSessions.startAt, period.endsAt),
           gt(workSessions.endAt, period.startsAt),
+          eq(workSessions.recordKind, "fact"),
           inArray(workSessions.approvalStatus, ["approved", "pending_review"]),
           isNull(workSessions.deletedAt),
         ),
@@ -500,17 +503,64 @@ export class PayrollService {
         .update(payPeriods)
         .set({ status: "locked", settledAt, lockedAt: settledAt, updatedAt: settledAt })
         .where(eq(payPeriods.id, record.period.id));
-      await tx
+      const lockedSessions = await tx
         .update(workSessions)
-        .set({ approvalStatus: "locked", lockedAt: settledAt, updatedAt: settledAt })
+        .set({
+          approvalStatus: "locked",
+          lockedAt: settledAt,
+          updatedAt: settledAt,
+          version: sql`${workSessions.version} + 1`,
+        })
         .where(
           and(
             eq(workSessions.organizationId, actor.organizationId),
             eq(workSessions.approvalStatus, "approved"),
+            eq(workSessions.recordKind, "fact"),
             lt(workSessions.startAt, record.period.endsAt),
             gt(workSessions.endAt, record.period.startsAt),
           ),
+        )
+        .returning();
+      if (lockedSessions.length > 0) {
+        const sessionIds = lockedSessions.map((session) => session.id);
+        const [breaks, projectLinks] = await Promise.all([
+          tx
+            .select()
+            .from(workBreaks)
+            .where(inArray(workBreaks.workSessionId, sessionIds)),
+          tx
+            .select()
+            .from(workSessionProjectLinks)
+            .where(inArray(workSessionProjectLinks.workSessionId, sessionIds)),
+        ]);
+        const breaksBySession = new Map<string, typeof breaks>();
+        for (const entry of breaks) {
+          breaksBySession.set(entry.workSessionId, [
+            ...(breaksBySession.get(entry.workSessionId) ?? []),
+            entry,
+          ]);
+        }
+        const linksBySession = new Map<string, typeof projectLinks>();
+        for (const entry of projectLinks) {
+          linksBySession.set(entry.workSessionId, [
+            ...(linksBySession.get(entry.workSessionId) ?? []),
+            entry,
+          ]);
+        }
+        await tx.insert(workSessionVersions).values(
+          lockedSessions.map((session) => ({
+            workSessionId: session.id,
+            version: session.version,
+            snapshot: {
+              ...session,
+              breaks: breaksBySession.get(session.id) ?? [],
+              projectLinks: linksBySession.get(session.id) ?? [],
+            },
+            changeReason: "payroll_settled_locked",
+            changedBy: actor.membershipId,
+          })),
         );
+      }
       const items = await tx
         .select()
         .from(payrollItems)
@@ -534,7 +584,11 @@ export class PayrollService {
         action: "payroll.settled",
         entityType: "payroll_run",
         entityId: run.id,
-        after: { settledAt, itemCount: items.length },
+        after: {
+          settledAt,
+          itemCount: items.length,
+          lockedWorkSessionCount: lockedSessions.length,
+        },
       });
       return run;
     });

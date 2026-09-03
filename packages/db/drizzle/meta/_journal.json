@@ -22,6 +22,20 @@
       "when": 1788267430267,
       "tag": "0002_happy_import_permission",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1788373244731,
+      "tag": "0003_keen_thor_girl",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1788380848791,
+      "tag": "0004_tense_madripoor",
+      "breakpoints": true
     }
   ]
 }

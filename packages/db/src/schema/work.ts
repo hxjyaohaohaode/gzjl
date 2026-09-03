@@ -116,6 +116,11 @@ export const workSessions = pgTable(
     netSeconds: bigint("net_seconds", { mode: "number" }).notNull(),
     billableSeconds: bigint("billable_seconds", { mode: "number" }),
     source: workSessionSourceEnum("source").notNull(),
+    // A plan deliberately shares the durable version/audit infrastructure
+    // with a work session, but it is never a work fact until explicitly
+    // realized. All analytics, payroll, approval and evidence queries must
+    // filter to `fact` before using these rows as business evidence.
+    recordKind: text("record_kind").notNull().default("fact"),
     content: text("content").notNull(),
     result: text("result").notNull().default(""),
     blockers: text("blockers").notNull().default(""),
@@ -142,10 +147,19 @@ export const workSessions = pgTable(
   },
   (table) => [
     index("work_sessions_member_start_idx").on(table.membershipId, table.startAt),
+    index("work_sessions_member_kind_start_idx").on(
+      table.membershipId,
+      table.recordKind,
+      table.startAt,
+    ),
     index("work_sessions_org_approval_idx").on(table.organizationId, table.approvalStatus),
     index("work_sessions_primary_node_idx").on(table.primaryProjectNodeId),
     check("work_sessions_time_order_check", sql`${table.endAt} > ${table.startAt}`),
     check("work_sessions_gross_nonnegative_check", sql`${table.grossSeconds} > 0`),
+    check(
+      "work_sessions_record_kind_check",
+      sql`${table.recordKind} in ('fact', 'plan')`,
+    ),
     check(
       "work_sessions_duration_consistency_check",
       sql`${table.netSeconds} = ${table.grossSeconds} - ${table.breakSeconds}`,
