@@ -1,3 +1,7 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { afterEach, describe, expect, it } from "vitest";
 
 import type { ServerConfig } from "./config.js";
@@ -9,7 +13,7 @@ const config: ServerConfig = {
   PORT: 3_000,
   WEB_ORIGIN: "http://localhost:5173",
   PUBLIC_APP_URL: "http://localhost:5173",
-  WEB_DIST_DIR: "apps/web/dist",
+  WEB_DIST_DIR: "../web/dist",
   LOG_LEVEL: "silent",
   SESSION_SECRET: "test-secret-that-is-at-least-thirty-two-bytes",
   SESSION_TTL_SECONDS: 2_592_000,
@@ -71,5 +75,40 @@ describe("service probes", () => {
       status: "not_ready",
       reason: "database_unavailable",
     });
+  });
+
+  it("serves the PWA entry point for production root and client-side routes", async () => {
+    const webRoot = mkdtempSync(join(tmpdir(), "workbench-pwa-"));
+    writeFileSync(join(webRoot, "index.html"), "<!doctype html><title>Workbench</title>");
+    const app = await buildApp({
+      config: {
+        ...config,
+        NODE_ENV: "production",
+        WEB_ORIGIN: "https://app.example.test",
+        PUBLIC_APP_URL: "https://app.example.test",
+        WEB_DIST_DIR: webRoot,
+      },
+      readiness: { check: async () => undefined },
+    });
+    apps.push(app);
+
+    try {
+      const root = await app.inject({
+        method: "GET",
+        url: "/",
+        headers: { accept: "text/html" },
+      });
+      const setup = await app.inject({
+        method: "GET",
+        url: "/setup",
+        headers: { accept: "text/html" },
+      });
+
+      expect(root.statusCode).toBe(200);
+      expect(setup.statusCode).toBe(200);
+      expect(setup.body).toContain("Workbench");
+    } finally {
+      rmSync(webRoot, { force: true, recursive: true });
+    }
   });
 });

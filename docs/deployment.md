@@ -1,6 +1,6 @@
 # Render：一次 Blueprint 创建
 
-仓库根目录的 `render.yaml` 会一次创建 PostgreSQL、Web API/PWA 和 Worker。Web 在启动前自动执行 `pnpm db:migrate`，健康检查为 `/healthz`。配置遵循 [Render Blueprint specification](https://render.com/docs/blueprint-spec)。
+仓库根目录的 `render.yaml` 会一次创建 PostgreSQL、Web API/PWA 和 Worker。Web 在启动前自动执行 `pnpm db:migrate`，并以 `../web/dist`（相对 `apps/server`）托管已构建的 PWA；健康检查为 `/healthz`。配置遵循 [Render Blueprint specification](https://render.com/docs/blueprint-spec)。
 
 ## 第一次创建只需四步
 

@@ -8,7 +8,9 @@ const serverConfigSchema = z.object({
   PORT: z.coerce.number().int().min(1).max(65_535).default(3_000),
   WEB_ORIGIN: z.url().default("http://localhost:5173"),
   PUBLIC_APP_URL: z.url().default("http://localhost:5173"),
-  WEB_DIST_DIR: z.string().min(1).default("apps/web/dist"),
+  // The `@workbench/server` start script runs from apps/server. The built PWA
+  // package is its sibling, so this is intentionally package-relative.
+  WEB_DIST_DIR: z.string().min(1).default("../web/dist"),
   LOG_LEVEL: z
     .enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"])
     .default("info"),

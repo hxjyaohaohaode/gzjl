@@ -12,6 +12,10 @@ const productionEnvironment = {
 };
 
 describe("production public URLs", () => {
+  it("uses the server-package-relative PWA build directory by default", () => {
+    expect(loadServerConfig(productionEnvironment).WEB_DIST_DIR).toBe("../web/dist");
+  });
+
   it("accepts matching HTTPS browser URLs", () => {
     expect(loadServerConfig(productionEnvironment).PUBLIC_APP_URL).toBe(
       "https://app.example.test",
