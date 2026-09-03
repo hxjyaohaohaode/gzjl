@@ -130,17 +130,14 @@ export function PageHeader({
   actions,
 }: {
   title: string;
-  description: string;
+  description?: string;
   actions?: ReactNode;
 }) {
   return (
     <header className="app-page-header flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
       <div>
-        <p className="app-page-kicker mb-2">工作智能工作台</p>
         <h1 className="text-[28px] leading-none md:text-[34px]">{title}</h1>
-        <p className="mt-3 text-sm leading-6 text-[var(--text-muted)]">
-          {description}
-        </p>
+        {description ? <p className="sr-only">{description}</p> : null}
       </div>
       {actions ? (
         <div className="flex shrink-0 flex-wrap items-center gap-2">
@@ -2683,26 +2680,7 @@ export function HomePage({ me }: { me: Me }) {
 
   return (
     <div className="home-page">
-      <PageHeader
-        title={`${me.user.displayName}，今天好`}
-        description="从一段真实工作开始。计时、项目、审批和洞察共享同一条可追溯的事实链。"
-        actions={
-          <>
-            <Link to="/calendar">
-              <Button size="compact" variant="secondary">
-                <CalendarDays size={15} />
-                查看日历
-              </Button>
-            </Link>
-            <Link to="/work">
-              <Button>
-                <Plus size={17} />
-                记录工作
-              </Button>
-            </Link>
-          </>
-        }
-      />
+      <PageHeader title={`${me.user.displayName}，今天好`} />
       <div className="home-layout">
         <section className="home-primary">
           <Card className="home-focus-card">
@@ -2716,16 +2694,11 @@ export function HomePage({ me }: { me: Me }) {
                         : "size-2 rounded-full bg-[var(--accent)]"
                     }
                   />
-                  <p className="app-section-label text-[var(--accent-strong)]">
-                    此刻的工作
-                  </p>
+                  <p className="text-xs font-semibold text-[var(--text-muted)]">计时</p>
                 </div>
                 <h2 className="text-xl font-extrabold tracking-[-0.035em]">
                   当前计时
                 </h2>
-                <p className="mt-1 text-sm text-[var(--text-muted)]">
-                  服务端是跨设备同步的唯一事实源。
-                </p>
               </div>
               {activeTimer ? (
                 <Badge
@@ -2774,10 +2747,7 @@ export function HomePage({ me }: { me: Me }) {
                       <Clock3 size={22} />
                     </div>
                     <div>
-                      <h3 className="font-bold">还没有活动计时器</h3>
-                      <p className="mt-1 max-w-lg text-sm leading-6 text-[var(--text-muted)]">
-                        开始后，暂停、休息和结束都会形成可核验的工作记录。
-                      </p>
+                      <h3 className="font-bold">暂无计时</h3>
                     </div>
                   </div>
                   <Link to="/work">
@@ -2799,9 +2769,6 @@ export function HomePage({ me }: { me: Me }) {
                 <p className="text-2xl font-extrabold tracking-[-0.04em] tabular-nums">
                   {formatDuration(total)}
                 </p>
-                <p className="text-xs text-[var(--text-subtle)]">
-                  最近 5 条可见记录
-                </p>
               </CardContent>
             </Card>
             <Card className="home-stat-card">
@@ -2815,33 +2782,13 @@ export function HomePage({ me }: { me: Me }) {
                     条
                   </span>
                 </p>
-                <p className="text-xs text-[var(--text-subtle)]">
-                  当前授权范围内
-                </p>
-              </CardContent>
-            </Card>
-            <Card className="home-stat-card">
-              <CardContent>
-                <p className="text-xs font-semibold text-[var(--text-muted)]">
-                  有效授权
-                </p>
-                <p className="text-2xl font-extrabold tracking-[-0.04em] tabular-nums">
-                  {me.permissions.length}
-                  <span className="ml-1 text-sm font-semibold text-[var(--text-muted)]">
-                    项
-                  </span>
-                </p>
-                <p className="text-xs text-[var(--text-subtle)]">
-                  按 Scope 安全裁剪
-                </p>
               </CardContent>
             </Card>
           </div>
           <Card>
             <CardHeader>
               <div>
-                <p className="app-section-label">今日足迹</p>
-                <h2 className="mt-2 font-extrabold tracking-[-0.025em]">
+                <h2 className="font-extrabold tracking-[-0.025em]">
                   最近工作
                 </h2>
               </div>
@@ -2863,7 +2810,7 @@ export function HomePage({ me }: { me: Me }) {
                 </div>
               ) : (
                 <EmptyState
-                  description="手工录入或结束计时后，记录会按时间顺序出现在这里。"
+                  description="开始计时或补录一段工作。"
                   icon={<TimerReset />}
                   title="还没有工作记录"
                 />
@@ -2875,8 +2822,7 @@ export function HomePage({ me }: { me: Me }) {
           <Card>
             <CardHeader>
               <div>
-                <p className="app-section-label">下一步</p>
-                <h2 className="mt-2 font-extrabold tracking-[-0.025em]">
+                <h2 className="font-extrabold tracking-[-0.025em]">
                   快速操作
                 </h2>
               </div>
@@ -2891,9 +2837,6 @@ export function HomePage({ me }: { me: Me }) {
                 </span>
                 <span className="min-w-0 flex-1">
                   <span className="block text-sm font-bold">补录一段工作</span>
-                  <span className="block text-xs text-[var(--text-muted)]">
-                    填写开始、结束和结果
-                  </span>
                 </span>
                 <ArrowUpRight
                   className="text-[var(--text-subtle)] transition group-hover:text-[var(--accent-strong)]"
@@ -2909,9 +2852,6 @@ export function HomePage({ me }: { me: Me }) {
                 </span>
                 <span className="min-w-0 flex-1">
                   <span className="block text-sm font-bold">查看项目推进</span>
-                  <span className="block text-xs text-[var(--text-muted)]">
-                    从节点进入工作上下文
-                  </span>
                 </span>
                 <ArrowUpRight
                   className="text-[var(--text-subtle)] transition group-hover:text-[var(--accent-strong)]"
@@ -2927,9 +2867,6 @@ export function HomePage({ me }: { me: Me }) {
                 </span>
                 <span className="min-w-0 flex-1">
                   <span className="block text-sm font-bold">生成工作洞察</span>
-                  <span className="block text-xs text-[var(--text-muted)]">
-                    AI 只解释已授权事实
-                  </span>
                 </span>
                 <ArrowUpRight
                   className="text-[var(--text-subtle)] transition group-hover:text-[var(--accent-strong)]"
@@ -2938,55 +2875,12 @@ export function HomePage({ me }: { me: Me }) {
               </Link>
             </CardContent>
           </Card>
-          <Card className="home-insight-card">
-            <CardContent>
-              <div className="flex gap-3">
-                <div className="grid size-10 shrink-0 place-items-center rounded-xl bg-[var(--surface-raised)] text-[var(--accent-strong)] shadow-sm">
-                  <Bot size={19} />
-                </div>
-                <div>
-                  <p className="font-bold">事实优先的工作洞察</p>
-                  <p className="mt-1 text-sm leading-6 text-[var(--text-muted)]">
-                    AI
-                    只能解释服务端聚合出的真实数据，不能改写工时、项目、审批或薪资事实。
-                  </p>
-                  <Link
-                    className="mt-3 inline-flex items-center gap-1 text-xs font-bold text-[var(--accent-strong)]"
-                    to="/ai"
-                  >
-                    打开洞察中心
-                    <ChevronRight size={14} />
-                  </Link>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardHeader>
-              <div>
-                <p className="app-section-label">数据完整性</p>
-                <h2 className="mt-2 font-extrabold tracking-[-0.025em]">
-                  事实链状态
-                </h2>
-              </div>
-            </CardHeader>
-            <CardContent className="space-y-2">
-              <StatusLine
-                label="身份与权限"
-                value={`${me.permissions.length} 项有效授权`}
-              />
-              <StatusLine
-                label="最近记录"
-                value={`${factualWork.length} 条`}
-              />
-              <StatusLine label="待审记录" value={`${pendingCount} 条`} />
-            </CardContent>
-          </Card>
         </aside>
       </div>
     </div>
   );
 }
+
 function StatusLine({ label, value }: { label: string; value: string }) {
   return (
     <div className="home-fact-line flex items-center justify-between gap-4 rounded-xl px-3 py-3 text-sm">
@@ -3443,12 +3337,9 @@ function EvidencePanel({ sessionId }: { sessionId: string }) {
       </Button>
       {open ? (
         <div className="mt-3 space-y-3">
-          <p className="text-xs leading-5 text-[var(--text-muted)]">
-            文件逐件直传私有对象存储后会核验 SHA-256；替换会保留版本链，下载始终强制为二进制附件。可一次选择任意多件文件，单件失败不影响其他项；总数量不设应用层上限，但受公司对象存储配额约束。
-          </p>
           {capabilities.isPending ? (
             <p className="text-xs text-[var(--text-muted)]">
-              正在确认文件存储能力；链接和文字证据不受影响。
+              正在确认文件存储能力…
             </p>
           ) : fileUploads?.available ? (
             <>
@@ -3498,7 +3389,7 @@ function EvidencePanel({ sessionId }: { sessionId: string }) {
                 </Button>
               </div>
               <p className="text-xs leading-5 text-[var(--text-muted)]">
-                支持文档、图片、音视频、压缩包、代码、日志及其他工作文件；系统把字节安全地作为下载附件保存。单件上限 {formatFileSize(fileUploads.maxBytes)}。
+                任意格式，可多选；单件上限 {formatFileSize(fileUploads.maxBytes)}。
               </p>
             </>
           ) : (
@@ -3506,7 +3397,7 @@ function EvidencePanel({ sessionId }: { sessionId: string }) {
               className="rounded-xl bg-[var(--warning-soft)] px-3 py-2 text-xs leading-5 text-[var(--warning)]"
               role="status"
             >
-              {fileUploads?.unavailableReason ?? "文件对象存储尚未配置。"} 因此系统不会假装上传成功，也不会把文件写进 Render 临时磁盘。你现在仍可保存外部链接和文字证据；Owner 配置私有 S3 兼容存储和浏览器直传 origin 后，此处会自动启用批量文件上传。
+              {fileUploads?.unavailableReason ?? "文件对象存储尚未配置。"} 暂时可添加链接或文字证据。
             </div>
           )}
           {replacementFor ? (
@@ -7994,7 +7885,6 @@ export function AiPage({ me }: { me: Me }) {
     <>
       <PageHeader
         title="AI 工作洞察"
-        description="模型只接收服务端已裁剪的聚合事实，报告附来源数量；失败时明确降级，不影响工时、项目、审核和薪资。"
         actions={
           <>
             {me.user.isOwner ? (
@@ -8021,8 +7911,7 @@ export function AiPage({ me }: { me: Me }) {
             <Card>
               <CardHeader>
                 <div>
-                  <p className="app-section-label">Report history</p>
-                  <h2 className="mt-2 font-extrabold tracking-[-0.025em]">
+                  <h2 className="font-extrabold tracking-[-0.025em]">
                     报告历史
                   </h2>
                 </div>
@@ -8061,16 +7950,9 @@ export function AiPage({ me }: { me: Me }) {
               <CardContent>
                 <div className="flex flex-col gap-5 sm:flex-row sm:items-start sm:justify-between">
                   <div>
-                    <p className="app-section-label text-[var(--accent-strong)]">
-                      事实解释器
-                    </p>
-                    <h2 className="mt-2 text-xl font-extrabold tracking-[-0.04em]">
-                      把已授权的事实，变成可解释的工作总结
+                    <h2 className="text-xl font-extrabold tracking-[-0.04em]">
+                      生成工作总结
                     </h2>
-                    <p className="mt-2 max-w-2xl text-sm leading-6 text-[var(--text-muted)]">
-                      AI
-                      不生成工时、修改审批或替你做人员判断；它只围绕服务端聚合结果提供摘要、风险和下一步建议。
-                    </p>
                   </div>
                   <div className="min-w-[10rem]">
                     <label className="app-field block">
@@ -8092,22 +7974,6 @@ export function AiPage({ me }: { me: Me }) {
                     </label>
                   </div>
                 </div>
-                <div className="ai-preset-grid">
-                  <div className="ai-preset">
-                    <strong>近 7 天概览</strong>
-                    <span>当前生成入口读取过去一周的已授权聚合事实。</span>
-                  </div>
-                  <div className="ai-preset">
-                    <strong>来源可追溯</strong>
-                    <span>完成报告会标示输入记录或节点的来源数量。</span>
-                  </div>
-                  <div className="ai-preset">
-                    <strong>不篡改业务</strong>
-                    <span>
-                      洞察始终是建议，不能直接改写工资、审批或工作记录。
-                    </span>
-                  </div>
-                </div>
                 <div className="mt-5 flex flex-wrap items-center gap-3">
                   <Button
                     disabled={create.isPending}
@@ -8116,9 +7982,6 @@ export function AiPage({ me }: { me: Me }) {
                     {create.isPending ? "正在提交任务…" : "生成当前范围报告"}
                     <ArrowUpRight size={16} />
                   </Button>
-                  <span className="text-xs leading-5 text-[var(--text-subtle)]">
-                    任务在后台运行；即使模型不可用，核心工作记录仍可正常使用。
-                  </span>
                 </div>
               </CardContent>
             </Card>
@@ -8188,10 +8051,6 @@ export function AiPage({ me }: { me: Me }) {
                           tone="info"
                         />
                       </div>
-                      <p className="mt-5 text-xs text-[var(--text-subtle)]">
-                        AI
-                        解释，不是原始业务事实。请回到相关记录、项目节点或审批项完成业务操作。
-                      </p>
                     </>
                   ) : (
                     <div className="min-h-48">
@@ -8233,9 +8092,8 @@ export function AiPage({ me }: { me: Me }) {
             <Card>
               <CardHeader>
                 <div>
-                  <p className="app-section-label">数据边界</p>
-                  <h2 className="mt-2 font-extrabold tracking-[-0.025em]">
-                    上下文说明
+                  <h2 className="font-extrabold tracking-[-0.025em]">
+                    本次范围
                   </h2>
                 </div>
               </CardHeader>
@@ -8256,14 +8114,6 @@ export function AiPage({ me }: { me: Me }) {
                     {selectedReport
                       ? `${selectedReport.sourceCount} 个授权来源`
                       : "尚未生成"}
-                  </p>
-                </div>
-                <div className="ai-context-line">
-                  <p className="text-xs font-semibold text-[var(--text-muted)]">
-                    业务操作
-                  </p>
-                  <p className="mt-1 text-sm leading-6 text-[var(--text-muted)]">
-                    AI 不能直接批准工时、修改工资、删除记录或覆盖项目进度。
                   </p>
                 </div>
               </CardContent>

@@ -26,4 +26,43 @@ Render 的 `RENDER_EXTERNAL_URL` 会自动提供 Web Service 的 `onrender.com` 
 
 文件证据使用公司自己的私有 S3 兼容桶，绝不能改用 Render 临时文件系统。设置表格中的 S3 变量后，保持桶私有并允许 `WEB_ORIGIN` 对签名对象发起 `PUT` / `GET`；CORS 请求头至少包含 `content-type`、`x-amz-checksum-sha256` 及签名所需 `x-amz-*`。`S3_BROWSER_ORIGIN` 必须填浏览器实际访问的预签名 PUT URL 的 **origin**（协议与主机，不能带路径）；它可能与 SDK 使用的 `S3_ENDPOINT` 不同，例如虚拟主机式 bucket 域名。生产 PWA 只允许该精确 origin 进行对象存储连接，少填时会明确禁用文件上传而不是上传到一半被 CSP 阻断。工作台支持一次选择任意数量的文件并逐件上传，失败项可重试而不会重复创建证据；`SIGNED_URL_TTL_SECONDS` 默认 900 秒，下载链接始终不超过 300 秒。`ATTACHMENT_MAX_BYTES` 是每件文件上限（Blueprint 默认 100 MiB、上限 5 GiB），不是附件数量上限。支持任意工作文件格式，所有下载均被强制为二进制附件。
 
+## 最简单的附件方案：Cloudflare R2
+
+不需要购买或维护私人服务器。R2 是独立的私有对象存储，浏览器拿到短时预签名地址后直接上传；Render 只负责签名、权限校验、哈希核验和保存附件元数据。Render 自身磁盘保持无状态，因此重新部署或扩容不会丢附件。
+
+1. 在 Cloudflare 控制台打开 **R2 Object Storage**，创建一个 Standard bucket，例如 `gzjl-evidence`。不要开启 public development URL，也不要设置公开读取。
+2. 在 R2 的 **Manage R2 API Tokens** 创建只针对这个 bucket 的 Object Read & Write token。保存一次性显示的 `Access Key ID` 和 `Secret Access Key`，不要把它们提交到 Git。
+3. 复制 Cloudflare 账户 ID，组成同一个地址：`https://<ACCOUNT_ID>.r2.cloudflarestorage.com`。
+4. 给 bucket 添加下面的 CORS。`AllowedOrigins` 必须写实际工作台地址；当前部署为 `https://gzjl-hxjyaohaohaode-web.onrender.com`。
+
+```json
+[
+  {
+    "AllowedOrigins": [
+      "https://gzjl-hxjyaohaohaode-web.onrender.com"
+    ],
+    "AllowedMethods": ["GET", "HEAD", "PUT"],
+    "AllowedHeaders": ["content-type", "x-amz-checksum-sha256", "x-amz-*"],
+    "ExposeHeaders": ["etag"],
+    "MaxAgeSeconds": 3600
+  }
+]
+```
+
+5. 打开 Render 的 `gzjl-hxjyaohaohaode-web` → **Environment**，填写并保存：
+
+| Render 变量 | 填写值 |
+| --- | --- |
+| `S3_ENDPOINT` | `https://<ACCOUNT_ID>.r2.cloudflarestorage.com` |
+| `S3_BROWSER_ORIGIN` | 与 `S3_ENDPOINT` 完全相同 |
+| `S3_BUCKET` | `gzjl-evidence`（或实际 bucket 名） |
+| `S3_ACCESS_KEY_ID` | R2 token 的 Access Key ID |
+| `S3_SECRET_ACCESS_KEY` | R2 token 的 Secret Access Key |
+| `S3_REGION` | `auto` |
+| `S3_FORCE_PATH_STYLE` | `true` |
+
+6. Render 自动重新部署后，登录工作台，进入 **工作记录**，展开任意一条真实记录的 **证据**，多选文件并点击 **上传队列**。上传成功后刷新页面仍应看到附件，并可下载；如果能力提示仍不可用，先检查 Web 服务日志是否指出缺少哪一项变量。
+
+安全验收：R2 bucket 必须保持 private；员工浏览器永远不能看到 R2 API 密钥；预签名上传地址 15 分钟失效，下载地址最多 5 分钟失效；删除附件只做业务软删除并保留审计，存储对象的生命周期清理应由后续受控清理任务处理。
+
 以后若绑定自定义域名，应将 `WEB_ORIGIN` 和 `PUBLIC_APP_URL` 改为该域名的同一 HTTPS origin，并在对象存储 CORS 中替换为该精确域名。不要在证书生效前修改它们。

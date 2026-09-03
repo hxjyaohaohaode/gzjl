@@ -1,6 +1,9 @@
 import { expect, test, type Page } from "@playwright/test";
 
-async function mockAuthenticatedWorkspace(page: Page): Promise<void> {
+async function mockAuthenticatedWorkspace(
+  page: Page,
+  options: { isOwner?: boolean } = {},
+): Promise<void> {
   let authenticated = false;
   await page.route("**/api/auth/csrf", (route) =>
     route.fulfill({ json: { csrfToken: "test-csrf-token" } }),
@@ -22,7 +25,7 @@ async function mockAuthenticatedWorkspace(page: Page): Promise<void> {
               membershipId: "00000000-0000-4000-8000-000000000002",
               organizationId: "00000000-0000-4000-8000-000000000003",
               displayName: "林知夏",
-              isOwner: true,
+              isOwner: options.isOwner ?? true,
             },
             permissions: [
               {
@@ -257,7 +260,7 @@ async function mockAuthenticatedWorkspace(page: Page): Promise<void> {
   );
 }
 
-test("logs in and renders a factual empty workspace", async ({ page }) => {
+test("logs in and renders a factual empty workspace", async ({ page }, testInfo) => {
   await mockAuthenticatedWorkspace(page);
   await page.goto("/login");
   await page.getByLabel("邮箱或手机号").fill("owner@example.test");
@@ -270,7 +273,12 @@ test("logs in and renders a factual empty workspace", async ({ page }) => {
     page.getByRole("button", { name: "移动端快速记录工作" }),
   ).toHaveCount(0);
   await expect(page.getByText("还没有工作记录")).toBeVisible();
-  await expect(page.getByText("还没有活动计时器")).toBeVisible();
+  await expect(page.getByText("暂无计时")).toBeVisible();
+  await page.screenshot({
+    animations: "disabled",
+    fullPage: true,
+    path: testInfo.outputPath("workspace.png"),
+  });
 });
 
 test("TOTP login withholds the workspace until the second factor succeeds", async ({
@@ -1136,7 +1144,7 @@ test("evidence keeps text references usable when private object storage is not c
   await page.goto("/work");
   await page.getByRole("button", { name: "证据" }).click();
   await expect(
-    page.getByText(/系统不会假装上传成功，也不会把文件写进 Render 临时磁盘/),
+    page.getByText(/文件对象存储尚未配置.*暂时可添加链接或文字证据/),
   ).toBeVisible();
   await expect(page.getByLabel("选择工作证据文件")).toHaveCount(0);
   await page
@@ -1414,6 +1422,23 @@ test("AI page does not expose team analysis without an organization-scoped grant
   await expect(page.getByRole("option", { name: "团队授权范围" })).toHaveCount(
     0,
   );
+});
+
+test("AI provider configuration is visible only to the unique Owner", async ({
+  page,
+}) => {
+  await mockAuthenticatedWorkspace(page, { isOwner: false });
+  await page.route("**/api/ai/reports", (route) =>
+    route.fulfill({ json: { items: [] } }),
+  );
+  await page.goto("/login");
+  await page.getByLabel("邮箱或手机号").fill("member@example.test");
+  await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+  await page.goto("/ai");
+  await expect(
+    page.getByRole("button", { name: "组织 AI 配置" }),
+  ).toHaveCount(0);
 });
 
 test("AI report requests keep a stable five-minute range for cost-safe deduplication", async ({

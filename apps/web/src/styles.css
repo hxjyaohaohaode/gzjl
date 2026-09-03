@@ -4961,3 +4961,209 @@ body {
   border-color: transparent !important;
   box-shadow: var(--shadow-float) !important;
 }
+
+/* -------------------------------------------------------------------------- */
+/* Canonical quiet-workspace layer. Ordinary layout containers deliberately   */
+/* share the canvas; only controls, data boundaries and transient layers draw */
+/* a surface. Keep this last so older visual experiments cannot reintroduce   */
+/* card islands, decorative strokes or shadows.                               */
+/* -------------------------------------------------------------------------- */
+
+:root {
+  --canvas: #fafbfc;
+  --surface: #fafbfc;
+  --surface-tint: #f9fafb;
+  --surface-subtle: #f1f3f6;
+  --surface-raised: #ffffff;
+  --border: #edf0f4;
+  --text-subtle: #606c82;
+  --shadow-card: none;
+}
+
+:root[data-theme="dark"] {
+  --canvas: #131821;
+  --surface: #131821;
+  --surface-tint: #141a23;
+  --surface-subtle: #1c2430;
+  --surface-raised: #202936;
+  --border: #26313f;
+  --shadow-card: none;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root[data-theme="system"] {
+    --canvas: #131821;
+    --surface: #131821;
+    --surface-tint: #141a23;
+    --surface-subtle: #1c2430;
+    --surface-raised: #202936;
+    --border: #26313f;
+    --shadow-card: none;
+  }
+}
+
+body {
+  background: var(--canvas);
+}
+
+.app-main {
+  width: min(100%, 1520px);
+}
+
+.app-page-header {
+  margin-bottom: 1.25rem;
+}
+
+.app-page-header::after {
+  display: none;
+}
+
+.app-page-header h1 {
+  letter-spacing: -0.045em;
+}
+
+[data-ui="card"] {
+  border: 0 !important;
+  border-radius: 14px !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+[data-ui="card"]::before,
+[data-ui="card"]::after {
+  box-shadow: none !important;
+}
+
+[data-ui="card-header"] {
+  padding: 1rem 1rem 0;
+}
+
+[data-ui="card-content"] {
+  padding: 1rem;
+}
+
+.app-sidebar,
+.app-topbar {
+  background: var(--canvas) !important;
+}
+
+.app-sidebar {
+  box-shadow: none !important;
+}
+
+.app-topbar {
+  box-shadow: inset 0 -1px color-mix(in srgb, var(--text) 3%, transparent) !important;
+}
+
+.home-layout {
+  gap: clamp(1.4rem, 3vw, 3rem);
+  grid-template-columns: minmax(0, 1fr) minmax(14rem, 0.3fr);
+}
+
+.home-primary,
+.home-rail {
+  gap: 1rem;
+}
+
+[data-ui="card"].home-focus-card {
+  min-height: 12.5rem;
+  background: color-mix(in srgb, var(--accent) 2.8%, var(--canvas)) !important;
+}
+
+.home-focus-card::after {
+  display: none;
+}
+
+.home-focus-orb {
+  box-shadow: none !important;
+}
+
+.home-stats-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+[data-ui="card"].home-stat-card {
+  min-height: 6.4rem;
+  background: transparent !important;
+}
+
+.home-stat-card [data-ui="card-content"] {
+  gap: 0.75rem;
+}
+
+.home-action-link,
+.home-fact-line,
+.ai-preset,
+.ai-history-item {
+  border: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+.home-action-link:hover,
+.ai-preset:hover,
+.ai-history-item:hover {
+  background: color-mix(in srgb, var(--text) 3%, var(--canvas)) !important;
+  box-shadow: none !important;
+}
+
+.home-action-link > span:first-child {
+  border: 0 !important;
+}
+
+.app-empty-state {
+  min-height: 13rem;
+  background: transparent;
+}
+
+.app-empty-state p {
+  max-width: 28rem;
+}
+
+.metric-card,
+.analytics-chart-card,
+.ai-report-card,
+.ai-settings-card,
+.calendar-audit-card,
+.project-card {
+  background: transparent !important;
+}
+
+.organization-workbench,
+.project-workbench,
+.calendar-shell {
+  border: 0 !important;
+  background: var(--canvas) !important;
+  box-shadow: none !important;
+}
+
+.organization-main-panel,
+.organization-side-rail,
+.project-workbench-main {
+  background: var(--canvas);
+}
+
+@media (max-width: 860px) {
+  .home-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .home-rail {
+    grid-row: 2;
+  }
+}
+
+@media (max-width: 640px) {
+  .app-main {
+    padding-block: 1rem !important;
+  }
+
+  [data-ui="card-header"],
+  [data-ui="card-content"] {
+    padding-inline: 0.55rem;
+  }
+
+  .home-stats-grid {
+    gap: 0.45rem;
+  }
+}
