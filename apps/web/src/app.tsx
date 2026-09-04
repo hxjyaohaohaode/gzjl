@@ -1,9 +1,16 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertCircle, Clock3 } from "lucide-react";
+import { useEffect } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
 import { Button, Card, CardContent } from "@workbench/ui";
 
-import { api, ApiError, type Me } from "./api.js";
+import {
+  api,
+  ApiError,
+  resetCsrfToken,
+  subscribeToSessionChanges,
+  type Me,
+} from "./api.js";
 import { useRealtimeSync } from "./realtime.js";
 import { AppShell } from "./shell.js";
 import {
@@ -97,6 +104,7 @@ function AppConnectionState({
 }
 
 export function App() {
+  const queryClient = useQueryClient();
   const meQuery = useQuery({
     queryKey: ["me"],
     queryFn: getMe,
@@ -113,6 +121,17 @@ export function App() {
       ) && failureCount < 3,
     retryDelay: (attempt) => [1_000, 3_000, 6_000][attempt] ?? 8_000,
   });
+  useEffect(
+    () =>
+      subscribeToSessionChanges(() => {
+        resetCsrfToken();
+        queryClient.removeQueries({
+          predicate: (query) => query.queryKey[0] !== "me",
+        });
+        void queryClient.resetQueries({ queryKey: ["me"], exact: true });
+      }),
+    [queryClient],
+  );
   const syncStatus = useRealtimeSync(Boolean(meQuery.data));
   if (meQuery.isPending)
     return <AppConnectionState retryAttempt={meQuery.failureCount} />;

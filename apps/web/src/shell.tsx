@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  ArrowUpRight,
   Bell,
   Bot,
   BriefcaseBusiness,
@@ -17,6 +18,7 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   Plus,
+  RotateCcw,
   Search,
   Settings,
   ShieldCheck,
@@ -27,10 +29,16 @@ import {
 import type { LucideIcon } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
-import { NavLink, Outlet, useNavigate } from "react-router-dom";
+import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { Button, cn } from "@workbench/ui";
 
-import { api, hasGrant, resetCsrfToken, type Me } from "./api.js";
+import {
+  api,
+  hasGrant,
+  notifySessionChanged,
+  resetCsrfToken,
+  type Me,
+} from "./api.js";
 import type { RealtimeSyncStatus } from "./realtime.js";
 import { AccentPicker } from "./accent-picker.js";
 import { readableForeground, sanitizeAccent } from "./color.js";
@@ -74,6 +82,175 @@ interface PendingOwnershipTransfer {
   id: string;
   requestedAt: string;
   fromDisplayName: string;
+}
+
+type AiPageArea =
+  | "home"
+  | "work"
+  | "calendar"
+  | "projects"
+  | "project"
+  | "team"
+  | "analytics"
+  | "payroll"
+  | "approvals"
+  | "organization"
+  | "security"
+  | "notifications"
+  | "imports"
+  | "ai";
+
+interface PageCopilotContext {
+  area: AiPageArea;
+  label: string;
+  conversationId: string;
+  suggestions: [string, string];
+  allowTeam: boolean;
+  entityId?: string;
+}
+
+interface CopilotReportRecord {
+  job: {
+    id: string;
+    taskType: string;
+    status: string;
+    errorSummary: string | null;
+    scope: {
+      scope: "self" | "team";
+      question?: string;
+      conversationId?: string;
+    };
+  };
+  report: { id: string; summary: string } | null;
+}
+
+const pageCopilotDefaults: Record<
+  Exclude<AiPageArea, "project">,
+  Omit<PageCopilotContext, "conversationId" | "entityId">
+> = {
+  home: {
+    area: "home",
+    label: "今日工作台",
+    suggestions: ["今天最需要我推进的是什么？", "哪些事项有阻塞或待处理？"],
+    allowTeam: true,
+  },
+  work: {
+    area: "work",
+    label: "工作记录",
+    suggestions: ["总结最近的工作事实", "哪些记录还需要补充或核对？"],
+    allowTeam: true,
+  },
+  calendar: {
+    area: "calendar",
+    label: "日历",
+    suggestions: ["本周时间主要投入在哪里？", "日程中有哪些冲突或空档？"],
+    allowTeam: true,
+  },
+  projects: {
+    area: "projects",
+    label: "项目列表",
+    suggestions: ["哪些项目当前最需要关注？", "梳理项目阻塞和下一步"],
+    allowTeam: true,
+  },
+  team: {
+    area: "team",
+    label: "团队动态",
+    suggestions: ["总结团队最近的进展", "哪些协作事项需要跟进？"],
+    allowTeam: true,
+  },
+  analytics: {
+    area: "analytics",
+    label: "数据分析",
+    suggestions: ["解释当前时间范围的关键变化", "有哪些异常值得进一步核对？"],
+    allowTeam: true,
+  },
+  payroll: {
+    area: "payroll",
+    label: "我的薪资",
+    suggestions: ["解释我最近一期工资及状态", "哪些薪资项仍待确认？"],
+    allowTeam: false,
+  },
+  approvals: {
+    area: "approvals",
+    label: "审批",
+    suggestions: ["哪些审批最需要优先处理？", "归纳待审记录中的异常"],
+    allowTeam: true,
+  },
+  organization: {
+    area: "organization",
+    label: "组织与人员",
+    suggestions: ["组织当前有哪些协作风险？", "哪些成员状态需要跟进？"],
+    allowTeam: true,
+  },
+  security: {
+    area: "security",
+    label: "账户安全",
+    suggestions: ["说明当前账号可见的安全事项", "我还需要完成哪些账号操作？"],
+    allowTeam: false,
+  },
+  notifications: {
+    area: "notifications",
+    label: "通知设置",
+    suggestions: ["哪些工作提醒值得保留？", "按我的工作情况建议提醒重点"],
+    allowTeam: false,
+  },
+  imports: {
+    area: "imports",
+    label: "导入工时",
+    suggestions: ["导入前最需要核对哪些事实？", "解释当前导入数据的风险"],
+    allowTeam: true,
+  },
+  ai: {
+    area: "ai",
+    label: "AI 工作洞察",
+    suggestions: ["总结当前可见的关键事实", "告诉我下一步最值得分析什么"],
+    allowTeam: true,
+  },
+};
+
+function resolvePageCopilotContext(pathname: string): PageCopilotContext {
+  const projectMatch = pathname.match(/^\/projects\/([0-9a-f-]{36})(?:\/|$)/i);
+  if (projectMatch?.[1]) {
+    const entityId = projectMatch[1].toLowerCase();
+    return {
+      area: "project",
+      label: "项目详情",
+      conversationId: `page_project_${entityId.replaceAll("-", "")}`,
+      suggestions: ["这个项目当前进展和阻塞是什么？", "下一步应优先处理哪些节点？"],
+      allowTeam: true,
+      entityId,
+    };
+  }
+  const area: Exclude<AiPageArea, "project"> =
+    pathname === "/"
+      ? "home"
+      : pathname.startsWith("/work")
+        ? "work"
+        : pathname.startsWith("/calendar")
+          ? "calendar"
+          : pathname.startsWith("/projects")
+            ? "projects"
+            : pathname.startsWith("/team")
+              ? "team"
+              : pathname.startsWith("/analytics")
+                ? "analytics"
+                : pathname.startsWith("/payroll")
+                  ? "payroll"
+                  : pathname.startsWith("/approvals")
+                    ? "approvals"
+                    : pathname.startsWith("/organization")
+                      ? "organization"
+                      : pathname.startsWith("/security")
+                        ? "security"
+                        : pathname.startsWith("/notification-preferences")
+                          ? "notifications"
+                          : pathname.startsWith("/imports")
+                            ? "imports"
+                            : "ai";
+  return {
+    ...pageCopilotDefaults[area],
+    conversationId: `page_${area}`,
+  };
 }
 
 const navigation: NavigationItem[] = [
@@ -383,6 +560,8 @@ export function AppShell({
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [commandOpen, setCommandOpen] = useState(false);
   const [contextOpen, setContextOpen] = useState(false);
+  const [contextDrafts, setContextDrafts] = useState<Record<string, string>>({});
+  const [contextScope, setContextScope] = useState<"self" | "team">("self");
   const [online, setOnline] = useState(() => navigator.onLine);
   const [theme, setTheme] = useState<"system" | "light" | "dark">(() => {
     const storedTheme = localStorage.getItem("workbench-theme");
@@ -402,9 +581,27 @@ export function AppShell({
   });
   const selectedAccent = sanitizeAccent(accent);
   const queryClient = useQueryClient();
+  const location = useLocation();
   const navigate = useNavigate();
   const utilityMenuRef = useRef<HTMLDivElement>(null);
   const contextPanelRef = useRef<HTMLElement>(null);
+  const contextScrollRef = useRef<HTMLDivElement>(null);
+  const pageCopilot = useMemo(
+    () => resolvePageCopilotContext(location.pathname),
+    [location.pathname],
+  );
+  const contextQuestion = contextDrafts[pageCopilot.conversationId] ?? "";
+  const setContextQuestion = (value: string) =>
+    setContextDrafts((current) => ({
+      ...current,
+      [pageCopilot.conversationId]: value,
+    }));
+  const canAnalyzeTeam = me.permissions.some(
+    (grant) =>
+      grant.permission === "ai.team_analysis" &&
+      grant.scopeKind === "organization",
+  );
+  const canUseTeamCopilot = pageCopilot.allowTeam && canAnalyzeTeam;
   const visibleNavigation = useMemo(
     () =>
       navigation.filter(
@@ -429,7 +626,11 @@ export function AppShell({
     },
     onSettled: async () => {
       resetCsrfToken();
-      await queryClient.invalidateQueries({ queryKey: ["me"] });
+      queryClient.removeQueries({
+        predicate: (query) => query.queryKey[0] !== "me",
+      });
+      queryClient.setQueryData(["me"], null);
+      notifySessionChanged();
       navigate("/login", { replace: true });
     },
   });
@@ -446,6 +647,66 @@ export function AppShell({
       ),
     refetchInterval: 30_000,
   });
+  const copilotReports = useQuery({
+    queryKey: ["ai-reports"],
+    queryFn: () =>
+      api<{ items: CopilotReportRecord[] }>("/api/ai/reports"),
+    enabled: contextOpen,
+    refetchInterval: (query) =>
+      query.state.data?.items.some((item) =>
+        ["queued", "running"].includes(item.job.status),
+      )
+        ? 5_000
+        : false,
+  });
+  const copilotItems = (copilotReports.data?.items ?? [])
+    .filter(
+      (item) =>
+        item.job.taskType === "assistant_chat" &&
+        item.job.scope.conversationId === pageCopilot.conversationId,
+    )
+    .reverse()
+    .slice(-6);
+  const copilotUpdateKey = copilotItems
+    .map((item) => `${item.job.id}:${item.job.status}:${Boolean(item.report)}`)
+    .join("|");
+  const sendCopilot = useMutation({
+    mutationFn: () => {
+      const to = new Date();
+      to.setSeconds(0, 0);
+      to.setMinutes(Math.floor(to.getMinutes() / 5) * 5);
+      return api("/api/ai/reports", {
+        method: "POST",
+        body: {
+          taskType: "assistant_chat",
+          scope: canUseTeamCopilot ? contextScope : "self",
+          question: contextQuestion.trim(),
+          conversationId: pageCopilot.conversationId,
+          pageContext: {
+            area: pageCopilot.area,
+            ...(pageCopilot.entityId ? { entityId: pageCopilot.entityId } : {}),
+          },
+          from: new Date(to.getTime() - 31 * 86_400_000).toISOString(),
+          to: to.toISOString(),
+        },
+      });
+    },
+    onSuccess: async () => {
+      setContextDrafts((current) => ({
+        ...current,
+        [pageCopilot.conversationId]: "",
+      }));
+      await queryClient.invalidateQueries({ queryKey: ["ai-reports"] });
+    },
+  });
+  const retryCopilot = useMutation({
+    mutationFn: (jobId: string) =>
+      api(`/api/ai/jobs/${jobId}/retry`, { method: "POST" }),
+    onSuccess: async () =>
+      queryClient.invalidateQueries({ queryKey: ["ai-reports"] }),
+  });
+  const copilotError =
+    copilotReports.error ?? sendCopilot.error ?? retryCopilot.error;
   const markRead = useMutation({
     mutationFn: (id: string) =>
       api(`/api/notifications/${id}/read`, { method: "POST" }),
@@ -552,6 +813,12 @@ export function AppShell({
     window.addEventListener("pointerdown", closeContext);
     return () => window.removeEventListener("pointerdown", closeContext);
   }, [contextOpen]);
+  useEffect(() => {
+    if (!contextOpen) return;
+    const container = contextScrollRef.current;
+    if (!container) return;
+    container.scrollTo({ top: container.scrollHeight, behavior: "smooth" });
+  }, [contextOpen, copilotUpdateKey]);
   return (
     <div
       className={cn(
@@ -850,8 +1117,10 @@ export function AppShell({
             <Button
               aria-expanded={contextOpen}
               aria-label="打开 AI 上下文"
-              className="hidden sm:inline-flex"
               onClick={() => {
+                if (!contextOpen && !canUseTeamCopilot) {
+                  setContextScope("self");
+                }
                 setContextOpen((value) => !value);
                 setNotificationsOpen(false);
                 setSettingsOpen(false);
@@ -868,6 +1137,7 @@ export function AppShell({
                 onClick={() => {
                   setNotificationsOpen((value) => !value);
                   setSettingsOpen(false);
+                  setContextOpen(false);
                 }}
                 size="icon"
                 variant="ghost"
@@ -886,6 +1156,7 @@ export function AppShell({
               onClick={() => {
                 setSettingsOpen((value) => !value);
                 setNotificationsOpen(false);
+                setContextOpen(false);
               }}
               size="icon"
               variant="ghost"
@@ -1033,10 +1304,10 @@ export function AppShell({
           <div className="flex items-start justify-between gap-4">
             <div>
               <p className="app-section-label text-[var(--accent-strong)]">
-                Context copilot
+                页面 Copilot
               </p>
               <h2 className="mt-2 text-lg font-extrabold tracking-[-0.035em]">
-                AI 上下文
+                {pageCopilot.label}
               </h2>
             </div>
             <Button
@@ -1048,39 +1319,140 @@ export function AppShell({
               <X size={16} />
             </Button>
           </div>
-          <div className="mt-7 space-y-5">
-            <section className="rounded-2xl border border-[var(--border)] bg-[var(--surface-tint)] p-4">
-              <div className="grid size-10 place-items-center rounded-xl bg-[var(--accent-soft)] text-[var(--accent-strong)]">
-                <Bot size={19} />
-              </div>
-              <h3 className="mt-4 font-bold">只解释，不改写事实</h3>
-              <p className="mt-2 text-sm leading-6 text-[var(--text-muted)]">
-                工时、审批、项目和薪资由服务端规则确定；AI
-                只在你主动发起时阅读已授权的聚合事实。
-              </p>
-            </section>
-            <section>
-              <p className="app-section-label">当前工作范围</p>
-              <div className="mt-3 space-y-2">
-                <div className="flex items-center justify-between rounded-xl bg-[var(--surface-subtle)] px-3 py-3 text-sm">
-                  <span className="text-[var(--text-muted)]">有效授权</span>
-                  <strong>{me.permissions.length} 项</strong>
+          <div className="mt-5 flex min-h-[calc(100%-4.5rem)] flex-col">
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-xs text-[var(--text-muted)]">
+                仅使用当前授权事实
+              </span>
+              {canUseTeamCopilot ? (
+                <select
+                  aria-label="页面 AI 分析范围"
+                  className="rounded-lg bg-[var(--surface-subtle)] px-2 py-1.5 text-xs font-semibold outline-none"
+                  onChange={(event) =>
+                    setContextScope(event.target.value as "self" | "team")
+                  }
+                  value={contextScope}
+                >
+                  <option value="self">本人</option>
+                  <option value="team">团队</option>
+                </select>
+              ) : (
+                <span className="rounded-full bg-[var(--surface-subtle)] px-2.5 py-1 text-xs font-semibold">
+                  本人
+                </span>
+              )}
+            </div>
+            <div
+              aria-live="polite"
+              className="mt-4 max-h-[44vh] flex-1 space-y-3 overflow-y-auto pr-1"
+              ref={contextScrollRef}
+            >
+              {copilotReports.isPending ? (
+                <p className="py-8 text-center text-sm text-[var(--text-muted)]">
+                  正在读取对话…
+                </p>
+              ) : copilotItems.length ? (
+                copilotItems.map((item) => (
+                  <div className="space-y-2" key={item.job.id}>
+                    <div className="ml-auto max-w-[92%] rounded-2xl rounded-br-md bg-[var(--accent)] px-3 py-2.5 text-sm leading-6 text-[var(--accent-foreground)]">
+                      {item.job.scope.question || "页面分析"}
+                    </div>
+                    <div className="max-w-[94%] rounded-2xl rounded-bl-md bg-[var(--surface-subtle)] px-3 py-2.5 text-sm leading-6">
+                      {item.report?.summary ??
+                        (item.job.status === "failed"
+                          ? item.job.errorSummary || "本次回答生成失败。"
+                          : item.job.status === "cancelled"
+                            ? "本次对话已取消。"
+                            : "正在根据最新授权事实生成回答…")}
+                      {!item.report &&
+                      ["failed", "cancelled"].includes(item.job.status) ? (
+                        <button
+                          className="mt-2 flex items-center gap-1 text-xs font-bold text-[var(--accent-strong)]"
+                          disabled={retryCopilot.isPending}
+                          onClick={() => retryCopilot.mutate(item.job.id)}
+                          type="button"
+                        >
+                          <RotateCcw size={13} />
+                          重试
+                        </button>
+                      ) : null}
+                    </div>
+                  </div>
+                ))
+              ) : (
+                <div className="py-5 text-center">
+                  <div className="mx-auto grid size-10 place-items-center rounded-xl bg-[var(--accent-soft)] text-[var(--accent-strong)]">
+                    <Bot size={19} />
+                  </div>
+                  <p className="mt-3 text-sm text-[var(--text-muted)]">
+                    直接询问当前页面中的工作事实。
+                  </p>
                 </div>
-                <div className="rounded-xl bg-[var(--surface-subtle)] px-3 py-3 text-sm leading-6 text-[var(--text-muted)]">
-                  打开洞察中心后，可选择本人或你已获组织授权的范围生成报告。
-                </div>
-              </div>
-            </section>
-            <Button
-              className="w-full"
-              onClick={() => {
-                navigate("/ai");
-                setContextOpen(false);
+              )}
+            </div>
+            <div className="mt-4 flex flex-wrap gap-2">
+              {pageCopilot.suggestions.map((suggestion) => (
+                <button
+                  className="rounded-lg bg-[var(--surface-subtle)] px-2.5 py-2 text-left text-xs font-semibold transition hover:bg-[var(--accent-soft)]"
+                  key={suggestion}
+                  onClick={() => setContextQuestion(suggestion)}
+                  type="button"
+                >
+                  {suggestion}
+                </button>
+              ))}
+            </div>
+            <form
+              className="mt-3"
+              onSubmit={(event) => {
+                event.preventDefault();
+                if (contextQuestion.trim().length >= 2) sendCopilot.mutate();
               }}
             >
-              <Bot size={16} />
-              打开 AI 工作洞察
-            </Button>
+              <textarea
+                aria-label="向页面 AI 提问"
+                className="min-h-24 w-full resize-y rounded-xl bg-[var(--surface-subtle)] px-3 py-3 text-sm leading-6 outline-none transition focus:ring-2 focus:ring-[var(--accent)]"
+                maxLength={2_000}
+                onChange={(event) => setContextQuestion(event.target.value)}
+                placeholder="询问当前页面的进展、异常或下一步"
+                value={contextQuestion}
+              />
+              <Button
+                className="mt-2 w-full"
+                disabled={
+                  contextQuestion.trim().length < 2 || sendCopilot.isPending
+                }
+                type="submit"
+              >
+                <ArrowUpRight size={15} />
+                {sendCopilot.isPending ? "正在提交…" : "发送"}
+              </Button>
+            </form>
+            {copilotError ? (
+              <p className="mt-3 text-sm leading-6 text-[var(--danger)]">
+                {copilotError instanceof Error
+                  ? copilotError.message
+                  : "页面 AI 暂时不可用。"}
+              </p>
+            ) : null}
+            <button
+              className="mt-4 flex items-center justify-center gap-1 text-xs font-bold text-[var(--accent-strong)]"
+              onClick={() => {
+                const params = new URLSearchParams({
+                  conversation: pageCopilot.conversationId,
+                  area: pageCopilot.area,
+                  ...(pageCopilot.entityId
+                    ? { entity: pageCopilot.entityId }
+                    : {}),
+                });
+                navigate(`/ai?${params.toString()}`);
+                setContextOpen(false);
+              }}
+              type="button"
+            >
+              在 AI 工作洞察中继续
+              <ArrowUpRight size={13} />
+            </button>
           </div>
         </aside>
       ) : null}

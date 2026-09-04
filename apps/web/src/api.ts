@@ -1,4 +1,5 @@
 let csrfToken: string | null = null;
+const SESSION_CHANGE_STORAGE_KEY = "workbench-session-change";
 
 const RETRYABLE_READ_STATUSES = new Set([429, 502, 503, 504]);
 
@@ -112,6 +113,30 @@ export async function api<T>(
 
 export function resetCsrfToken(): void {
   csrfToken = null;
+}
+
+/**
+ * Tells other tabs on this device that the cookie-backed identity changed.
+ * The event contains no account data or credentials; its value only exists to
+ * make consecutive changes observable by the browser's storage event.
+ */
+export function notifySessionChanged(): void {
+  try {
+    localStorage.setItem(
+      SESSION_CHANGE_STORAGE_KEY,
+      `${Date.now()}:${globalThis.crypto?.randomUUID?.() ?? Math.random()}`,
+    );
+  } catch {
+    // Private browsing/storage restrictions must never block login or logout.
+  }
+}
+
+export function subscribeToSessionChanges(listener: () => void): () => void {
+  const handleStorage = (event: StorageEvent) => {
+    if (event.key === SESSION_CHANGE_STORAGE_KEY) listener();
+  };
+  window.addEventListener("storage", handleStorage);
+  return () => window.removeEventListener("storage", handleStorage);
 }
 
 export interface PermissionGrant {

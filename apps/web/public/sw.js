@@ -1,5 +1,6 @@
-const CACHE_NAME = "workbench-shell-v3";
-const SHELL = ["/", "/manifest.webmanifest"];
+const CACHE_NAME = "workbench-shell-v4";
+const SHELL = ["/", "/manifest.webmanifest", "/icon.svg"];
+const CACHEABLE_DESTINATIONS = new Set(["script", "style", "font", "image"]);
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
@@ -25,20 +26,51 @@ self.addEventListener("activate", (event) => {
   self.clients.claim();
 });
 
+self.addEventListener("message", (event) => {
+  if (event.data?.type === "SKIP_WAITING") self.skipWaiting();
+});
+
 self.addEventListener("fetch", (event) => {
   const request = event.request;
-  if (request.method !== "GET" || new URL(request.url).origin !== self.location.origin) return;
-  if (new URL(request.url).pathname.startsWith("/api/")) return;
+  const url = new URL(request.url);
+  if (request.method !== "GET" || url.origin !== self.location.origin) return;
+  if (url.pathname.startsWith("/api/")) return;
+
+  if (request.mode === "navigate") {
+    event.respondWith(
+      fetch(request, { cache: "no-store" })
+        .then((response) => {
+          if (response.ok) {
+            event.waitUntil(
+              caches.open(CACHE_NAME).then((cache) => cache.put("/", response.clone())),
+            );
+          }
+          return response;
+        })
+        .catch(async () => (await caches.match("/")) || Response.error()),
+    );
+    return;
+  }
+
+  if (!CACHEABLE_DESTINATIONS.has(request.destination) && url.pathname !== "/manifest.webmanifest") {
+    return;
+  }
   event.respondWith(
-    fetch(request, { cache: request.mode === "navigate" ? "no-store" : "default" })
-      .then((response) => {
+    caches.match(request).then((cached) => {
+      const fromNetwork = fetch(request).then((response) => {
         if (response.ok) {
-          const copy = response.clone();
-          event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.put(request, copy)));
+          event.waitUntil(
+            caches.open(CACHE_NAME).then((cache) => cache.put(request, response.clone())),
+          );
         }
         return response;
-      })
-      .catch(() => caches.match(request).then((response) => response || caches.match("/"))),
+      });
+      if (cached) {
+        event.waitUntil(fromNetwork.catch(() => undefined));
+        return cached;
+      }
+      return fromNetwork.catch(() => Response.error());
+    }),
   );
 });
 

@@ -873,7 +873,7 @@ export class ProjectService {
       )
       .limit(1);
     if (!node) throw new ProjectNotFoundError();
-    return this.db
+    const rows = await this.db
       .select({
         id: workSessions.id,
         membershipId: workSessions.membershipId,
@@ -885,7 +885,9 @@ export class ProjectService {
         source: workSessions.source,
         submissionStatus: workSessions.submissionStatus,
         approvalStatus: workSessions.approvalStatus,
+        visibility: workSessions.visibility,
         isPrimary: workSessionProjectLinks.isPrimary,
+        publicActivityVisible: projectMembers.publicActivityVisible,
       })
       .from(workSessionProjectLinks)
       .innerJoin(
@@ -897,6 +899,14 @@ export class ProjectService {
         eq(orgMemberships.id, workSessions.membershipId),
       )
       .innerJoin(users, eq(users.id, orgMemberships.userId))
+      .leftJoin(
+        projectMembers,
+        and(
+          eq(projectMembers.projectId, workSessionProjectLinks.projectId),
+          eq(projectMembers.membershipId, workSessions.membershipId),
+          isNull(projectMembers.leftAt),
+        ),
+      )
       .where(
         and(
           eq(workSessionProjectLinks.projectId, projectId),
@@ -904,14 +914,48 @@ export class ProjectService {
           eq(workSessions.organizationId, actor.organizationId),
           eq(workSessions.recordKind, "fact"),
           isNull(workSessions.deletedAt),
-          or(
-            eq(workSessions.membershipId, actor.membershipId),
-            eq(workSessions.visibility, "project_visible"),
-          ),
+          canViewAll
+            ? undefined
+            : or(
+                eq(workSessions.membershipId, actor.membershipId),
+                and(
+                  eq(workSessions.visibility, "project_visible"),
+                  eq(projectMembers.publicActivityVisible, true),
+                ),
+              ),
         ),
       )
-      .orderBy(desc(workSessions.startAt), desc(workSessions.id))
+      .orderBy(desc(workSessions.endAt), desc(workSessions.id))
       .limit(50);
+
+    return rows.map((row) => {
+      const hasFullTiming =
+        canViewAll || row.membershipId === actor.membershipId;
+      if (hasFullTiming) {
+        return {
+          ...row,
+          activityAt: row.endAt,
+          hasFullTiming: true as const,
+          publicActivityVisible: undefined,
+        };
+      }
+      return {
+        id: row.id,
+        membershipId: row.membershipId,
+        displayName: row.displayName,
+        content: row.content,
+        activityAt: row.endAt,
+        hasFullTiming: false as const,
+        startAt: null,
+        endAt: null,
+        netSeconds: null,
+        source: null,
+        submissionStatus: null,
+        approvalStatus: null,
+        visibility: null,
+        isPrimary: row.isPrimary,
+      };
+    });
   }
 
   async recycleBin(

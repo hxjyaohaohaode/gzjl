@@ -17,6 +17,7 @@ import {
   AiJobConflictError,
   AiPayrollAccessError,
   AiUnavailableError,
+  aiPageAreas,
   aiTaskTypes,
   type AiService,
 } from "./service.js";
@@ -29,6 +30,12 @@ const requestSchema = z
     to: z.iso.datetime({ offset: true }),
     question: z.string().trim().min(2).max(2_000).optional(),
     conversationId: z.string().trim().regex(/^[a-zA-Z0-9_-]{1,64}$/).optional(),
+    pageContext: z
+      .object({
+        area: z.enum(aiPageAreas),
+        entityId: z.uuid().optional(),
+      })
+      .optional(),
   })
   .superRefine((value, context) => {
     const from = new Date(value.from);
@@ -184,6 +191,7 @@ export async function registerAiRoutes(
           to: new Date(input.to),
           question: input.question,
           conversationId: input.conversationId,
+          pageContext: input.pageContext,
         });
         return reply.code(202).send({ job });
       } catch (error) {

@@ -13,6 +13,8 @@ import {
   Layers3,
   Link2,
   ListTree,
+  Maximize2,
+  Minimize2,
   Plus,
   RotateCcw,
   Save,
@@ -157,13 +159,15 @@ interface ProjectWorkSession {
   id: string;
   membershipId: string;
   displayName: string;
-  startAt: string;
-  endAt: string;
-  netSeconds: number;
+  activityAt?: string;
+  hasFullTiming?: boolean;
+  startAt: string | null;
+  endAt: string | null;
+  netSeconds: number | null;
   content: string;
-  source: string;
-  submissionStatus: string;
-  approvalStatus: string;
+  source: string | null;
+  submissionStatus: string | null;
+  approvalStatus: string | null;
   isPrimary: boolean;
 }
 
@@ -230,7 +234,8 @@ function toDateTimeLocalInput(value: string | null): string {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
-function formatProjectWorkTime(value: string): string {
+function formatProjectWorkTime(value: string | null | undefined): string {
+  if (!value || Number.isNaN(new Date(value).getTime())) return "时间未知";
   return new Intl.DateTimeFormat("zh-CN", {
     month: "numeric",
     day: "numeric",
@@ -1105,9 +1110,6 @@ function NodeInspectorContent({
         </section>
         <section className="project-inspector-section">
           <p className="app-section-label">关联工作记录</p>
-          <p className="mt-2 text-xs leading-5 text-[var(--text-muted)]">
-            仅显示本人记录和标记为“项目成员可见”的事实记录；辅助关联不会重复汇总时长。
-          </p>
           {linkedWork.isPending ? (
             <p className="mt-3 text-xs text-[var(--text-muted)]">
               正在读取关联工作…
@@ -1120,9 +1122,11 @@ function NodeInspectorContent({
                     <strong>{session.content}</strong>
                     <small>
                       {session.displayName} ·{" "}
-                      {formatProjectWorkTime(session.startAt)} ·{" "}
-                      {formatProjectWorkDuration(session.netSeconds)} ·{" "}
-                      {session.source === "timer" ? "计时" : "手工"}
+                      {session.hasFullTiming !== false &&
+                      session.startAt &&
+                      session.netSeconds !== null
+                        ? `${formatProjectWorkTime(session.startAt)} · ${formatProjectWorkDuration(session.netSeconds)} · ${session.source === "timer" ? "计时" : "手工"}`
+                        : `最后工作 ${formatProjectWorkTime(session.activityAt ?? session.endAt ?? session.startAt)}`}
                     </small>
                   </span>
                   <Badge tone={session.isPrimary ? "info" : "neutral"}>
@@ -1583,6 +1587,7 @@ export function ProjectDetailPage({ me }: { me: Me }) {
   const [searchParams] = useSearchParams();
   const queryClient = useQueryClient();
   const [view, setView] = useState<ProjectView>("canvas");
+  const [mobileFullscreen, setMobileFullscreen] = useState(false);
   const [branchId, setBranchId] = useState("all");
   const [search, setSearch] = useState("");
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(() => searchParams.get("node"));
@@ -1829,6 +1834,20 @@ export function ProjectDetailPage({ me }: { me: Me }) {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [selectedNodeId]);
 
+  useEffect(() => {
+    if (!mobileFullscreen) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setMobileFullscreen(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [mobileFullscreen]);
+
   if (tree.isPending)
     return (
       <Card>
@@ -1904,7 +1923,13 @@ export function ProjectDetailPage({ me }: { me: Me }) {
           </div>
         }
       />
-      <div className={cn("project-workbench", selected && "has-inspector")}>
+      <div
+        className={cn(
+          "project-workbench",
+          selected && "has-inspector",
+          mobileFullscreen && "is-mobile-fullscreen",
+        )}
+      >
         <main className="project-workbench-main">
           <div className="project-workbench-toolbar">
             <div className="project-view-tabs">
@@ -1926,6 +1951,16 @@ export function ProjectDetailPage({ me }: { me: Me }) {
                   {label}
                 </Button>
               ))}
+              <Button
+                aria-label={mobileFullscreen ? "退出项目全屏" : "进入项目全屏"}
+                className="project-fullscreen-toggle"
+                onClick={() => setMobileFullscreen((value) => !value)}
+                size="compact"
+                variant="secondary"
+              >
+                {mobileFullscreen ? <Minimize2 size={15} /> : <Maximize2 size={15} />}
+                {mobileFullscreen ? "退出" : "全屏"}
+              </Button>
             </div>
             <div className="project-toolbar-controls">
               <select

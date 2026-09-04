@@ -3,17 +3,45 @@
   "short_name": "工作台",
   "description": "统一记录工作、项目、审批、薪资和工作洞察",
   "lang": "zh-CN",
+  "id": "/",
   "start_url": "/",
+  "scope": "/",
   "display": "standalone",
+  "display_override": ["window-controls-overlay", "standalone", "minimal-ui"],
   "background_color": "#f5f7fb",
   "theme_color": "#5b5ce2",
   "orientation": "any",
+  "categories": ["business", "productivity"],
+  "prefer_related_applications": false,
   "icons": [
     {
       "src": "/icon.svg",
       "sizes": "any",
       "type": "image/svg+xml",
-      "purpose": "any maskable"
+      "purpose": "any"
+    },
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "记录工作",
+      "short_name": "记录",
+      "url": "/work"
+    },
+    {
+      "name": "查看项目",
+      "short_name": "项目",
+      "url": "/projects"
+    },
+    {
+      "name": "数据分析",
+      "short_name": "分析",
+      "url": "/analytics"
     }
   ]
 }

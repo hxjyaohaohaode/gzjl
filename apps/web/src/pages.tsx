@@ -45,7 +45,14 @@ import {
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { Badge, Button, Card, CardContent, CardHeader } from "@workbench/ui";
 
-import { api, ApiError, hasGrant, resetCsrfToken, type Me } from "./api.js";
+import {
+  api,
+  ApiError,
+  hasGrant,
+  notifySessionChanged,
+  resetCsrfToken,
+  type Me,
+} from "./api.js";
 import { readableForeground } from "./color.js";
 import { sendQueueableTimerEvent } from "./offline.js";
 import {
@@ -353,7 +360,12 @@ export function LoginPage() {
   const [challengeToken, setChallengeToken] = useState("");
   const [code, setCode] = useState("");
   const enterWorkspace = async () => {
+    resetCsrfToken();
+    queryClient.removeQueries({
+      predicate: (query) => query.queryKey[0] !== "me",
+    });
     await queryClient.invalidateQueries({ queryKey: ["me"] });
+    notifySessionChanged();
     navigate("/", { replace: true });
   };
   const login = useMutation({
@@ -2141,6 +2153,7 @@ function ExistingSessionHandoff({
         predicate: (query) => query.queryKey[0] !== "me",
       });
       queryClient.setQueryData(["me"], null);
+      notifySessionChanged();
     },
   });
   if (!currentSession) return null;
@@ -7584,68 +7597,126 @@ export function LegacyCalendarPage() {
 
 interface TeamActivity {
   id: string;
+  membershipId: string;
   displayName: string;
   content: string;
   result: string;
-  startAt: string;
-  endAt: string;
-  netSeconds: number;
+  activityAt: string;
+  hasFullTiming: boolean;
+  startAt: string | null;
+  endAt: string | null;
+  netSeconds: number | null;
   projectName: string | null;
+}
+interface TeamMemberActivity {
+  membershipId: string;
+  displayName: string;
+  avatarUrl: string | null;
+  positionTitle: string | null;
+  projectNames: string[];
+  professionalIdentities: string[];
+  lastActivity: TeamActivity | null;
+}
+interface TeamActivityResponse {
+  scope: "organization" | "shared_projects";
+  items: TeamActivity[];
+  members: TeamMemberActivity[];
 }
 export function TeamPage() {
   const activity = useQuery({
     queryKey: ["team-activity"],
     queryFn: () =>
-      api<{ items: TeamActivity[] }>("/api/team-activity?limit=50"),
+      api<TeamActivityResponse>("/api/team-activity?limit=50"),
   });
   return (
     <>
-      <PageHeader
-        title="团队动态"
-        description="仅展示授权范围内且明确标为“项目成员可见”的工作；私密和仅管理可见内容不会进入此流。"
-      />
+      <PageHeader title="团队动态" />
       {activity.isPending ? (
         <Card>
           <LoadingBlock />
         </Card>
-      ) : activity.data?.items.length ? (
-        <div className="space-y-4">
-          {activity.data.items.map((item) => (
-            <Card key={item.id}>
-              <CardContent>
-                <div className="flex gap-4">
-                  <div className="grid size-10 shrink-0 place-items-center rounded-full bg-[var(--accent-soft)] font-bold text-[var(--accent-strong)]">
-                    {item.displayName.slice(0, 1)}
+      ) : activity.data ? (
+        <div className="team-activity-layout">
+          <section className="team-member-overview" aria-label="可见协作成员">
+            <div className="team-section-heading">
+              <h2>协作成员</h2>
+              <Badge tone="neutral">
+                {activity.data.scope === "organization" ? "全组织" : "同项目"}
+              </Badge>
+            </div>
+            <div className="team-member-grid">
+              {activity.data.members.map((member) => (
+                <article className="team-member-item" key={member.membershipId}>
+                  {member.avatarUrl ? (
+                    <img alt="" src={member.avatarUrl} />
+                  ) : (
+                    <span className="team-member-avatar">
+                      {member.displayName.slice(0, 1)}
+                    </span>
+                  )}
+                  <div className="min-w-0">
+                    <strong>{member.displayName}</strong>
+                    <small>
+                      {[member.positionTitle, ...member.professionalIdentities]
+                        .filter(Boolean)
+                        .slice(0, 2)
+                        .join(" · ") || member.projectNames.slice(0, 2).join(" · ") || "项目成员"}
+                    </small>
+                    <time dateTime={member.lastActivity?.activityAt}>
+                      {member.lastActivity
+                        ? `最后工作 ${formatDateTime(member.lastActivity.activityAt)}`
+                        : "暂无公开工作记录"}
+                    </time>
                   </div>
+                </article>
+              ))}
+            </div>
+          </section>
+
+          {activity.data.items.length ? (
+            <section className="team-activity-feed" aria-label="公开工作动态">
+              <div className="team-section-heading">
+                <h2>最近工作</h2>
+              </div>
+              {activity.data.items.map((item) => (
+                <article className="team-activity-item" key={item.id}>
+                  <span className="team-member-avatar">
+                    {item.displayName.slice(0, 1)}
+                  </span>
                   <div className="min-w-0">
                     <div className="flex flex-wrap items-center gap-2">
-                      <h2 className="font-bold">{item.displayName}</h2>
+                      <strong>{item.displayName}</strong>
                       {item.projectName ? (
                         <Badge tone="info">{item.projectName}</Badge>
                       ) : null}
                     </div>
-                    <p className="mt-2 text-sm font-semibold">{item.content}</p>
-                    {item.result ? (
-                      <p className="mt-1 text-sm text-[var(--text-muted)]">
-                        结果：{item.result}
-                      </p>
-                    ) : null}
-                    <p className="mt-3 text-xs text-[var(--text-subtle)]">
-                      {formatDateTime(item.startAt)} ·{" "}
-                      {formatDuration(item.netSeconds)}
-                    </p>
+                    <p>{item.content}</p>
+                    {item.result ? <small>结果：{item.result}</small> : null}
+                    <time dateTime={item.activityAt}>
+                      {item.hasFullTiming && item.startAt && item.netSeconds !== null
+                        ? `${formatDateTime(item.startAt)} · ${formatDuration(item.netSeconds)}`
+                        : `最后工作 ${formatDateTime(item.activityAt)}`}
+                    </time>
                   </div>
-                </div>
-              </CardContent>
+                </article>
+              ))}
+            </section>
+          ) : (
+            <Card>
+              <EmptyState
+                description="成员发布项目可见工作后会出现在这里。"
+                icon={<Users />}
+                title="暂无公开工作动态"
+              />
             </Card>
-          ))}
+          )}
         </div>
       ) : (
         <Card>
           <EmptyState
-            description="项目成员公开工作后，会按权限出现在这里。"
+            description="暂时无法读取团队动态。"
             icon={<Users />}
-            title="没有团队公开动态"
+            title="团队动态不可用"
           />
         </Card>
       )}
@@ -8060,9 +8131,8 @@ export function AnalyticsPage({ me }: { me: Me }) {
     return `/api/analytics/summary?${query.toString()}`;
   }, [filters, from, to]);
   const analytics = useQuery({
-    queryKey: ["analytics", days, filters],
+    queryKey: ["analytics", me.user.membershipId, days, filters],
     queryFn: () => api<AnalyticsSummary>(analyticsUrl),
-    placeholderData: (previous) => previous,
     staleTime: 0,
   });
   const activeFilterCount = Object.values(filters).filter(Boolean).length;
@@ -8773,6 +8843,24 @@ type AiTaskType =
   | "salary_explanation"
   | "assistant_chat";
 
+const aiPageAreaValues = [
+  "home",
+  "work",
+  "calendar",
+  "projects",
+  "project",
+  "team",
+  "analytics",
+  "payroll",
+  "approvals",
+  "organization",
+  "security",
+  "notifications",
+  "imports",
+  "ai",
+] as const;
+type AiPageArea = (typeof aiPageAreaValues)[number];
+
 const aiTaskPresets: Array<{
   type: AiTaskType;
   label: string;
@@ -9186,6 +9274,27 @@ function AiSettingsEditor({
 export function AiPage({ me }: { me: Me }) {
   const queryClient = useQueryClient();
   const [searchParams] = useSearchParams();
+  const requestedConversationId = searchParams.get("conversation") ?? "primary";
+  const conversationId = /^[a-zA-Z0-9_-]{1,64}$/.test(requestedConversationId)
+    ? requestedConversationId
+    : "primary";
+  const requestedPageArea = searchParams.get("area");
+  const pageArea = aiPageAreaValues.includes(requestedPageArea as AiPageArea)
+    ? (requestedPageArea as AiPageArea)
+    : null;
+  const requestedEntityId = searchParams.get("entity");
+  const pageContext = pageArea
+    ? {
+        area: pageArea,
+        ...(pageArea === "project" &&
+        requestedEntityId &&
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+          requestedEntityId,
+        )
+          ? { entityId: requestedEntityId }
+          : {}),
+      }
+    : undefined;
   const reports = useQuery({
     queryKey: ["ai-reports"],
     queryFn: () => api<{ items: AiReportRecord[] }>("/api/ai/reports"),
@@ -9236,7 +9345,8 @@ export function AiPage({ me }: { me: Me }) {
           taskType: "assistant_chat",
           scope,
           question: question.trim(),
-          conversationId: "primary",
+          conversationId,
+          ...(pageContext ? { pageContext } : {}),
           from: new Date(to.getTime() - 31 * 86_400_000).toISOString(),
           to: to.toISOString(),
         },
@@ -9269,7 +9379,7 @@ export function AiPage({ me }: { me: Me }) {
     .filter(
       (item) =>
         item.job.taskType === "assistant_chat" &&
-        (item.job.scope.conversationId ?? "primary") === "primary",
+        (item.job.scope.conversationId ?? "primary") === conversationId,
     )
     .reverse();
   const chatUpdateKey = chatItems
@@ -9377,7 +9487,9 @@ export function AiPage({ me }: { me: Me }) {
                   <p className="app-page-kicker">基于当前授权事实</p>
                   <h2 className="mt-1 text-xl font-extrabold tracking-[-0.04em]">和 AI 对话</h2>
                 </div>
-                <Badge tone="info">实时授权上下文</Badge>
+                <Badge tone="info">
+                  {pageContext ? "当前页面上下文" : "实时授权上下文"}
+                </Badge>
               </CardHeader>
               <CardContent>
                 {chatItems.length ? (

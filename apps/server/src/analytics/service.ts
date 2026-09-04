@@ -2,8 +2,11 @@ import { and, desc, eq, gt, inArray, isNull, lt, or, type SQL } from "drizzle-or
 import type { Database } from "@workbench/db";
 import {
   organizations,
+  memberIdentities,
   orgMemberships,
   orgUnits,
+  professionalIdentities,
+  projectMembers,
   projectNodes,
   projects,
   users,
@@ -616,33 +619,287 @@ export class AnalyticsService {
   }
 
   async teamActivity(actor: AnalyticsActor, limit: number) {
-    const access = await this.buildAccessCondition(actor);
-    return this.db
-      .select({
-        id: workSessions.id,
-        displayName: users.displayName,
-        content: workSessions.content,
-        result: workSessions.result,
-        startAt: workSessions.startAt,
-        endAt: workSessions.endAt,
-        netSeconds: workSessions.netSeconds,
-        visibility: workSessions.visibility,
-        projectName: projects.name,
-      })
-      .from(workSessions)
-      .innerJoin(orgMemberships, eq(orgMemberships.id, workSessions.membershipId))
-      .innerJoin(users, eq(users.id, orgMemberships.userId))
-      .leftJoin(projectNodes, eq(projectNodes.id, workSessions.primaryProjectNodeId))
-      .leftJoin(projects, eq(projects.id, projectNodes.projectId))
-      .where(
-        and(
-          access,
-          eq(workSessions.visibility, "project_visible"),
-          eq(workSessions.recordKind, "fact"),
-          isNull(workSessions.deletedAt),
+    const canViewOrganizationWork = actor.grants.some(
+      (grant) =>
+        grant.permission === "work.view_full_scope" &&
+        grant.scopeKind === "organization",
+    );
+    const publicGrants = actor.grants.filter(
+      (grant) => grant.permission === "work.view_project_public",
+    );
+
+    const actorProjectRows = canViewOrganizationWork
+      ? []
+      : await this.db
+          .select({ projectId: projectMembers.projectId })
+          .from(projectMembers)
+          .innerJoin(projects, eq(projects.id, projectMembers.projectId))
+          .where(
+            and(
+              eq(projects.organizationId, actor.organizationId),
+              eq(projectMembers.membershipId, actor.membershipId),
+              isNull(projectMembers.leftAt),
+              isNull(projects.deletedAt),
+            ),
+          );
+    const organizationPublicGrant = publicGrants.some(
+      (grant) => grant.scopeKind === "organization",
+    );
+    const grantedProjectIds = new Set(
+      publicGrants.flatMap((grant) =>
+        grant.scopeKind === "project" && grant.scopeId ? [grant.scopeId] : [],
+      ),
+    );
+    const visibleProjectIds = actorProjectRows
+      .map((row) => row.projectId)
+      .filter(
+        (projectId) => organizationPublicGrant || grantedProjectIds.has(projectId),
+      );
+
+    const memberProjectRows = canViewOrganizationWork
+      ? await this.db
+          .select({
+            membershipId: orgMemberships.id,
+            displayName: users.displayName,
+            avatarUrl: users.avatarUrl,
+            positionTitle: orgMemberships.positionTitle,
+            projectId: projects.id,
+            projectName: projects.name,
+          })
+          .from(orgMemberships)
+          .innerJoin(users, eq(users.id, orgMemberships.userId))
+          .leftJoin(
+            projectMembers,
+            and(
+              eq(projectMembers.membershipId, orgMemberships.id),
+              isNull(projectMembers.leftAt),
+            ),
+          )
+          .leftJoin(projects, eq(projects.id, projectMembers.projectId))
+          .where(
+            and(
+              eq(orgMemberships.organizationId, actor.organizationId),
+              eq(orgMemberships.status, "active"),
+              isNull(orgMemberships.leftAt),
+            ),
+          )
+      : visibleProjectIds.length
+        ? await this.db
+            .select({
+              membershipId: orgMemberships.id,
+              displayName: users.displayName,
+              avatarUrl: users.avatarUrl,
+              positionTitle: orgMemberships.positionTitle,
+              projectId: projects.id,
+              projectName: projects.name,
+            })
+            .from(projectMembers)
+            .innerJoin(projects, eq(projects.id, projectMembers.projectId))
+            .innerJoin(
+              orgMemberships,
+              eq(orgMemberships.id, projectMembers.membershipId),
+            )
+            .innerJoin(users, eq(users.id, orgMemberships.userId))
+            .where(
+              and(
+                inArray(projectMembers.projectId, visibleProjectIds),
+                isNull(projectMembers.leftAt),
+                eq(projects.organizationId, actor.organizationId),
+                isNull(projects.deletedAt),
+                eq(orgMemberships.status, "active"),
+                isNull(orgMemberships.leftAt),
+              ),
+            )
+        : [];
+
+    const fullActivityRows = canViewOrganizationWork
+      ? await this.db
+          .select({
+            id: workSessions.id,
+            membershipId: workSessions.membershipId,
+            displayName: users.displayName,
+            content: workSessions.content,
+            result: workSessions.result,
+            startAt: workSessions.startAt,
+            endAt: workSessions.endAt,
+            netSeconds: workSessions.netSeconds,
+            visibility: workSessions.visibility,
+            projectName: projects.name,
+          })
+          .from(workSessions)
+          .innerJoin(
+            orgMemberships,
+            eq(orgMemberships.id, workSessions.membershipId),
+          )
+          .innerJoin(users, eq(users.id, orgMemberships.userId))
+          .leftJoin(
+            projectNodes,
+            eq(projectNodes.id, workSessions.primaryProjectNodeId),
+          )
+          .leftJoin(projects, eq(projects.id, projectNodes.projectId))
+          .where(
+            and(
+              eq(workSessions.organizationId, actor.organizationId),
+              eq(workSessions.recordKind, "fact"),
+              isNull(workSessions.deletedAt),
+            ),
+          )
+          .orderBy(desc(workSessions.endAt), desc(workSessions.id))
+          .limit(limit)
+      : [];
+    const publicActivityRows =
+      !canViewOrganizationWork && visibleProjectIds.length
+        ? await this.db
+            .select({
+              id: workSessions.id,
+              membershipId: workSessions.membershipId,
+              displayName: users.displayName,
+              content: workSessions.content,
+              result: workSessions.result,
+              startAt: workSessions.startAt,
+              endAt: workSessions.endAt,
+              netSeconds: workSessions.netSeconds,
+              visibility: workSessions.visibility,
+              projectName: projects.name,
+              isPrimary: workSessionProjectLinks.isPrimary,
+            })
+            .from(workSessionProjectLinks)
+            .innerJoin(
+              workSessions,
+              eq(workSessions.id, workSessionProjectLinks.workSessionId),
+            )
+            .innerJoin(projects, eq(projects.id, workSessionProjectLinks.projectId))
+            .innerJoin(
+              projectMembers,
+              and(
+                eq(projectMembers.projectId, workSessionProjectLinks.projectId),
+                eq(projectMembers.membershipId, workSessions.membershipId),
+              ),
+            )
+            .innerJoin(
+              orgMemberships,
+              eq(orgMemberships.id, workSessions.membershipId),
+            )
+            .innerJoin(users, eq(users.id, orgMemberships.userId))
+            .where(
+              and(
+                inArray(workSessionProjectLinks.projectId, visibleProjectIds),
+                eq(workSessions.organizationId, actor.organizationId),
+                eq(workSessions.visibility, "project_visible"),
+                eq(workSessions.recordKind, "fact"),
+                isNull(workSessions.deletedAt),
+                isNull(projectMembers.leftAt),
+                eq(projectMembers.publicActivityVisible, true),
+                isNull(projects.deletedAt),
+                eq(orgMemberships.status, "active"),
+                isNull(orgMemberships.leftAt),
+              ),
+            )
+            .orderBy(desc(workSessions.endAt), desc(workSessions.id))
+            .limit(Math.min(1_000, limit * 10))
+        : [];
+
+    const publicRowsById = new Map<string, (typeof publicActivityRows)[number]>();
+    for (const row of publicActivityRows) {
+      const existing = publicRowsById.get(row.id);
+      if (!existing || (!existing.isPrimary && row.isPrimary)) {
+        publicRowsById.set(row.id, row);
+      }
+    }
+    const activities = canViewOrganizationWork
+      ? fullActivityRows.map((row) => ({
+          ...row,
+          activityAt: row.endAt,
+          hasFullTiming: true as const,
+        }))
+      : [...publicRowsById.values()].slice(0, limit).map((row) => ({
+          id: row.id,
+          membershipId: row.membershipId,
+          displayName: row.displayName,
+          content: row.content,
+          result: row.result,
+          projectName: row.projectName,
+          activityAt: row.endAt,
+          hasFullTiming: false as const,
+          startAt: null,
+          endAt: null,
+          netSeconds: null,
+          visibility: null,
+        }));
+
+    const membersById = new Map<
+      string,
+      {
+        membershipId: string;
+        displayName: string;
+        avatarUrl: string | null;
+        positionTitle: string | null;
+        projectNames: Set<string>;
+      }
+    >();
+    for (const row of memberProjectRows) {
+      const member = membersById.get(row.membershipId) ?? {
+        membershipId: row.membershipId,
+        displayName: row.displayName,
+        avatarUrl: row.avatarUrl,
+        positionTitle: row.positionTitle,
+        projectNames: new Set<string>(),
+      };
+      if (row.projectName) member.projectNames.add(row.projectName);
+      membersById.set(row.membershipId, member);
+    }
+    const membershipIds = [...membersById.keys()];
+    const identityRows = membershipIds.length
+      ? await this.db
+          .select({
+            membershipId: memberIdentities.membershipId,
+            name: professionalIdentities.name,
+          })
+          .from(memberIdentities)
+          .innerJoin(
+            professionalIdentities,
+            eq(professionalIdentities.id, memberIdentities.identityId),
+          )
+          .where(
+            and(
+              inArray(memberIdentities.membershipId, membershipIds),
+              eq(professionalIdentities.organizationId, actor.organizationId),
+              isNull(professionalIdentities.archivedAt),
+            ),
+          )
+      : [];
+    const identitiesByMembership = new Map<string, string[]>();
+    for (const identity of identityRows) {
+      identitiesByMembership.set(identity.membershipId, [
+        ...(identitiesByMembership.get(identity.membershipId) ?? []),
+        identity.name,
+      ]);
+    }
+    const latestByMembership = new Map<string, (typeof activities)[number]>();
+    for (const activity of activities) {
+      if (!latestByMembership.has(activity.membershipId)) {
+        latestByMembership.set(activity.membershipId, activity);
+      }
+    }
+
+    return {
+      scope: canViewOrganizationWork ? ("organization" as const) : ("shared_projects" as const),
+      items: activities,
+      members: [...membersById.values()]
+        .map((member) => ({
+          membershipId: member.membershipId,
+          displayName: member.displayName,
+          avatarUrl: member.avatarUrl,
+          positionTitle: member.positionTitle,
+          projectNames: [...member.projectNames].sort((left, right) =>
+            left.localeCompare(right, "zh-CN"),
+          ),
+          professionalIdentities: identitiesByMembership.get(member.membershipId) ?? [],
+          lastActivity: latestByMembership.get(member.membershipId) ?? null,
+        }))
+        .sort((left, right) =>
+          left.displayName.localeCompare(right.displayName, "zh-CN"),
         ),
-      )
-      .orderBy(desc(workSessions.startAt))
-      .limit(limit);
+    };
   }
 }

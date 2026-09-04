@@ -5,6 +5,9 @@ async function mockAuthenticatedWorkspace(
   options: { isOwner?: boolean; canExport?: boolean; canViewPayroll?: boolean } = {},
 ): Promise<void> {
   let authenticated = false;
+  await page.routeWebSocket("**/api/realtime", (socket) => {
+    socket.send(JSON.stringify({ type: "realtime.ready" }));
+  });
   await page.route("**/api/auth/csrf", (route) =>
     route.fulfill({ json: { csrfToken: "test-csrf-token" } }),
   );
@@ -125,6 +128,19 @@ async function mockAuthenticatedWorkspace(
   });
   await page.route("**/api/notifications", (route) =>
     route.fulfill({ json: { items: [] } }),
+  );
+  await page.route("**/api/team-activity?**", (route) =>
+    route.fulfill({
+      json: { scope: "shared_projects", members: [], items: [] },
+    }),
+  );
+  await page.route("**/api/ai/reports", (route) =>
+    route.request().method() === "GET"
+      ? route.fulfill({ json: { items: [] } })
+      : route.fulfill({
+          status: 503,
+          json: { error: "unexpected_ai_write", message: "Unexpected AI write" },
+        }),
   );
   await page.route("**/api/search?**", (route) => {
     const query = new URL(route.request().url()).searchParams.get("q");
@@ -2578,6 +2594,63 @@ test("AI context panel closes from its backdrop and Escape", async ({ page }, te
   await expect(page.getByRole("dialog", { name: "AI 上下文面板" })).toHaveCount(0);
 });
 
+test("page Copilot sends a real page-scoped AI conversation on desktop and mobile", async ({
+  page,
+}) => {
+  await mockAuthenticatedWorkspace(page);
+  let request: Record<string, unknown> | null = null;
+  await page.route("**/api/ai/reports", async (route) => {
+    if (route.request().method() === "GET") {
+      await route.fulfill({ json: { items: [] } });
+      return;
+    }
+    request = route.request().postDataJSON() as Record<string, unknown>;
+    await route.fulfill({
+      status: 202,
+      json: { job: { id: "page-copilot-job", status: "queued" } },
+    });
+  });
+
+  await page.goto("/login");
+  await page.getByLabel("邮箱或手机号").fill("owner@example.test");
+  await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+  await page.goto("/analytics");
+
+  const open = page.getByRole("button", { name: "打开 AI 上下文" });
+  await expect(open).toBeVisible();
+  await open.click();
+  await expect(
+    page.getByRole("dialog", { name: "AI 上下文面板" }),
+  ).toContainText("数据分析");
+  await page
+    .getByRole("textbox", { name: "向页面 AI 提问" })
+    .fill("解释当前时间范围的关键变化");
+  await page.getByRole("button", { name: "发送", exact: true }).click();
+
+  await expect.poll(() => request).not.toBeNull();
+  expect(request).toMatchObject({
+    taskType: "assistant_chat",
+    scope: "self",
+    conversationId: "page_analytics",
+    pageContext: { area: "analytics" },
+  });
+
+  request = null;
+  await page
+    .getByRole("button", { name: "在 AI 工作洞察中继续" })
+    .click();
+  await expect(page).toHaveURL(/\/ai\?.*conversation=page_analytics/);
+  await page.getByRole("textbox", { name: "向 AI 提问" }).fill("继续解释异常来源");
+  await page.getByRole("button", { name: "发送", exact: true }).click();
+  await expect.poll(() => request).not.toBeNull();
+  expect(request).toMatchObject({
+    taskType: "assistant_chat",
+    conversationId: "page_analytics",
+    pageContext: { area: "analytics" },
+  });
+});
+
 test("organization keeps access role, org position, and professional identity as separate real layers", async ({
   page,
 }) => {
@@ -4058,4 +4131,212 @@ test("project node schedule edits persist through the same versioned mutation", 
   await page.getByLabel("开始时间").fill("2026-09-03T09:00");
   await page.getByLabel("截止时间").fill("2026-09-06T17:00");
   await page.getByRole("button", { name: "保存节点版本" }).click();
+});
+
+test("employees see shared-project last work activity without coworkers' duration", async ({
+  page,
+}) => {
+  await mockAuthenticatedWorkspace(page, { isOwner: false });
+  const activityAt = "2026-09-04T05:00:00.000Z";
+  await page.route("**/api/team-activity?**", (route) =>
+    route.fulfill({
+      json: {
+        scope: "shared_projects",
+        members: [
+          {
+            membershipId: "00000000-0000-4000-8000-000000000090",
+            displayName: "陈一",
+            avatarUrl: null,
+            positionTitle: "产品经理",
+            projectNames: ["工作台正式版"],
+            professionalIdentities: ["产品设计"],
+            lastActivity: {
+              id: "00000000-0000-4000-8000-000000000091",
+              membershipId: "00000000-0000-4000-8000-000000000090",
+              displayName: "陈一",
+              content: "完成移动端流程核对",
+              result: "已提交验收",
+              projectName: "工作台正式版",
+              activityAt,
+              hasFullTiming: false,
+              startAt: null,
+              endAt: null,
+              netSeconds: null,
+            },
+          },
+        ],
+        items: [
+          {
+            id: "00000000-0000-4000-8000-000000000091",
+            membershipId: "00000000-0000-4000-8000-000000000090",
+            displayName: "陈一",
+            content: "完成移动端流程核对",
+            result: "已提交验收",
+            projectName: "工作台正式版",
+            activityAt,
+            hasFullTiming: false,
+            startAt: null,
+            endAt: null,
+            netSeconds: null,
+          },
+        ],
+      },
+    }),
+  );
+  await page.goto("/login");
+  await page.getByLabel("邮箱或手机号").fill("employee@example.test");
+  await page.getByLabel("密码").fill("Employee-Secure-Password-123!");
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "林知夏，今天好" })).toBeVisible();
+  await page.goto("/team");
+
+  await expect(page.getByText("产品经理 · 产品设计")).toBeVisible();
+  await expect(page.getByText("完成移动端流程核对")).toBeVisible();
+  await expect(page.getByText(/最后工作.*09.*04.*13:00/).first()).toBeVisible();
+  await expect(page.getByText(/2\s*小时/)).toHaveCount(0);
+});
+
+test("account switching never reuses another member's analytics cache", async ({
+  page,
+}, testInfo) => {
+  test.skip(testInfo.project.name.startsWith("mobile"), "desktop account-switch coverage");
+  await mockAuthenticatedWorkspace(page);
+  let activeAccount: "first" | "second" | null = null;
+  await page.route("**/api/auth/login", async (route) => {
+    const identifier = String(route.request().postDataJSON()?.identifier ?? "");
+    activeAccount = identifier.startsWith("second") ? "second" : "first";
+    await route.fulfill({ json: { ok: true } });
+  });
+  await page.route("**/api/auth/logout", async (route) => {
+    activeAccount = null;
+    await route.fulfill({ status: 204, body: "" });
+  });
+  await page.route("**/api/me", (route) => {
+    if (!activeAccount) {
+      return route.fulfill({ status: 401, json: { error: "unauthorized" } });
+    }
+    const second = activeAccount === "second";
+    return route.fulfill({
+      json: {
+        user: {
+          id: second
+            ? "00000000-0000-4000-8000-000000000102"
+            : "00000000-0000-4000-8000-000000000101",
+          membershipId: second
+            ? "00000000-0000-4000-8000-000000000112"
+            : "00000000-0000-4000-8000-000000000111",
+          organizationId: "00000000-0000-4000-8000-000000000003",
+          displayName: second ? "第二位成员" : "第一位成员",
+          isOwner: false,
+        },
+        permissions: [
+          {
+            permission: "work.view_own",
+            scopeKind: "self",
+            scopeId: second
+              ? "00000000-0000-4000-8000-000000000112"
+              : "00000000-0000-4000-8000-000000000111",
+          },
+        ],
+      },
+    });
+  });
+  await page.route("**/api/analytics/summary?**", async (route) => {
+    const second = activeAccount === "second";
+    if (second) await new Promise((resolve) => setTimeout(resolve, 450));
+    const count = second ? 0 : 7;
+    await route.fulfill({
+      json: {
+        range: {
+          from: "2026-08-05T00:00:00.000Z",
+          to: "2026-09-04T00:00:00.000Z",
+          timezone: "Asia/Shanghai",
+        },
+        totals: {
+          sessionCount: count,
+          totalSeconds: count * 3_600,
+          approvedSeconds: 0,
+          pendingSeconds: 0,
+        },
+        appliedFilters: {},
+        availableFilters: {
+          members: [],
+          projects: [],
+          workTypes: [],
+          orgUnits: [],
+          approvalStates: [],
+          sourceTypes: [],
+        },
+        byDay: [],
+        byMember: [],
+        byProject: [],
+        byWorkType: [],
+        byOrgUnit: [],
+        bySource: [],
+        byApproval: [],
+        byHour: Array.from({ length: 24 }, (_, hour) => ({
+          hour,
+          seconds: 0,
+          count: 0,
+        })),
+        projectWorkTypes: [],
+        flow: { nodes: [], links: [] },
+        anomalies: [],
+        projectHealth: [],
+        forecast: { observed: [], predicted: [] },
+        funnel: [
+          { stage: "已记录", count },
+          { stage: "已提交", count: 0 },
+          { stage: "已批准", count: 0 },
+          { stage: "可计薪", count: 0 },
+        ],
+      },
+    });
+  });
+
+  await page.goto("/login");
+  await page.getByLabel("邮箱或手机号").fill("first@example.test");
+  await page.getByLabel("密码").fill("First-Secure-Password-123!");
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "第一位成员，今天好" })).toBeVisible();
+  await page.goto("/analytics");
+  await expect(page.getByText("7 条", { exact: true })).toBeVisible();
+
+  await page.getByRole("button", { name: "退出登录" }).click();
+  await expect(page).toHaveURL(/\/login$/);
+  await page.getByLabel("邮箱或手机号").fill("second@example.test");
+  await page.getByLabel("密码").fill("Second-Secure-Password-123!");
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "第二位成员，今天好" })).toBeVisible();
+  await page.goto("/analytics");
+  await expect(page.getByText("7 条", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("0 条", { exact: true })).toBeVisible();
+});
+
+test("mobile project canvas enters a true viewport-sized mode with list fallback", async ({
+  page,
+}, testInfo) => {
+  test.skip(!testInfo.project.name.startsWith("mobile"), "mobile-only PWA workspace coverage");
+  await mockAuthenticatedWorkspace(page);
+  const projectId = "00000000-0000-4000-8000-000000000004";
+  await page.goto("/login");
+  await page.getByLabel("邮箱或手机号").fill("owner@example.test");
+  await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "林知夏，今天好" })).toBeVisible();
+  await page.goto(`/projects/${projectId}`);
+
+  await page.getByRole("button", { name: "进入项目全屏" }).click();
+  const workbench = page.locator(".project-workbench.is-mobile-fullscreen");
+  await expect(workbench).toBeVisible();
+  const box = await workbench.boundingBox();
+  const viewport = page.viewportSize();
+  expect(box).not.toBeNull();
+  expect(viewport).not.toBeNull();
+  expect(Math.abs(box!.width - viewport!.width)).toBeLessThanOrEqual(1);
+  expect(Math.abs(box!.height - viewport!.height)).toBeLessThanOrEqual(1);
+  await page.getByRole("button", { name: "列表", exact: true }).click();
+  await expect(page.locator(".project-workbench-tree-list")).toBeVisible();
+  await page.getByRole("button", { name: "退出项目全屏" }).click();
+  await expect(workbench).toHaveCount(0);
 });

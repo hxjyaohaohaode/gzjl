@@ -14,6 +14,8 @@ import {
   payrollItems,
   payrollRuns,
   payPeriods,
+  projectMembers,
+  projects,
   users,
 } from "@workbench/db/schema";
 
@@ -82,6 +84,21 @@ async function seedPayroll(db: Database) {
       joinedAt: new Date("2026-01-01T00:00:00.000Z"),
     })
     .returning();
+  const [project] = await db
+    .insert(projects)
+    .values({
+      organizationId: organization!.id,
+      key: "COPILOT",
+      name: "页面 Copilot 项目",
+      status: "active",
+      createdBy: membership!.id,
+    })
+    .returning();
+  await db.insert(projectMembers).values({
+    projectId: project!.id,
+    membershipId: membership!.id,
+    role: "member",
+  });
   const [plan] = await db
     .insert(compensationPlans)
     .values({
@@ -167,7 +184,7 @@ async function seedPayroll(db: Database) {
       },
     })
     .returning();
-  return { organization: organization!, membership: membership!, period: period!, item: item!, component: component! };
+  return { organization: organization!, membership: membership!, project: project!, period: period!, item: item!, component: component! };
 }
 
 describe("AI payroll provenance", () => {
@@ -299,5 +316,98 @@ describe("AI payroll provenance", () => {
         { ...request, scope: "team" },
       ),
     ).rejects.toBeInstanceOf(AiPayrollAccessError);
+  });
+
+  it("keeps page Copilot context bounded to a validated page and authorized entity", async () => {
+    const db = await createTestDatabase();
+    const seeded = await seedPayroll(db);
+    const actor: AnalyticsActor = {
+      organizationId: seeded.organization.id,
+      membershipId: seeded.membership.id,
+      grants: [
+        {
+          permission: "work.view_own",
+          scopeKind: "self",
+          scopeId: seeded.membership.id,
+        },
+        {
+          permission: "payroll.view_own",
+          scopeKind: "self",
+          scopeId: seeded.membership.id,
+        },
+      ],
+    };
+    const service = new AiService(
+      db,
+      new AnalyticsService(db),
+      configuredAi(),
+      new PayrollService(db),
+    );
+
+    const payrollJob = await service.requestReport(actor, {
+      taskType: "assistant_chat",
+      scope: "self",
+      question: "解释我最近一期工资及状态",
+      conversationId: "page_payroll",
+      pageContext: { area: "payroll" },
+      from: new Date("2026-08-01T00:00:00.000Z"),
+      to: new Date("2026-11-01T00:00:00.000Z"),
+    });
+    expect(payrollJob.sourceSummary).toEqual(
+      expect.objectContaining({
+        pageContext: {
+          area: "payroll",
+          label: "我的薪资",
+        },
+        payroll: expect.objectContaining({ privacyScope: "self_only" }),
+      }),
+    );
+    expect(payrollJob.scope).toEqual(
+      expect.objectContaining({
+        conversationId: "page_payroll",
+        pageContext: { area: "payroll", label: "我的薪资" },
+      }),
+    );
+
+    const projectJob = await service.requestReport(actor, {
+      taskType: "assistant_chat",
+      scope: "self",
+      question: "这个项目现在进展如何",
+      conversationId: "page_project_authorized",
+      pageContext: { area: "project", entityId: seeded.project.id },
+      from: new Date("2026-08-01T00:00:00.000Z"),
+      to: new Date("2026-11-01T00:00:00.000Z"),
+    });
+    expect(projectJob.sourceSummary).toEqual(
+      expect.objectContaining({
+        pageContext: {
+          area: "project",
+          label: "项目详情",
+          entityId: seeded.project.id,
+        },
+      }),
+    );
+
+    const unauthorizedProjectId = "00000000-0000-4000-8000-000000000099";
+    const unauthorizedProjectJob = await service.requestReport(actor, {
+      taskType: "assistant_chat",
+      scope: "self",
+      question: "解释另一个项目",
+      conversationId: "page_project_unauthorized",
+      pageContext: { area: "project", entityId: unauthorizedProjectId },
+      from: new Date("2026-08-01T00:00:00.000Z"),
+      to: new Date("2026-11-01T00:00:00.000Z"),
+    });
+    expect(unauthorizedProjectJob.sourceSummary).toEqual(
+      expect.objectContaining({
+        pageContext: {
+          area: "project",
+          label: "项目详情",
+        },
+      }),
+    );
+    expect(JSON.stringify(unauthorizedProjectJob.sourceSummary)).not.toContain(
+      unauthorizedProjectId,
+    );
   });
 });

@@ -4009,6 +4009,10 @@ body {
   flex: none;
 }
 
+.project-fullscreen-toggle {
+  display: none !important;
+}
+
 .project-toolbar-controls {
   min-width: 0;
   flex: 1 1 31rem;
@@ -4787,6 +4791,62 @@ body {
   .project-node-inspector-scroll {
     max-height: 67dvh;
   }
+
+  .project-fullscreen-toggle {
+    display: inline-flex !important;
+  }
+
+  .project-workbench.is-mobile-fullscreen,
+  .project-workbench.is-mobile-fullscreen.has-inspector {
+    position: fixed;
+    inset: 0;
+    z-index: 70;
+    width: 100vw;
+    height: 100dvh;
+    min-height: 100dvh;
+    overflow: hidden;
+    border-radius: 0;
+    background: var(--canvas) !important;
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+
+  .project-workbench.is-mobile-fullscreen .project-workbench-main {
+    display: flex;
+    min-height: 0;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .project-workbench.is-mobile-fullscreen .project-workbench-toolbar {
+    flex: none;
+  }
+
+  .project-workbench.is-mobile-fullscreen .project-view-surface {
+    display: flex;
+    min-height: 0;
+    flex: 1;
+    overflow: hidden;
+  }
+
+  .project-workbench.is-mobile-fullscreen .project-view-surface .project-canvas,
+  .project-workbench.is-mobile-fullscreen .project-timeline,
+  .project-workbench.is-mobile-fullscreen .project-workbench-tree-list {
+    width: 100%;
+    height: 100%;
+    min-height: 0;
+    flex: 1;
+    overflow: auto;
+  }
+
+  .project-workbench.is-mobile-fullscreen .project-version-note {
+    display: none;
+  }
+
+  .project-workbench.is-mobile-fullscreen .react-flow__controls-button {
+    width: 2.65rem;
+    height: 2.65rem;
+  }
 }
 
 @media (max-width: 700px) {
@@ -5213,6 +5273,104 @@ body {
   background: var(--canvas);
 }
 
+.team-activity-layout {
+  display: grid;
+  grid-template-columns: minmax(15rem, 0.34fr) minmax(0, 1fr);
+  gap: clamp(1rem, 2.4vw, 2.2rem);
+  align-items: start;
+}
+
+.team-member-overview,
+.team-activity-feed {
+  min-width: 0;
+}
+
+.team-section-heading {
+  display: flex;
+  min-height: 2.5rem;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.55rem;
+}
+
+.team-section-heading h2 {
+  font-size: 0.9rem;
+  font-weight: 760;
+  letter-spacing: -0.02em;
+}
+
+.team-member-grid,
+.team-activity-feed {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.team-member-item,
+.team-activity-item {
+  display: flex;
+  min-width: 0;
+  gap: 0.75rem;
+  border: 0;
+  border-radius: 0.85rem;
+  background: color-mix(in srgb, var(--surface-subtle) 52%, transparent);
+  padding: 0.75rem;
+}
+
+.team-member-item > img,
+.team-member-avatar {
+  display: grid;
+  width: 2.35rem;
+  height: 2.35rem;
+  flex: none;
+  place-items: center;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  object-fit: cover;
+  font-size: 0.76rem;
+  font-weight: 760;
+}
+
+.team-member-item strong,
+.team-activity-item strong {
+  display: block;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 0.78rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.team-member-item small,
+.team-member-item time,
+.team-activity-item small,
+.team-activity-item time {
+  display: block;
+  margin-top: 0.2rem;
+  color: var(--text-subtle);
+  font-size: 0.66rem;
+  line-height: 1.45;
+}
+
+.team-member-item time,
+.team-activity-item time {
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.team-activity-item {
+  padding-block: 0.9rem;
+}
+
+.team-activity-item p {
+  margin-top: 0.4rem;
+  color: var(--text);
+  font-size: 0.8rem;
+  font-weight: 620;
+  line-height: 1.55;
+}
+
 @media (max-width: 860px) {
   .home-layout {
     grid-template-columns: 1fr;
@@ -5220,6 +5378,14 @@ body {
 
   .home-rail {
     grid-row: 2;
+  }
+
+  .team-activity-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .team-member-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
@@ -5239,5 +5405,14 @@ body {
 
   .home-stats-grid {
     gap: 0.45rem;
+  }
+
+  .team-member-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .team-member-item,
+  .team-activity-item {
+    padding-inline: 0.55rem;
   }
 }

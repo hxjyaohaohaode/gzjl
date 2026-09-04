@@ -18,5 +18,7 @@ describe("AI system prompt safety boundaries", () => {
     expect(prompt).toContain("privacyScope=self_only");
     expect(prompt).toContain("团队范围永远不含工资");
     expect(prompt).toContain("禁止重算");
+    expect(prompt).toContain("pageContext");
+    expect(prompt).toContain("只是焦点而不是事实来源");
   });
 });

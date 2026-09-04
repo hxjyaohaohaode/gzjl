@@ -35,6 +35,41 @@ export const aiTaskTypes = [
 ] as const;
 export type AiTaskType = (typeof aiTaskTypes)[number];
 
+export const aiPageAreas = [
+  "home",
+  "work",
+  "calendar",
+  "projects",
+  "project",
+  "team",
+  "analytics",
+  "payroll",
+  "approvals",
+  "organization",
+  "security",
+  "notifications",
+  "imports",
+  "ai",
+] as const;
+export type AiPageArea = (typeof aiPageAreas)[number];
+
+const aiPageLabels: Record<AiPageArea, string> = {
+  home: "今日工作台",
+  work: "工作记录",
+  calendar: "日历",
+  projects: "项目列表",
+  project: "项目详情",
+  team: "团队动态",
+  analytics: "数据分析",
+  payroll: "我的薪资",
+  approvals: "审批",
+  organization: "组织与人员",
+  security: "账户安全",
+  notifications: "通知设置",
+  imports: "导入工时",
+  ai: "AI 工作洞察",
+};
+
 const taskGoals: Record<AiTaskType, string> = {
   daily_summary: "总结当日已经记录的工作事实、产出、阻塞与下一步，不补写未发生的工作。",
   weekly_summary: "生成本周可直接校对的工作周报，区分事实、风险和建议。",
@@ -54,6 +89,12 @@ export interface AiReportRequest {
   to: Date;
   question?: string | undefined;
   conversationId?: string | undefined;
+  pageContext?:
+    | {
+        area: AiPageArea;
+        entityId?: string | undefined;
+      }
+    | undefined;
 }
 
 export class AiUnavailableError extends Error {
@@ -285,6 +326,18 @@ export class AiService {
       }
       projectContext.set(row.projectId, project);
     }
+    const requestedPageContext = input.pageContext;
+    const pageContext = requestedPageContext
+      ? {
+          area: requestedPageContext.area,
+          label: aiPageLabels[requestedPageContext.area],
+          ...(requestedPageContext.area === "project" &&
+          requestedPageContext.entityId &&
+          projectContext.has(requestedPageContext.entityId)
+            ? { entityId: requestedPageContext.entityId }
+            : {}),
+        }
+      : undefined;
     const conversationRows =
       taskType === "assistant_chat"
         ? await this.db
@@ -379,7 +432,14 @@ export class AiService {
     const sourceSummary = this.limitSourceSummary({
       taskType,
       taskGoal: taskGoals[taskType],
-      ...(question ? { question, conversationId, conversationHistory } : {}),
+      ...(question
+        ? {
+            question,
+            conversationId,
+            conversationHistory,
+            ...(pageContext ? { pageContext } : {}),
+          }
+        : {}),
       scope,
       range: facts.range,
       totals: facts.totals,
@@ -487,7 +547,7 @@ export class AiService {
         .limit(1);
       if (existing) return existing;
       await this.configuration.assertQuota(actor.organizationId, tx);
-      const [job] = await tx.insert(aiJobs).values({ organizationId: actor.organizationId, requestedBy: actor.membershipId, scope: { scope, from, to, ...(question ? { question, conversationId } : {}) }, taskType, provider: "openai_compatible", model: provider.model, promptTemplateVersion: "structured-work-intelligence-v5-payroll", inputHash, sourceSummary, maxAttempts: provider.maxAttempts, maxOutputTokens: provider.maxOutputTokens }).returning();
+      const [job] = await tx.insert(aiJobs).values({ organizationId: actor.organizationId, requestedBy: actor.membershipId, scope: { scope, from, to, ...(question ? { question, conversationId, ...(pageContext ? { pageContext } : {}) } : {}) }, taskType, provider: "openai_compatible", model: provider.model, promptTemplateVersion: "structured-work-intelligence-v5-payroll", inputHash, sourceSummary, maxAttempts: provider.maxAttempts, maxOutputTokens: provider.maxOutputTokens }).returning();
       if (!job) throw new Error("Failed to create AI job");
       await tx.insert(outboxEvents).values({ organizationId: actor.organizationId, eventType: "ai.job.queued", entityType: "ai_job", entityId: job.id, entityVersion: 1, payload: { jobId: job.id } });
       return job;

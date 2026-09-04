@@ -61,6 +61,6 @@ export async function registerAnalyticsRoutes(
   });
   app.get("/api/team-activity", { preHandler: authenticate }, async (request) => {
     const { limit } = activityQuery.parse(request.query);
-    return { items: await service.teamActivity(request.auth!, limit) };
+    return service.teamActivity(request.auth!, limit);
   });
 }
