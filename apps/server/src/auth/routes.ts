@@ -430,6 +430,7 @@ export async function registerAuthRoutes(
             organizationId: request.auth.organizationId,
             displayName: request.auth.displayName,
             isOwner: request.auth.isOwner,
+            timezone: request.auth.timezone,
           }
         : null,
       permissions: request.auth?.grants ?? [],

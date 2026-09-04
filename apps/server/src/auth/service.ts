@@ -4,6 +4,7 @@ import {
   memberRoles,
   auditLogs,
   organizationOwners,
+  organizations,
   orgMemberships,
   outboxEvents,
   rolePermissions,
@@ -42,6 +43,7 @@ export interface AuthContext {
   membershipId: string;
   organizationId: string;
   displayName: string;
+  timezone: string;
   /** The unique organization owner; used only for owner-gated UI affordances. */
   isOwner: boolean;
   grants: PermissionGrant[];
@@ -946,9 +948,9 @@ export class AuthService {
   }
 
   private async createContext(
-    base: Omit<AuthContext, "grants" | "isOwner">,
+    base: Omit<AuthContext, "grants" | "isOwner" | "timezone">,
   ): Promise<AuthContext> {
-    const [rows, owners] = await Promise.all([
+    const [rows, owners, organization] = await Promise.all([
       this.db
         .select({
           permission: rolePermissions.permissionCode,
@@ -973,6 +975,11 @@ export class AuthService {
           ),
         )
         .limit(1),
+      this.db
+        .select({ timezone: organizations.timezone })
+        .from(organizations)
+        .where(eq(organizations.id, base.organizationId))
+        .limit(1),
     ]);
 
     const permissionSet = new Set<string>(permissions);
@@ -984,7 +991,12 @@ export class AuthService {
         scopeId: row.scopeId,
       }));
 
-    return { ...base, isOwner: Boolean(owners[0]), grants };
+    return {
+      ...base,
+      timezone: organization[0]?.timezone ?? "Asia/Shanghai",
+      isOwner: Boolean(owners[0]),
+      grants,
+    };
   }
 
   async revokeAllOtherSessions(userId: string, currentToken: string): Promise<number> {

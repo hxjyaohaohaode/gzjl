@@ -152,6 +152,7 @@ export interface Me {
     organizationId: string;
     displayName: string;
     isOwner: boolean;
+    timezone: string;
   };
   permissions: PermissionGrant[];
 }

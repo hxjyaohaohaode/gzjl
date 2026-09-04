@@ -13,6 +13,7 @@ import {
 } from "./api.js";
 import { useRealtimeSync } from "./realtime.js";
 import { AppShell } from "./shell.js";
+import { setOrganizationTimezone } from "./timezone.js";
 import {
   AiPage,
   AnalyticsPage,
@@ -39,9 +40,14 @@ import {
 
 async function getMe(): Promise<Me | null> {
   try {
-    return await api<Me>("/api/me");
+    const me = await api<Me>("/api/me");
+    setOrganizationTimezone(me.user.timezone);
+    return me;
   } catch (error) {
-    if (error instanceof ApiError && error.status === 401) return null;
+    if (error instanceof ApiError && error.status === 401) {
+      setOrganizationTimezone(null);
+      return null;
+    }
     throw error;
   }
 }

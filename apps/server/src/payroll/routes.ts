@@ -108,8 +108,17 @@ export async function registerPayrollRoutes(
     "/api/payroll/settings",
     { preHandler: [app.csrfProtection, authenticate, configurePermission] },
     async (request) => {
-      const input = z.object({ payrollCutoffDay: z.number().int().min(1).max(28) }).parse(request.body);
-      return { settings: await service.updateSettings(request.auth!, input.payrollCutoffDay) };
+      const input = z.object({
+        payrollCutoffDay: z.number().int().min(1).max(28),
+        payrollCutoffMinute: z.number().int().min(0).max(1_439),
+      }).parse(request.body);
+      return {
+        settings: await service.updateSettings(
+          request.auth!,
+          input.payrollCutoffDay,
+          input.payrollCutoffMinute,
+        ),
+      };
     },
   );
 
@@ -180,6 +189,52 @@ export async function registerPayrollRoutes(
       const { runId } = runParams.parse(request.params);
       try {
         return { run: await service.settle(request.auth!, runId) };
+      } catch (error) {
+        if (error instanceof PayrollNotFoundError) {
+          return reply.code(404).send({ error: "payroll_not_found", message: error.message });
+        }
+        if (error instanceof PayrollConflictError) {
+          return reply.code(409).send({ error: "payroll_conflict", message: error.message });
+        }
+        throw error;
+      }
+    },
+  );
+
+  app.get(
+    "/api/payroll-runs/:runId/finance-export.csv",
+    { preHandler: [authenticate, settlePermission] },
+    async (request, reply) => {
+      const { runId } = runParams.parse(request.params);
+      try {
+        const exported = await service.financeExport(request.auth!, runId);
+        return reply
+          .header("content-type", "text/csv; charset=utf-8")
+          .header(
+            "content-disposition",
+            `attachment; filename*=UTF-8''${encodeURIComponent(exported.fileName)}`,
+          )
+          .header("cache-control", "private, no-store")
+          .send(exported.csv);
+      } catch (error) {
+        if (error instanceof PayrollNotFoundError) {
+          return reply.code(404).send({ error: "payroll_not_found", message: error.message });
+        }
+        if (error instanceof PayrollConflictError) {
+          return reply.code(409).send({ error: "payroll_conflict", message: error.message });
+        }
+        throw error;
+      }
+    },
+  );
+
+  app.post(
+    "/api/payroll-runs/:runId/reopen",
+    { preHandler: [app.csrfProtection, authenticate, settlePermission] },
+    async (request, reply) => {
+      const { runId } = runParams.parse(request.params);
+      try {
+        return { run: await service.reopenSettlement(request.auth!, runId) };
       } catch (error) {
         if (error instanceof PayrollNotFoundError) {
           return reply.code(404).send({ error: "payroll_not_found", message: error.message });

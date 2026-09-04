@@ -43,30 +43,63 @@ export default function AnalyticsChart({
   const container = useRef<HTMLDivElement>(null);
   const frame = useRef<HTMLDivElement>(null);
   const chartRef = useRef<echarts.EChartsType | null>(null);
+  const onDataSelectRef = useRef(onDataSelect);
+  const optionSignatureRef = useRef("");
+
+  useEffect(() => {
+    onDataSelectRef.current = onDataSelect;
+  }, [onDataSelect]);
 
   useEffect(() => {
     const element = container.current;
     if (!element) return undefined;
     const chart = echarts.init(element, undefined, { renderer: "canvas" });
     chartRef.current = chart;
-    chart.setOption(option, { notMerge: true });
     const handleClick = (params: { data?: unknown; name?: string; value?: unknown }) => {
-      if (!onDataSelect) return;
-      onDataSelect({
+      if (!onDataSelectRef.current) return;
+      onDataSelectRef.current({
         data: params.data,
         name: params.name ?? "",
         value: params.value,
       });
     };
     chart.on("click", handleClick);
-    const observer = new ResizeObserver(() => chart.resize());
+    let resizeFrame = 0;
+    const observer = new ResizeObserver(() => {
+      window.cancelAnimationFrame(resizeFrame);
+      resizeFrame = window.requestAnimationFrame(() => chart.resize());
+    });
     observer.observe(element);
     return () => {
+      window.cancelAnimationFrame(resizeFrame);
       observer.disconnect();
+      chart.off("click", handleClick);
       chart.dispose();
       chartRef.current = null;
     };
-  }, [onDataSelect, option]);
+  }, []);
+
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart) return;
+    // Realtime reconciliation frequently returns an equivalent object graph.
+    // Avoid replaying chart animations when the visible option did not change,
+    // and update the existing canvas instead of disposing/recreating it. This
+    // preserves scroll position, hover state and data-zoom interaction.
+    const signature = JSON.stringify(option);
+    if (signature === optionSignatureRef.current) return;
+    optionSignatureRef.current = signature;
+    chart.setOption(option, {
+      lazyUpdate: true,
+      notMerge: false,
+    });
+  }, [option]);
+
+  useEffect(() => {
+    const resize = () => chartRef.current?.resize();
+    document.addEventListener("fullscreenchange", resize);
+    return () => document.removeEventListener("fullscreenchange", resize);
+  }, []);
 
   const downloadImage = () => {
     const chart = chartRef.current;
@@ -103,7 +136,7 @@ export default function AnalyticsChart({
           全屏
         </button>
       </div>
-      <div aria-label={ariaLabel} className="h-72 w-full fullscreen:h-full" ref={container} role="img" />
+      <div aria-label={ariaLabel} className="h-64 w-full sm:h-72 lg:h-80 fullscreen:h-full" ref={container} role="img" />
     </div>
   );
 }

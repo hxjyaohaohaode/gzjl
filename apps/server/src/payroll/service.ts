@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import { and, asc, desc, eq, gt, inArray, isNull, lt, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNull, lt, ne, or, sql } from "drizzle-orm";
 import type { Database } from "@workbench/db";
 import {
   auditLogs,
@@ -127,6 +127,11 @@ function splitMicros(value: bigint, count: number): bigint[] {
     remainder -= extra;
     return quotient + extra;
   });
+}
+
+function csvCell(value: string | number | null): string {
+  const text = value === null ? "" : String(value);
+  return /[",\r\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
 }
 
 function parseRule(row: typeof rateRules.$inferSelect): PayrollRateRule | null {
@@ -270,7 +275,19 @@ function zonedMonthBoundary(timezone: string, monthOffset: number): Date {
   return new Date(targetAsUtc.getTime() - (representedLocalAsUtc - targetAsUtc.getTime()));
 }
 
-function zonedCutoffAt(timezone: string, cutoffDay: number): Date {
+function payrollCutoffMinute(settings: unknown): number {
+  if (!settings || typeof settings !== "object") return 18 * 60;
+  const value = (settings as Record<string, unknown>).payrollCutoffMinute;
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 1_439
+    ? value
+    : 18 * 60;
+}
+
+function zonedCutoffAt(
+  timezone: string,
+  cutoffDay: number,
+  cutoffMinute: number,
+): Date {
   const nowParts = new Intl.DateTimeFormat("en-CA", {
     timeZone: timezone,
     year: "numeric",
@@ -279,7 +296,13 @@ function zonedCutoffAt(timezone: string, cutoffDay: number): Date {
   const year = Number(nowParts.find((part) => part.type === "year")?.value);
   const month = Number(nowParts.find((part) => part.type === "month")?.value);
   const targetAsUtc = new Date(
-    Date.UTC(year, month, cutoffDay, 18),
+    Date.UTC(
+      year,
+      month,
+      cutoffDay,
+      Math.floor(cutoffMinute / 60),
+      cutoffMinute % 60,
+    ),
   );
   const offsetParts = new Intl.DateTimeFormat("en-CA", {
     timeZone: timezone,
@@ -304,6 +327,18 @@ function zonedCutoffAt(timezone: string, cutoffDay: number): Date {
   return new Date(targetAsUtc.getTime() - (representedLocalAsUtc - targetAsUtc.getTime()));
 }
 
+function localDateKey(value: Date, timezone: string): string {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: timezone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(value);
+  const read = (type: Intl.DateTimeFormatPartTypes) =>
+    parts.find((part) => part.type === type)?.value ?? "";
+  return `${read("year")}-${read("month")}-${read("day")}`;
+}
+
 export class PayrollService {
   constructor(private readonly db: Database) {}
 
@@ -313,11 +348,18 @@ export class PayrollService {
       plan: typeof compensationPlans.$inferSelect;
       version: typeof compensationPlanVersions.$inferSelect;
     },
-    organization: { timezone: string; payrollCutoffDay: number },
+    organization: {
+      timezone: string;
+      payrollCutoffDay: number;
+      payrollCutoffMinute: number;
+    },
   ) {
     const startsAt = zonedMonthBoundary(organization.timezone, 0);
     const endsAt = zonedMonthBoundary(organization.timezone, 1);
-    const weeklyContextStartsAt = new Date(startsAt.getTime() - 7 * 24 * 60 * 60_000);
+    // A payroll month is a hard reward boundary. A natural week that spans
+    // two months is intentionally evaluated as two independent partial weeks
+    // (for example Sep 28-30 and Oct 1-4).
+    const weeklyContextStartsAt = startsAt;
     const currentSessions = await this.db
       .select()
       .from(workSessions)
@@ -386,6 +428,17 @@ export class PayrollService {
     let needsReview = false;
     let weeklyBonusSeconds = 0;
     let weeklyBonusEstimatedSeconds = 0;
+    const liveComponents: Array<{
+      date: string;
+      amount: string;
+      seconds: number;
+      estimate: boolean;
+      bonus: boolean;
+    }> = [];
+    const monthDates = localDateKeysForIntervals(
+      [{ startAt: startsAt, endAt: endsAt }],
+      organization.timezone,
+    );
     if (version.type === "hourly" || version.type === "hybrid") {
       const currentRules = await this.db
         .select()
@@ -410,11 +463,30 @@ export class PayrollService {
       estimatedAmount = hourly.grossAmount;
       weeklyBonusSeconds = hourly.weeklyBonusSeconds;
       weeklyBonusEstimatedSeconds = hourly.weeklyBonusEstimatedSeconds;
+      liveComponents.push(
+        ...hourly.components.map((component) => ({
+          date: String(component.trace.date),
+          amount: component.amount,
+          seconds: component.seconds,
+          estimate: component.estimate,
+          bonus: component.type === "bonus",
+        })),
+      );
       if (version.type === "hybrid") {
         const fixedAmount = (version.config as Record<string, unknown>)
           .fixedAmount;
         if (typeof fixedAmount === "string") {
           estimatedAmount = addDecimalAmounts(estimatedAmount, fixedAmount);
+          const allocations = splitMicros(decimalMicros(fixedAmount), monthDates.length);
+          monthDates.forEach((date, index) =>
+            liveComponents.push({
+              date,
+              amount: formatMicros(allocations[index] ?? 0n),
+              seconds: 0,
+              estimate: false,
+              bonus: false,
+            }),
+          );
         }
       }
     } else if (version.type === "daily") {
@@ -430,10 +502,91 @@ export class PayrollService {
         version.baseAmount,
         payableDates.length,
       );
+      for (const date of payableDates) {
+        const dateIntervals = intervals.filter((interval) =>
+          localDateKeysForIntervals([interval], organization.timezone).includes(date),
+        );
+        liveComponents.push({
+          date,
+          amount: version.baseAmount,
+          seconds: 0,
+          estimate:
+            !dateIntervals.some((interval) => interval.approvalStatus === "approved") &&
+            dateIntervals.some((interval) => interval.approvalStatus === "pending_review"),
+          bonus: false,
+        });
+      }
     } else {
       estimatedAmount = version.baseAmount;
       needsReview = version.type === "project_based";
+      const allocations = splitMicros(decimalMicros(version.baseAmount), monthDates.length);
+      monthDates.forEach((date, index) =>
+        liveComponents.push({
+          date,
+          amount: formatMicros(allocations[index] ?? 0n),
+          seconds: 0,
+          estimate: needsReview,
+          bonus: false,
+        }),
+      );
     }
+    const daily = new Map<
+      string,
+      { approvedAmount: bigint; pendingAmount: bigint; workedSeconds: number; bonusSeconds: number }
+    >(
+      monthDates.map((date) => [
+        date,
+        { approvedAmount: 0n, pendingAmount: 0n, workedSeconds: 0, bonusSeconds: 0 },
+      ]),
+    );
+    for (const component of liveComponents) {
+      const current = daily.get(component.date) ?? {
+        approvedAmount: 0n,
+        pendingAmount: 0n,
+        workedSeconds: 0,
+        bonusSeconds: 0,
+      };
+      const amount = decimalMicros(component.amount);
+      if (component.estimate) current.pendingAmount += amount;
+      else current.approvedAmount += amount;
+      if (component.bonus) current.bonusSeconds += component.seconds;
+      else current.workedSeconds += component.seconds;
+      daily.set(component.date, current);
+    }
+    const today = localDateKey(new Date(), organization.timezone);
+    const elapsedDates = monthDates.filter((date) => date <= today);
+    let actualCumulative = 0n;
+    const actualToToday = elapsedDates.reduce((total, date) => {
+      const amount = daily.get(date)!;
+      return total + amount.approvedAmount + amount.pendingAmount;
+    }, 0n);
+    const averagePerElapsedDay = elapsedDates.length
+      ? actualToToday / BigInt(elapsedDates.length)
+      : 0n;
+    let projectedCumulative = 0n;
+    const salaryTimeline = monthDates.map((date) => {
+      const amount = daily.get(date)!;
+      const dailyTotal = amount.approvedAmount + amount.pendingAmount;
+      if (date <= today) {
+        actualCumulative += dailyTotal;
+        projectedCumulative = actualCumulative;
+      } else {
+        // Prefer an already-recorded future fact/fixed allocation; only use
+        // the elapsed-day trend when that future date has no known amount.
+        projectedCumulative += dailyTotal !== 0n ? dailyTotal : averagePerElapsedDay;
+      }
+      return {
+        date,
+        approvedAmount: formatMicros(amount.approvedAmount),
+        pendingAmount: formatMicros(amount.pendingAmount),
+        totalAmount: formatMicros(dailyTotal),
+        workedSeconds: amount.workedSeconds,
+        bonusSeconds: amount.bonusSeconds,
+        actualCumulativeAmount: date <= today ? formatMicros(actualCumulative) : null,
+        projectedCumulativeAmount: formatMicros(projectedCumulative),
+        forecast: date > today,
+      };
+    });
     return {
       period: {
         startsAt,
@@ -441,6 +594,7 @@ export class PayrollService {
         cutoffAt: zonedCutoffAt(
           organization.timezone,
           organization.payrollCutoffDay,
+          organization.payrollCutoffMinute,
         ),
       },
       currency: currentPlan.plan.currency,
@@ -451,6 +605,8 @@ export class PayrollService {
       weeklyBonusSeconds,
       weeklyBonusEstimatedSeconds,
       estimatedAmount,
+      projectedPeriodAmount: formatMicros(projectedCumulative),
+      salaryTimeline,
       includesPending: version.pendingReviewCountsInEstimate,
       needsReview,
     };
@@ -500,6 +656,7 @@ export class PayrollService {
         .select({
           timezone: organizations.timezone,
           payrollCutoffDay: organizations.payrollCutoffDay,
+          settings: organizations.settings,
         })
         .from(organizations)
         .where(eq(organizations.id, actor.organizationId))
@@ -550,12 +707,19 @@ export class PayrollService {
     );
     const latestPayrollItems = new Map<string, (typeof payrollRecords)[number]>();
     for (const record of payrollRecords) {
+      if (record.run.status === "cancelled") continue;
       const key = `${record.period.id}:${record.item.membershipId}`;
       if (!latestPayrollItems.has(key)) latestPayrollItems.set(key, record);
     }
     const organizationSettings = organization[0] ?? {
       timezone: "Asia/Shanghai",
       payrollCutoffDay: 10,
+      settings: {},
+    };
+    const normalizedOrganizationSettings = {
+      timezone: organizationSettings.timezone,
+      payrollCutoffDay: organizationSettings.payrollCutoffDay,
+      payrollCutoffMinute: payrollCutoffMinute(organizationSettings.settings),
     };
     const liveItems = (
       await Promise.all(
@@ -574,7 +738,7 @@ export class PayrollService {
               preview: await this.buildLivePreview(
                 { ...actor, membershipId: member.membershipId },
                 plan,
-                organizationSettings,
+                normalizedOrganizationSettings,
               ),
             };
           }),
@@ -590,25 +754,47 @@ export class PayrollService {
       runs,
       latestItems: [...latestPayrollItems.values()],
       liveItems,
-      settings: organizationSettings,
+      settings: normalizedOrganizationSettings,
     };
   }
 
-  async updateSettings(actor: PayrollActor, payrollCutoffDay: number) {
+  async updateSettings(
+    actor: PayrollActor,
+    payrollCutoffDay: number,
+    payrollCutoffMinuteValue = 18 * 60,
+  ) {
     const [before] = await this.db
-      .select({ payrollCutoffDay: organizations.payrollCutoffDay })
+      .select({
+        payrollCutoffDay: organizations.payrollCutoffDay,
+        settings: organizations.settings,
+      })
       .from(organizations)
       .where(eq(organizations.id, actor.organizationId))
       .limit(1);
     if (!before) throw new PayrollNotFoundError();
     const [settings] = await this.db
       .update(organizations)
-      .set({ payrollCutoffDay, updatedAt: new Date() })
+      .set({
+        payrollCutoffDay,
+        settings: {
+          ...((before.settings ?? {}) as Record<string, unknown>),
+          payrollCutoffMinute: payrollCutoffMinuteValue,
+        },
+        updatedAt: new Date(),
+      })
       .where(eq(organizations.id, actor.organizationId))
       .returning({
         timezone: organizations.timezone,
         payrollCutoffDay: organizations.payrollCutoffDay,
+        settings: organizations.settings,
       });
+    const normalizedSettings = settings
+      ? {
+          timezone: settings.timezone,
+          payrollCutoffDay: settings.payrollCutoffDay,
+          payrollCutoffMinute: payrollCutoffMinute(settings.settings),
+        }
+      : undefined;
     await this.db.insert(auditLogs).values({
       organizationId: actor.organizationId,
       actorMembershipId: actor.membershipId,
@@ -616,9 +802,9 @@ export class PayrollService {
       entityType: "organization",
       entityId: actor.organizationId,
       before,
-      after: settings,
+      after: normalizedSettings,
     });
-    return settings;
+    return normalizedSettings;
   }
 
   async configurePlan(
@@ -870,9 +1056,7 @@ export class PayrollService {
       );
     if (planRows.length === 0) throw new PayrollConflictError("当前周期没有生效的薪资方案。")
 
-    const weeklyContextStartsAt = new Date(
-      period.startsAt.getTime() - 7 * 24 * 60 * 60_000,
-    );
+    const weeklyContextStartsAt = period.startsAt;
     const contextSessions = await this.db
       .select()
       .from(workSessions)
@@ -1180,7 +1364,7 @@ export class PayrollService {
     });
 
     const snapshotPayload = {
-      calculationVersion: "payroll-engine-v3-weekly-bonus",
+      calculationVersion: "payroll-engine-v4-period-week-bonus",
       period,
       plans: planRows,
       rules,
@@ -1216,7 +1400,7 @@ export class PayrollService {
           status: calculatedItems.some((item) => item.needsReview)
             ? "review_required"
             : "ready",
-          calculationVersion: "payroll-engine-v3-weekly-bonus",
+          calculationVersion: "payroll-engine-v4-period-week-bonus",
           requestedBy: actor.membershipId,
           inputHash,
           startedAt: new Date(),
@@ -1420,6 +1604,181 @@ export class PayrollService {
     });
   }
 
+  async financeExport(actor: PayrollActor, runId: string) {
+    const [record] = await this.db
+      .select({ run: payrollRuns, period: payPeriods })
+      .from(payrollRuns)
+      .innerJoin(payPeriods, eq(payPeriods.id, payrollRuns.payPeriodId))
+      .where(
+        and(
+          eq(payrollRuns.id, runId),
+          eq(payPeriods.organizationId, actor.organizationId),
+          ne(payrollRuns.status, "cancelled"),
+        ),
+      )
+      .limit(1);
+    if (!record) throw new PayrollNotFoundError();
+    if (record.run.status !== "ready" && record.run.status !== "settled") {
+      throw new PayrollConflictError("只有已就绪或已锁定的薪资批次可以导出财务账单。");
+    }
+    const rows = await this.db
+      .select({ item: payrollItems, displayName: users.displayName })
+      .from(payrollItems)
+      .innerJoin(orgMemberships, eq(orgMemberships.id, payrollItems.membershipId))
+      .innerJoin(users, eq(users.id, orgMemberships.userId))
+      .where(eq(payrollItems.payrollRunId, runId))
+      .orderBy(asc(users.displayName));
+    const components = rows.length
+      ? await this.db
+          .select()
+          .from(payrollItemComponents)
+          .where(inArray(payrollItemComponents.payrollItemId, rows.map((row) => row.item.id)))
+      : [];
+    const bonusByItem = new Map<string, number>();
+    for (const component of components) {
+      if (component.type !== "bonus" || component.unit !== "second") continue;
+      bonusByItem.set(
+        component.payrollItemId,
+        (bonusByItem.get(component.payrollItemId) ?? 0) + Number(component.quantity ?? 0),
+      );
+    }
+    const header = [
+      "员工",
+      "薪资周期",
+      "周期开始",
+      "周期结束",
+      "币种",
+      "已批准工时",
+      "待审核工时",
+      "周奖励工时",
+      "应计金额",
+      "调整金额",
+      "最终金额",
+      "是否预估",
+      "是否需复核",
+      "批次号",
+      "批次状态",
+    ];
+    const data = rows.map(({ item, displayName }) => [
+      displayName,
+      record.period.name,
+      record.period.startsAt.toISOString(),
+      record.period.endsAt.toISOString(),
+      item.currency,
+      (item.approvedSeconds / 3_600).toFixed(4),
+      (item.pendingSeconds / 3_600).toFixed(4),
+      ((bonusByItem.get(item.id) ?? 0) / 3_600).toFixed(4),
+      item.grossAmount,
+      item.adjustmentAmount,
+      item.finalAmount,
+      item.estimate ? "是" : "否",
+      item.needsReview ? "是" : "否",
+      record.run.runNumber,
+      record.run.status === "settled" ? "已导出并锁定" : "待导出锁定",
+    ]);
+    const csv = `\uFEFF${[header, ...data]
+      .map((row) => row.map((value) => csvCell(value)).join(","))
+      .join("\r\n")}\r\n`;
+    const safePeriod = record.period.name.replace(/[\\/:*?"<>|]+/g, "-");
+    return {
+      fileName: `${safePeriod}-财务薪资账单-批次${record.run.runNumber}.csv`,
+      csv,
+    };
+  }
+
+  async reopenSettlement(actor: PayrollActor, runId: string) {
+    const [record] = await this.db
+      .select({ run: payrollRuns, period: payPeriods })
+      .from(payrollRuns)
+      .innerJoin(payPeriods, eq(payPeriods.id, payrollRuns.payPeriodId))
+      .where(
+        and(
+          eq(payrollRuns.id, runId),
+          eq(payPeriods.organizationId, actor.organizationId),
+        ),
+      )
+      .limit(1);
+    if (!record) throw new PayrollNotFoundError();
+    if (record.run.status !== "settled" || !record.run.settledAt) {
+      throw new PayrollConflictError("只有已导出并锁定的批次可以撤销。");
+    }
+    const settledAt = record.run.settledAt;
+    return this.db.transaction(async (tx) => {
+      const [cancelled] = await tx
+        .update(payrollRuns)
+        .set({ status: "cancelled", errorSummary: "由薪资管理员撤销导出锁定" })
+        .where(and(eq(payrollRuns.id, runId), eq(payrollRuns.status, "settled")))
+        .returning();
+      if (!cancelled) throw new PayrollConflictError("该批次已由其他操作处理。");
+      const reopenedAt = new Date();
+      await tx
+        .update(payPeriods)
+        .set({
+          status: "open",
+          settledAt: null,
+          lockedAt: null,
+          updatedAt: reopenedAt,
+        })
+        .where(eq(payPeriods.id, record.period.id));
+      const unlockedSessions = await tx
+        .update(workSessions)
+        .set({
+          approvalStatus: "approved",
+          lockedAt: null,
+          updatedAt: reopenedAt,
+          version: sql`${workSessions.version} + 1`,
+        })
+        .where(
+          and(
+            eq(workSessions.organizationId, actor.organizationId),
+            eq(workSessions.approvalStatus, "locked"),
+            eq(workSessions.lockedAt, settledAt),
+            lt(workSessions.startAt, record.period.endsAt),
+            gt(workSessions.endAt, record.period.startsAt),
+          ),
+        )
+        .returning();
+      if (unlockedSessions.length > 0) {
+        const sessionIds = unlockedSessions.map((session) => session.id);
+        const [breaks, projectLinks] = await Promise.all([
+          tx.select().from(workBreaks).where(inArray(workBreaks.workSessionId, sessionIds)),
+          tx
+            .select()
+            .from(workSessionProjectLinks)
+            .where(inArray(workSessionProjectLinks.workSessionId, sessionIds)),
+        ]);
+        await tx.insert(workSessionVersions).values(
+          unlockedSessions.map((session) => ({
+            workSessionId: session.id,
+            version: session.version,
+            snapshot: {
+              ...session,
+              breaks: breaks.filter((entry) => entry.workSessionId === session.id),
+              projectLinks: projectLinks.filter((entry) => entry.workSessionId === session.id),
+            },
+            changeReason: "payroll_export_lock_reopened",
+            changedBy: actor.membershipId,
+          })),
+        );
+      }
+      await tx.insert(auditLogs).values({
+        organizationId: actor.organizationId,
+        actorMembershipId: actor.membershipId,
+        action: "payroll.export_lock_reopened",
+        entityType: "payroll_run",
+        entityId: runId,
+        before: { status: "settled", settledAt: record.run.settledAt },
+        after: {
+          status: "cancelled",
+          periodStatus: "open",
+          unlockedWorkSessionCount: unlockedSessions.length,
+          reopenedAt,
+        },
+      });
+      return cancelled;
+    });
+  }
+
   async listOwn(
     actor: PayrollActor,
     range?: { from: Date; to: Date },
@@ -1439,6 +1798,7 @@ export class PayrollService {
         and(
           eq(payrollItems.membershipId, actor.membershipId),
           eq(payPeriods.organizationId, actor.organizationId),
+          ne(payrollRuns.status, "cancelled"),
           range ? lt(payPeriods.startsAt, range.to) : undefined,
           range ? gt(payPeriods.endsAt, range.from) : undefined,
         ),
@@ -1557,6 +1917,7 @@ export class PayrollService {
         .select({
           timezone: organizations.timezone,
           payrollCutoffDay: organizations.payrollCutoffDay,
+          settings: organizations.settings,
         })
         .from(organizations)
         .where(eq(organizations.id, actor.organizationId))
@@ -1564,7 +1925,11 @@ export class PayrollService {
     ]);
     const livePreview =
       currentPlan && organization
-        ? await this.buildLivePreview(actor, currentPlan, organization)
+        ? await this.buildLivePreview(actor, currentPlan, {
+            timezone: organization.timezone,
+            payrollCutoffDay: organization.payrollCutoffDay,
+            payrollCutoffMinute: payrollCutoffMinute(organization.settings),
+          })
         : null;
     return {
       items,
@@ -1596,7 +1961,7 @@ export class PayrollService {
       .limit(1);
     if (!record) throw new PayrollNotFoundError();
     if (record.run.status !== "settled") {
-      throw new PayrollConflictError("薪资尚未由发放方确认结算，暂不能确认收款。");
+      throw new PayrollConflictError("薪资账单尚未导出并锁定，暂不能确认到账。");
     }
     if (record.payslip.acknowledgedAt) return record.payslip;
     const acknowledgedAt = new Date();

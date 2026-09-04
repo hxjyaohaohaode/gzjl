@@ -60,7 +60,7 @@ export function useRealtimeSync(enabled: boolean): RealtimeSyncStatus {
           type: "active",
           refetchType: "active",
         });
-      }, 600);
+      }, 1_500);
     };
     const scheduleReconnect = () => {
       if (disposed || reconnectTimer !== undefined) return;
@@ -109,7 +109,9 @@ export function useRealtimeSync(enabled: boolean): RealtimeSyncStatus {
         if (!message || typeof message.type !== "string") return;
         if (message.type === "heartbeat") return;
         // A fresh connection can have missed events while the device was
-        // offline, so ready is deliberately treated as a full refetch signal.
+        // offline, so ready is deliberately treated as a reconciled refetch.
+        // Bursts are coalesced above so one saved work entry cannot make every
+        // open chart replay several refreshes in succession.
         invalidate();
       });
       socket.addEventListener("close", (event) => {

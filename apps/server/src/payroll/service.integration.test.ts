@@ -208,7 +208,25 @@ describe("employee payroll view and receipt acknowledgement", () => {
       acknowledged.acknowledgedAt?.toISOString(),
     );
 
-    await service.updateSettings(ownerActor, 15);
+    const financeFile = await service.financeExport(ownerActor, run!.id);
+    expect(financeFile.fileName).toContain("财务薪资账单");
+    expect(financeFile.csv.startsWith("\uFEFF员工,薪资周期")).toBe(true);
+    expect(financeFile.csv).toContain("员工,历史周期");
+
+    const reopened = await service.reopenSettlement(ownerActor, run!.id);
+    expect(reopened).toMatchObject({ status: "cancelled" });
+    const [cancelledRun] = await db
+      .select()
+      .from(payrollRuns)
+      .where(eq(payrollRuns.id, run!.id));
+    expect(cancelledRun?.status).toBe("cancelled");
+    const [reopenedPeriod] = await db
+      .select()
+      .from(payPeriods)
+      .where(eq(payPeriods.id, period!.id));
+    expect(reopenedPeriod).toMatchObject({ status: "open", settledAt: null, lockedAt: null });
+
+    await service.updateSettings(ownerActor, 15, 9 * 60 + 30);
     const after = await service.listOwn(employeeActor);
     expect(
       new Intl.DateTimeFormat("en-CA", {
@@ -216,9 +234,18 @@ describe("employee payroll view and receipt acknowledgement", () => {
         day: "2-digit",
       }).format(new Date(after.livePreview!.period.cutoffAt)),
     ).toBe("15");
+    expect(
+      new Intl.DateTimeFormat("en-CA", {
+        timeZone: "Asia/Shanghai",
+        hour: "2-digit",
+        minute: "2-digit",
+        hourCycle: "h23",
+      }).format(new Date(after.livePreview!.period.cutoffAt)),
+    ).toBe("09:30");
+    expect(after.items).toHaveLength(0);
   });
 
-  it("persists a member weekly reward and uses locked cross-period work exactly once", async () => {
+  it("keeps weekly rewards inside the payroll month boundary", async () => {
     const db = await createTestDatabase();
     const [organization] = await db
       .insert(organizations)
@@ -323,7 +350,7 @@ describe("employee payroll view and receipt acknowledgement", () => {
       })
       .returning();
     const run = await service.calculate(ownerActor, period!.id);
-    expect(run.calculationVersion).toBe("payroll-engine-v3-weekly-bonus");
+    expect(run.calculationVersion).toBe("payroll-engine-v4-period-week-bonus");
     const [item] = await db
       .select()
       .from(payrollItems)
@@ -331,25 +358,14 @@ describe("employee payroll view and receipt acknowledgement", () => {
     expect(item).toMatchObject({
       approvedSeconds: 25_200,
       pendingSeconds: 0,
-      grossAmount: "1200.000000",
-      finalAmount: "1200.000000",
+      grossAmount: "700.000000",
+      finalAmount: "700.000000",
       estimate: false,
     });
     const components = await db
       .select()
       .from(payrollItemComponents)
       .where(eq(payrollItemComponents.payrollItemId, item!.id));
-    expect(components.filter((component) => component.type === "bonus")).toHaveLength(1);
-    expect(components.find((component) => component.type === "bonus")).toMatchObject({
-      label: "周超时奖励",
-      quantity: "18000.000000",
-      unit: "second",
-      amount: "500.000000",
-      calculationTrace: expect.objectContaining({
-        weekStartDate: "2026-08-31",
-        thresholdSeconds: 108_000,
-        rewardSeconds: 18_000,
-      }),
-    });
+    expect(components.filter((component) => component.type === "bonus")).toHaveLength(0);
   });
 });

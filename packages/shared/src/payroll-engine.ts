@@ -66,6 +66,15 @@ export interface PayrollCalculationResult {
 const SCALE = 1_000_000n;
 const SECONDS_PER_HOUR = 3_600n;
 
+const payrollComponentLabels: Record<Exclude<PayrollComponentType, "bonus">, string> = {
+  base: "基础工时",
+  weekday: "工作日工时",
+  weekend: "周末工时",
+  holiday: "节假日工时",
+  night_window: "夜间工时",
+  overtime: "超时工时",
+};
+
 function parseDecimal(value: string): bigint {
   const normalized = value.trim();
   if (!/^-?\d+(\.\d{1,6})?$/.test(normalized)) {
@@ -248,9 +257,13 @@ function weeklyThresholdCrossings(
       const sourceIds = sourceIdsByWeek.get(week) ?? new Set<string>();
       sourceIds.add(interval.sourceId);
       sourceIdsByWeek.set(week, sourceIds);
-      if (!crossings.has(week) && cumulative + seconds > thresholdSeconds) {
+      if (!crossings.has(week) && cumulative + seconds >= thresholdSeconds) {
+        // Intervals are end-exclusive. Attribute the reward to the first
+        // second that completes the threshold so an exact 30:00:00 total is
+        // inside the source interval instead of landing on its end boundary.
         const earnedAt = new Date(
-          cursor.getTime() + Math.max(0, thresholdSeconds - cumulative) * 1_000,
+          cursor.getTime() +
+            Math.max(0, thresholdSeconds - cumulative - 1) * 1_000,
         );
         crossings.set(week, {
           weekStartDate: week,
@@ -258,7 +271,7 @@ function weeklyThresholdCrossings(
           earnedAt,
           sourceId: interval.sourceId,
           sourceIds: new Set(sourceIds),
-          actualSeconds: cumulative + seconds,
+          actualSeconds: thresholdSeconds,
         });
       }
       cumulativeByWeek.set(week, cumulative + seconds);
@@ -390,7 +403,7 @@ export function calculateHourlyPayroll(input: {
           component = {
             date: parts.date,
             type: selectedType,
-            label: selectedType === "base" ? "基础工时" : selectedType,
+            label: payrollComponentLabels[selectedType],
             sourceIds: new Set(),
             seconds: 0,
             hourlyRate: input.hourlyRate,

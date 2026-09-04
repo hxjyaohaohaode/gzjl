@@ -22,7 +22,13 @@ import {
 } from "@workbench/ui";
 
 import { api } from "./api.js";
+import { getCalendarAlmanac } from "./calendar-almanac.js";
 import { EmptyState, ErrorMessage, LoadingBlock, PageHeader } from "./pages.js";
+import {
+  getOrganizationTimezone,
+  toZonedInputValue,
+  zonedInputToDate,
+} from "./timezone.js";
 
 type CalendarView = "day" | "week" | "month" | "list";
 type StatusFilter = "all" | "draft" | "submitted" | "approved" | "plan";
@@ -71,6 +77,24 @@ function addDays(value: Date, days: number): Date {
 function dateKey(value: Date): string {
   return `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, "0")}-${String(value.getDate()).padStart(2, "0")}`;
 }
+function organizationWallDate(value: string | Date = new Date()): Date {
+  const local = toZonedInputValue(new Date(value));
+  const [datePart = "1970-01-01", timePart = "00:00:00"] = local.split("T");
+  const [year = 1970, month = 1, day = 1] = datePart.split("-").map(Number);
+  const [hour = 0, minute = 0, second = 0] = timePart.split(":").map(Number);
+  return new Date(year, month - 1, day, hour, minute, second);
+}
+function wallInputValue(value: Date): string {
+  return `${dateKey(value)}T${String(value.getHours()).padStart(2, "0")}:${String(value.getMinutes()).padStart(2, "0")}:${String(value.getSeconds()).padStart(2, "0")}`;
+}
+function wallDateToInstant(value: Date): Date {
+  return zonedInputToDate(wallInputValue(value));
+}
+function shiftInstantByOrganizationDays(value: string, days: number): Date {
+  const wall = organizationWallDate(value);
+  wall.setDate(wall.getDate() + days);
+  return wallDateToInstant(wall);
+}
 function dayDelta(from: Date, to: Date): number {
   return Math.round(
     (startOfDay(to).getTime() - startOfDay(from).getTime()) / 86_400_000,
@@ -83,13 +107,18 @@ function formatDuration(seconds: number): string {
 }
 function formatTime(value: string | Date): string {
   return new Intl.DateTimeFormat("zh-CN", {
+    timeZone: getOrganizationTimezone(),
     hour: "2-digit",
     minute: "2-digit",
     hour12: false,
   }).format(new Date(value));
 }
+function formatWallTime(value: Date): string {
+  return `${String(value.getHours()).padStart(2, "0")}:${String(value.getMinutes()).padStart(2, "0")}`;
+}
 function formatDate(value: string): string {
   return new Intl.DateTimeFormat("zh-CN", {
+    timeZone: getOrganizationTimezone(),
     month: "numeric",
     day: "numeric",
     weekday: "short",
@@ -100,8 +129,8 @@ function splitCalendarSession(
   periodStart: Date,
   periodEnd: Date,
 ): CalendarSessionSegment[] {
-  const originalStart = new Date(session.startAt);
-  const originalEnd = new Date(session.endAt);
+  const originalStart = organizationWallDate(session.startAt);
+  const originalEnd = organizationWallDate(session.endAt);
   if (
     Number.isNaN(originalStart.getTime()) ||
     Number.isNaN(originalEnd.getTime()) ||
@@ -175,7 +204,7 @@ function MiniCalendar({
   anchorDate: Date;
   onPick: (date: Date) => void;
 }) {
-  const today = startOfDay(new Date());
+  const today = startOfDay(organizationWallDate());
   const monthStart = new Date(
     anchorDate.getFullYear(),
     anchorDate.getMonth(),
@@ -201,7 +230,9 @@ function MiniCalendar({
         ))}
       </div>
       <div className="calendar-mini-days">
-        {dates.map((date) => (
+        {dates.map((date) => {
+          const almanac = getCalendarAlmanac(date);
+          return (
           <button
             aria-label={new Intl.DateTimeFormat("zh-CN", {
               month: "long",
@@ -214,11 +245,13 @@ function MiniCalendar({
             )}
             key={dateKey(date)}
             onClick={() => onPick(date)}
+            title={almanac.detail}
             type="button"
           >
             {date.getDate()}
           </button>
-        ))}
+          );
+        })}
       </div>
     </section>
   );
@@ -237,11 +270,11 @@ function CalendarEvent({
   const isPlan = session.recordKind === "plan";
   const movable = session.submissionStatus === "draft";
   const isCrossDayFragment =
-    item.displayStartAt.getTime() !== new Date(session.startAt).getTime() ||
-    item.displayEndAt.getTime() !== new Date(session.endAt).getTime();
+    item.displayStartAt.getTime() !== organizationWallDate(session.startAt).getTime() ||
+    item.displayEndAt.getTime() !== organizationWallDate(session.endAt).getTime();
   return (
     <div
-      aria-label={`${session.content}，${formatTime(item.displayStartAt)} 至 ${formatTime(item.displayEndAt)}${isCrossDayFragment ? "，跨日片段" : ""}${isPlan ? "，云端计划，不计入工时事实" : ""}${movable ? "，可拖拽改期" : ""}`}
+      aria-label={`${session.content}，${formatWallTime(item.displayStartAt)} 至 ${formatWallTime(item.displayEndAt)}${isCrossDayFragment ? "，跨日片段" : ""}${isPlan ? "，云端计划，不计入工时事实" : ""}${movable ? "，可拖拽改期" : ""}`}
       className={cn(
         "calendar-event",
         isPlan && "is-plan",
@@ -255,7 +288,7 @@ function CalendarEvent({
         {movable ? <GripVertical size={12} /> : null}
       </span>
       <time>
-        {formatTime(item.displayStartAt)} – {formatTime(item.displayEndAt)}
+        {formatWallTime(item.displayStartAt)} – {formatWallTime(item.displayEndAt)}
       </time>
       <strong className="block truncate">
         {isPlan ? <span className="calendar-event-kind">计划</span> : null}
@@ -302,7 +335,7 @@ export function CalendarPage() {
   const [view, setView] = useState<CalendarView>(() =>
     window.matchMedia("(max-width: 640px)").matches ? "day" : "week",
   );
-  const [anchorDate, setAnchorDate] = useState(() => new Date());
+  const [anchorDate, setAnchorDate] = useState(() => organizationWallDate());
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [showMilestones, setShowMilestones] = useState(false);
   const [dragging, setDragging] = useState<CalendarSessionSegment | null>(null);
@@ -318,12 +351,8 @@ export function CalendarPage() {
         method: "PATCH",
         body: {
           expectedVersion: item.version,
-          startAt: new Date(
-            new Date(item.startAt).getTime() + days * 86_400_000,
-          ).toISOString(),
-          endAt: new Date(
-            new Date(item.endAt).getTime() + days * 86_400_000,
-          ).toISOString(),
+          startAt: shiftInstantByOrganizationDays(item.startAt, days).toISOString(),
+          endAt: shiftInstantByOrganizationDays(item.endAt, days).toISOString(),
         },
       });
     },
@@ -332,7 +361,7 @@ export function CalendarPage() {
     },
   });
 
-  const [today] = useState(() => startOfDay(new Date()));
+  const [today] = useState(() => startOfDay(organizationWallDate()));
   const dayStart = startOfDay(anchorDate);
   const weekStart = addDays(dayStart, -((dayStart.getDay() + 6) % 7));
   const monthStart = new Date(dayStart.getFullYear(), dayStart.getMonth(), 1);
@@ -342,18 +371,20 @@ export function CalendarPage() {
     view === "month"
       ? new Date(monthStart.getFullYear(), monthStart.getMonth() + 1, 1)
       : addDays(periodStart, view === "day" ? 1 : 7);
+  const periodStartInstant = wallDateToInstant(periodStart);
+  const periodEndInstant = wallDateToInstant(periodEnd);
   const work = useQuery({
     queryKey: [
       "work-sessions",
       "calendar",
-      periodStart.toISOString(),
-      periodEnd.toISOString(),
+      periodStartInstant.toISOString(),
+      periodEndInstant.toISOString(),
     ],
     queryFn: () => {
       const query = new URLSearchParams({
         limit: "100",
-        from: periodStart.toISOString(),
-        to: periodEnd.toISOString(),
+        from: periodStartInstant.toISOString(),
+        to: periodEndInstant.toISOString(),
       });
       return api<{ items: CalendarSession[] }>(
         `/api/work-sessions?${query.toString()}`,
@@ -363,13 +394,13 @@ export function CalendarPage() {
   const milestones = useQuery({
     queryKey: [
       "calendar-milestones",
-      periodStart.toISOString(),
-      periodEnd.toISOString(),
+      periodStartInstant.toISOString(),
+      periodEndInstant.toISOString(),
     ],
     queryFn: () => {
       const query = new URLSearchParams({
-        startAt: periodStart.toISOString(),
-        endAt: periodEnd.toISOString(),
+        startAt: periodStartInstant.toISOString(),
+        endAt: periodEndInstant.toISOString(),
       });
       return api<{ items: CalendarMilestone[] }>(
         `/api/projects/calendar-milestones?${query.toString()}`,
@@ -391,7 +422,7 @@ export function CalendarPage() {
   const periodSessions = sessions.filter((item) => {
     const startsAt = new Date(item.startAt).getTime();
     const endsAt = new Date(item.endAt).getTime();
-    return startsAt < periodEnd.getTime() && endsAt > periodStart.getTime();
+    return startsAt < periodEndInstant.getTime() && endsAt > periodStartInstant.getTime();
   });
   const factualPeriodSessions = periodSessions.filter(
     (item) => item.recordKind !== "plan",
@@ -409,7 +440,7 @@ export function CalendarPage() {
   const periodMilestones = showMilestones ? (milestones.data?.items ?? []) : [];
   const milestonesByDate = new Map<string, CalendarMilestone[]>();
   periodMilestones.forEach((item) => {
-    const key = dateKey(new Date(item.dueAt));
+    const key = dateKey(organizationWallDate(item.dueAt));
     milestonesByDate.set(key, [...(milestonesByDate.get(key) ?? []), item]);
   });
   const weekDays = Array.from({ length: 7 }, (_, index) =>
@@ -474,7 +505,7 @@ export function CalendarPage() {
     <>
       <PageHeader
         title="工作日历"
-        description="日、周、月与列表同时呈现真实工时和私有云端计划；计划不会进入统计、AI、薪资、证据或审核。草稿可拖拽改期，服务端会保持时长、同步休息区间、校验重叠并记录版本。"
+        description="阳历、农历、节气、节日与真实工作记录统一查看。"
         actions={
           <div className="calendar-top-actions">
             <Button
@@ -486,7 +517,7 @@ export function CalendarPage() {
               <ChevronLeft size={17} />
             </Button>
             <Button
-              onClick={() => setAnchorDate(new Date())}
+              onClick={() => setAnchorDate(organizationWallDate())}
               size="compact"
               variant="secondary"
             >
@@ -612,12 +643,22 @@ export function CalendarPage() {
                 </span>
               </p>
             </div>
+            <div className="calendar-side-section calendar-almanac-note">
+              <CalendarDays size={16} />
+              <p>
+                <strong>历法说明</strong>
+                <span>已载入 2026 年国务院放假与调休安排；农历、传统节日和二十四节气可持续计算，未公布年份不预造调休。</span>
+              </p>
+            </div>
           </aside>
           <section className="min-w-0">
             <div className="calendar-period-bar">
               <div>
                 <p className="app-section-label">时间视图</p>
                 <h2>{rangeLabel}</h2>
+                {view === "day" ? (
+                  <p className="calendar-period-lunar">{getCalendarAlmanac(anchorDate).detail}</p>
+                ) : null}
               </div>
               <div>
                 <Badge tone="info">
@@ -639,10 +680,13 @@ export function CalendarPage() {
               {view === "week" ? (
                 <div className="calendar-week-scroll">
                   <div className="calendar-week-grid">
-                    {weekDays.map((date) => (
-                      <div
+                    {weekDays.map((date) => {
+                      const almanac = getCalendarAlmanac(date);
+                      return (
+                        <div
                         className={`calendar-week-heading ${isToday(date) ? "is-today" : ""}`}
                         key={dateKey(date)}
+                        title={almanac.detail}
                       >
                         <span>
                           {new Intl.DateTimeFormat("zh-CN", {
@@ -650,8 +694,15 @@ export function CalendarPage() {
                           }).format(date)}
                         </span>
                         <strong>{date.getDate()}</strong>
-                      </div>
-                    ))}
+                        <small className={cn((almanac.solarTerm || almanac.festivals.length) && "is-festival")}>{almanac.lunarLabel}</small>
+                        {almanac.officialSchedule ? (
+                          <small className={cn("calendar-official-label", almanac.officialSchedule.status === "workday" && "is-workday")}>
+                            {almanac.officialSchedule.status === "off" ? "休" : "班"}
+                          </small>
+                        ) : null}
+                        </div>
+                      );
+                    })}
                     {weekDays.map((date) => (
                       <div
                         className={cn(
@@ -687,8 +738,10 @@ export function CalendarPage() {
                       周{label}
                     </div>
                   ))}
-                  {monthDays.map((date) => (
-                    <div
+                  {monthDays.map((date) => {
+                    const almanac = getCalendarAlmanac(date);
+                    return (
+                      <div
                       className={cn(
                         "calendar-month-day",
                         date.getMonth() !== monthStart.getMonth() &&
@@ -697,6 +750,7 @@ export function CalendarPage() {
                         dragging && "is-drop-target",
                       )}
                       key={dateKey(date)}
+                      title={almanac.detail}
                       onClick={() => {
                         setAnchorDate(date);
                         setView("day");
@@ -710,9 +764,17 @@ export function CalendarPage() {
                         handleDrop(date);
                       }}
                     >
-                      <span className="calendar-day-number">
-                        {date.getDate()}
-                      </span>
+                      <div className="calendar-day-meta">
+                        <span className="calendar-day-number">{date.getDate()}</span>
+                        <span className="calendar-day-almanac">
+                          <small className={cn((almanac.solarTerm || almanac.festivals.length) && "is-festival")}>{almanac.lunarLabel}</small>
+                          {almanac.officialSchedule ? (
+                            <small className={cn("calendar-official-label", almanac.officialSchedule.status === "workday" && "is-workday")}>
+                              {almanac.officialSchedule.status === "off" ? "休" : "班"}
+                            </small>
+                          ) : null}
+                        </span>
+                      </div>
                       {milestonesByDate
                         .get(dateKey(date))
                         ?.slice(0, 1)
@@ -733,8 +795,9 @@ export function CalendarPage() {
                             {...eventProps}
                           />
                         ))}
-                    </div>
-                  ))}
+                      </div>
+                    );
+                  })}
                 </div>
               ) : null}
               {view === "day" ? (

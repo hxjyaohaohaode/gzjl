@@ -172,7 +172,7 @@ describe("calculateHourlyPayroll", () => {
     expect(estimate.estimate).toBe(true);
   });
 
-  it("awards five virtual hours only after weekly work strictly exceeds thirty hours", () => {
+  it("awards five virtual hours as soon as weekly work reaches thirty hours", () => {
     const rule = {
       id: "weekly-reward",
       type: "weekly_bonus" as const,
@@ -193,26 +193,26 @@ describe("calculateHourlyPayroll", () => {
       rules: [rule],
       includePendingAsEstimate: false,
     });
-    expect(exactThreshold.weeklyBonusSeconds).toBe(0);
-    expect(exactThreshold.grossAmount).toBe("3000.000000");
+    expect(exactThreshold.weeklyBonusSeconds).toBe(18_000);
+    expect(exactThreshold.grossAmount).toBe("3500.000000");
 
-    const exceeded = calculateHourlyPayroll({
+    const belowThreshold = calculateHourlyPayroll({
       hourlyRate: "100",
       timezone: "UTC",
       intervals: [{
-        sourceId: "exceeded",
+        sourceId: "below-threshold",
         startAt: new Date("2026-09-07T00:00:00.000Z"),
-        endAt: new Date("2026-09-08T06:00:01.000Z"),
+        endAt: new Date("2026-09-08T05:59:59.000Z"),
         approvalStatus: "approved",
       }],
       rules: [rule],
       includePendingAsEstimate: false,
     });
-    expect(exceeded.weeklyBonusSeconds).toBe(18_000);
-    expect(exceeded.weeklyBonusEstimatedSeconds).toBe(0);
-    expect(exceeded.weeklyBonusWeekStarts).toEqual(["2026-09-07"]);
-    expect(exceeded.grossAmount).toBe("3500.027778");
-    expect(exceeded.components.find((component) => component.type === "bonus")).toMatchObject({
+    expect(belowThreshold.weeklyBonusSeconds).toBe(0);
+    expect(belowThreshold.grossAmount).toBe("2999.972222");
+    expect(exactThreshold.weeklyBonusEstimatedSeconds).toBe(0);
+    expect(exactThreshold.weeklyBonusWeekStarts).toEqual(["2026-09-07"]);
+    expect(exactThreshold.components.find((component) => component.type === "bonus")).toMatchObject({
       label: "周超时奖励",
       seconds: 18_000,
       amount: "500.000000",
@@ -262,6 +262,46 @@ describe("calculateHourlyPayroll", () => {
     expect(result.weeklyBonusWeekStarts).toEqual(["2026-08-31", "2026-09-07"]);
     expect(result.weeklyBonusSeconds).toBe(7_200);
     expect(result.components.filter((component) => component.type === "bonus")).toHaveLength(2);
+  });
+
+  it("treats each payroll month as a hard boundary inside a natural week", () => {
+    const rule = [{
+      id: "weekly-reward",
+      type: "weekly_bonus" as const,
+      priority: 400,
+      multiplier: "1",
+      thresholdSeconds: 30 * 3_600,
+      rewardSeconds: 5 * 3_600,
+    }];
+    const september = calculateHourlyPayroll({
+      hourlyRate: "100",
+      timezone: "UTC",
+      intervals: [{
+        sourceId: "september-partial-week",
+        startAt: new Date("2026-09-28T00:00:00.000Z"),
+        endAt: new Date("2026-09-29T06:00:00.000Z"),
+        approvalStatus: "approved",
+      }],
+      rules: rule,
+      includePendingAsEstimate: false,
+    });
+    const october = calculateHourlyPayroll({
+      hourlyRate: "100",
+      timezone: "UTC",
+      intervals: [{
+        sourceId: "october-partial-week",
+        startAt: new Date("2026-10-01T00:00:00.000Z"),
+        endAt: new Date("2026-10-02T06:00:00.000Z"),
+        approvalStatus: "approved",
+      }],
+      rules: rule,
+      includePendingAsEstimate: false,
+    });
+
+    expect(september.weeklyBonusWeekStarts).toEqual(["2026-09-28"]);
+    expect(october.weeklyBonusWeekStarts).toEqual(["2026-09-28"]);
+    expect(september.weeklyBonusSeconds).toBe(18_000);
+    expect(october.weeklyBonusSeconds).toBe(18_000);
   });
 
   it("marks a weekly reward as estimated only when pending work is needed to pass the threshold", () => {

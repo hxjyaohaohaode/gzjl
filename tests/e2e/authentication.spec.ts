@@ -688,6 +688,11 @@ test("Owner can configure a versioned hourly plan and create a pay period", asyn
       },
     }),
   );
+  let settingsPayload: Record<string, unknown> | null = null;
+  await page.route("**/api/payroll/settings", async (route) => {
+    settingsPayload = route.request().postDataJSON() as Record<string, unknown>;
+    await route.fulfill({ json: { settings: settingsPayload } });
+  });
   let planPayload: Record<string, unknown> | null = null;
   await page.route(`**/api/payroll/members/${memberId}/plan`, async (route) => {
     planPayload = route.request().postDataJSON() as Record<string, unknown>;
@@ -740,6 +745,13 @@ test("Owner can configure a versioned hourly plan and create a pay period", asyn
   ]);
 
   await expect(page.getByLabel("默认发薪日")).toHaveValue("15");
+  await expect(page.getByLabel("默认发薪截止时间")).toHaveValue("18:00");
+  await page.getByLabel("默认发薪截止时间").fill("09:30");
+  await page.getByRole("button", { name: "保存默认周期" }).click();
+  await expect.poll(() => settingsPayload).toEqual({
+    payrollCutoffDay: 15,
+    payrollCutoffMinute: 570,
+  });
   await page.getByRole("button", { name: "创建薪资周期" }).click();
   await expect.poll(() => periodPayload).not.toBeNull();
   expect(periodPayload).toMatchObject({ timezone: "Asia/Shanghai" });
@@ -749,6 +761,14 @@ test("Owner can configure a versioned hourly plan and create a pay period", asyn
       day: "2-digit",
     }).format(new Date(String(periodPayload?.cutoffAt))),
   ).toBe("15");
+  expect(
+    new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Asia/Shanghai",
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h23",
+    }).format(new Date(String(periodPayload?.cutoffAt))),
+  ).toBe("09:30");
 });
 
 test("personal payroll renders reconciled totals, daily pay, period trend, and components", async ({
@@ -790,6 +810,42 @@ test("personal payroll renders reconciled totals, daily pay, period trend, and c
           weeklyBonusSeconds: 0,
           weeklyBonusEstimatedSeconds: 18_000,
           estimatedAmount: "900.000000",
+          projectedPeriodAmount: "3100.000000",
+          salaryTimeline: [
+            {
+              date: "2026-09-03",
+              approvedAmount: "400.000000",
+              pendingAmount: "0.000000",
+              totalAmount: "400.000000",
+              workedSeconds: 14_400,
+              bonusSeconds: 0,
+              actualCumulativeAmount: "400.000000",
+              projectedCumulativeAmount: "400.000000",
+              forecast: false,
+            },
+            {
+              date: "2026-09-04",
+              approvedAmount: "400.000000",
+              pendingAmount: "100.000000",
+              totalAmount: "500.000000",
+              workedSeconds: 18_000,
+              bonusSeconds: 18_000,
+              actualCumulativeAmount: "900.000000",
+              projectedCumulativeAmount: "900.000000",
+              forecast: false,
+            },
+            {
+              date: "2026-09-05",
+              approvedAmount: "0.000000",
+              pendingAmount: "0.000000",
+              totalAmount: "0.000000",
+              workedSeconds: 0,
+              bonusSeconds: 0,
+              actualCumulativeAmount: null,
+              projectedCumulativeAmount: "1350.000000",
+              forecast: true,
+            },
+          ],
           includesPending: true,
           needsReview: false,
         },
@@ -872,6 +928,8 @@ test("personal payroll renders reconciled totals, daily pay, period trend, and c
   await expect(page.getByText("本月实时预估", { exact: true })).toBeVisible();
   await expect(page.getByText("周奖励工时（含预估）", { exact: true })).toBeVisible();
   await expect(page.getByText("5 小时 0 分", { exact: true })).toBeVisible();
+  await expect(page.getByRole("img", { name: "本月每日薪资与周奖励" })).toBeVisible();
+  await expect(page.getByRole("img", { name: "本月薪资累计与未来预测" })).toBeVisible();
   await expect(page.getByText("当前应结")).toBeVisible();
   await expect(page.getByText("¥900.00", { exact: true }).first()).toBeVisible();
   await expect(page.getByRole("img", { name: "2026 年 9 月每日薪资" })).toBeVisible();

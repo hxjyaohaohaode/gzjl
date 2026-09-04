@@ -76,20 +76,19 @@ export async function registerRealtimeRoutes(
             )
             .orderBy(asc(outboxEvents.createdAt), asc(outboxEvents.id))
             .limit(100);
-          for (const event of events) {
-            if (socket.readyState !== 1) return;
+          if (events.length > 0 && socket.readyState === 1) {
             // The socket is an organization-level invalidation channel, not a
-            // second data API.  A member who may not read another member's
-            // AI job, work record, evidence, or payroll item must not learn
-            // its id, state, or payload simply by keeping a WebSocket open.
-            // Each receiving screen refetches through its normal scoped API.
+            // second data API. A burst of database events is represented by a
+            // single scoped-refetch signal, avoiding N chart refreshes for one
+            // logical action without exposing event payloads.
+            const latest = events.at(-1)!;
             socket.send(
               JSON.stringify({
                 type: "organization.data.changed",
-                occurredAt: event.createdAt.toISOString(),
+                occurredAt: latest.createdAt.toISOString(),
               }),
             );
-            cursor = { createdAt: event.createdAt, id: event.id };
+            cursor = { createdAt: latest.createdAt, id: latest.id };
           }
         })()
           .catch((error) => request.log.warn({ error }, "realtime polling failed"))

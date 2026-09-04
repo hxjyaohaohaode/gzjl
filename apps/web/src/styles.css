@@ -982,6 +982,7 @@ input[type="file"]::file-selector-button {
 }
 
 .calendar-week-heading {
+  position: relative;
   padding: 1rem 0.75rem;
   border-right: 1px solid var(--border);
   border-bottom: 1px solid var(--border);
@@ -995,6 +996,22 @@ input[type="file"]::file-selector-button {
   margin-top: 0.2rem;
   color: var(--text);
   font-size: 1rem;
+}
+
+.calendar-week-heading small {
+  display: block;
+  margin-top: 0.22rem;
+  overflow: hidden;
+  color: var(--text-subtle);
+  font-size: 0.58rem;
+  font-weight: 650;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.calendar-week-heading small.is-festival,
+.calendar-day-meta small.is-festival {
+  color: var(--accent-strong);
 }
 
 .calendar-week-heading.is-today strong {
@@ -1167,10 +1184,62 @@ input[type="file"]::file-selector-button {
 
 .calendar-day-number {
   display: block;
-  margin-bottom: 0.45rem;
   color: var(--text-muted);
   font-size: 0.72rem;
   font-weight: 800;
+}
+
+.calendar-day-meta {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.3rem;
+  margin-bottom: 0.45rem;
+}
+
+.calendar-day-meta small {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-subtle);
+  font-size: 0.56rem;
+  font-weight: 650;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.calendar-day-almanac {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 0.28rem;
+}
+
+.calendar-official-label,
+.calendar-week-heading small.calendar-official-label {
+  display: inline-grid;
+  width: 1rem;
+  height: 1rem;
+  flex: none;
+  place-items: center;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--positive) 14%, transparent);
+  color: var(--positive);
+  font-size: 0.52rem;
+  font-weight: 850;
+}
+
+.calendar-week-heading small.calendar-official-label {
+  position: absolute;
+  top: 0.68rem;
+  right: 0.6rem;
+  margin: 0;
+}
+
+.calendar-official-label.is-workday,
+.calendar-week-heading small.calendar-official-label.is-workday {
+  background: color-mix(in srgb, var(--warning) 14%, transparent);
+  color: var(--warning);
 }
 
 .calendar-month-day .calendar-event {
@@ -4083,6 +4152,12 @@ body {
   font-weight: 740;
   letter-spacing: -0.03em;
 }
+
+.calendar-period-lunar {
+  margin-top: 0.28rem;
+  color: var(--text-muted);
+  font-size: 0.66rem;
+}
 .calendar-period-bar > div:last-child {
   display: flex;
   align-items: center;
@@ -4223,9 +4298,31 @@ body {
     padding-top: 0;
     border-top: 0;
   }
-  .calendar-drag-hint {
+.calendar-drag-hint {
     display: none;
   }
+}
+.calendar-almanac-note {
+  display: flex;
+  gap: 0.45rem;
+  color: var(--text-muted);
+}
+.calendar-almanac-note svg {
+  flex: none;
+  color: var(--accent-strong);
+}
+.calendar-almanac-note strong,
+.calendar-almanac-note span {
+  display: block;
+}
+.calendar-almanac-note strong {
+  color: var(--text);
+  font-size: 0.65rem;
+}
+.calendar-almanac-note span {
+  margin-top: 0.16rem;
+  font-size: 0.59rem;
+  line-height: 1.5;
 }
 
 @media (max-width: 640px) {

@@ -56,6 +56,11 @@ import {
 import { readableForeground } from "./color.js";
 import { sendQueueableTimerEvent } from "./offline.js";
 import {
+  getOrganizationTimezone,
+  toZonedInputValue,
+  zonedInputToDate,
+} from "./timezone.js";
+import {
   currentBrowserPushSubscription,
   detachCurrentBrowserPushBeforeLogout,
   disableCurrentBrowserPush,
@@ -104,7 +109,7 @@ export function PasswordInput({
     </div>
   );
 }
-const timezone =
+const browserTimezone =
   Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Shanghai";
 const AnalyticsChartLazy = lazy(() => import("./analytics-chart.js"));
 const ProjectCanvasLazy = lazy(() => import("./project-canvas.js"));
@@ -273,6 +278,7 @@ export function LoadingBlock() {
 
 function formatDateTime(value: string | Date): string {
   return new Intl.DateTimeFormat("zh-CN", {
+    timeZone: getOrganizationTimezone(),
     month: "2-digit",
     day: "2-digit",
     hour: "2-digit",
@@ -290,6 +296,21 @@ function formatDuration(seconds: number): string {
   }
   if (minutes > 0) return `${minutes} 分${remainder ? ` ${remainder} 秒` : ""}`;
   return `${remainder} 秒`;
+}
+function formatDurationAxis(value: string | number): string {
+  const hours = Number(value) / 3_600;
+  if (!Number.isFinite(hours)) return "0h";
+  const digits = Math.abs(hours) < 1 ? 2 : Math.abs(hours) < 10 ? 1 : 0;
+  return `${Number(hours.toFixed(digits))}h`;
+}
+
+function durationAxisMax(values: readonly number[]): number {
+  const maximum = Math.max(...values.filter(Number.isFinite), 0);
+  if (maximum <= 0) return 3_600;
+  const roughStep = maximum / 4;
+  const steps = [900, 1_800, 3_600, 7_200, 14_400, 28_800, 43_200, 86_400];
+  const step = steps.find((candidate) => candidate >= roughStep) ?? 86_400;
+  return Math.max(step, Math.ceil(maximum / step) * step);
 }
 function formatWorkAnomaly(flag: string): string {
   switch (flag) {
@@ -314,8 +335,14 @@ function formatCorrectionStatus(status: OwnWorkCorrection["correction"]["status"
   }
 }
 function localInput(date: Date): string {
-  const offset = date.getTimezoneOffset() * 60_000;
-  return new Date(date.getTime() - offset).toISOString().slice(0, 19);
+  return toZonedInputValue(date);
+}
+function safeLocalInputDate(value: string): Date {
+  try {
+    return zonedInputToDate(value);
+  } catch {
+    return new Date(Number.NaN);
+  }
 }
 function hexWithAlpha(hex: string, alpha: number): string {
   const value = hex.replace("#", "");
@@ -325,18 +352,7 @@ function hexWithAlpha(hex: string, alpha: number): string {
   const blue = Number.parseInt(value.slice(4, 6), 16);
   return `rgba(${red}, ${green}, ${blue}, ${alpha})`;
 }
-function useChartPalette() {
-  const [, setVersion] = useState(0);
-  useEffect(() => {
-    const observer = new MutationObserver(() =>
-      setVersion((value) => value + 1),
-    );
-    observer.observe(document.documentElement, {
-      attributes: true,
-      attributeFilter: ["data-theme", "style"],
-    });
-    return () => observer.disconnect();
-  }, []);
+function readChartPalette() {
   const styles = getComputedStyle(document.documentElement);
   const token = (name: string, fallback: string) =>
     styles.getPropertyValue(name).trim() || fallback;
@@ -351,6 +367,25 @@ function useChartPalette() {
     warning: token("--warning", "#a85d00"),
     danger: token("--danger", "#c43d4b"),
   };
+}
+function useChartPalette() {
+  const [palette, setPalette] = useState(readChartPalette);
+  useEffect(() => {
+    let frame = 0;
+    const observer = new MutationObserver(() => {
+      window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(() => setPalette(readChartPalette()));
+    });
+    observer.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["data-theme", "style"],
+    });
+    return () => {
+      window.cancelAnimationFrame(frame);
+      observer.disconnect();
+    };
+  }, []);
+  return palette;
 }
 export function LoginPage() {
   const queryClient = useQueryClient();
@@ -1619,7 +1654,7 @@ export function NotificationPreferencesPage() {
         method: "PUT",
         body: {
           quietHours: enabled
-            ? { start: quietStart, end: quietEnd, timeZone: timezone }
+            ? { start: quietStart, end: quietEnd, timeZone: browserTimezone }
             : {},
         },
       }),
@@ -1730,7 +1765,7 @@ export function NotificationPreferencesPage() {
             </Button>
           </div>
           <p className="mt-2 text-xs text-[var(--text-muted)]">
-            按当前设备时区 {timezone} 判断；跨午夜时段同样有效。免打扰只延后浏览器推送，不隐藏站内事实。
+            按当前设备时区 {browserTimezone} 判断；跨午夜时段同样有效。免打扰只延后浏览器推送，不隐藏站内事实。
           </p>
           <div className="mt-3">
             <ErrorMessage
@@ -2439,7 +2474,7 @@ export function SetupPage() {
           email: form.email,
           ...(form.phone.trim() ? { phone: form.phone.trim() } : {}),
           password: form.password,
-          timezone,
+          timezone: browserTimezone,
         },
       }),
     onSuccess: () => navigate("/login", { replace: true }),
@@ -3477,16 +3512,16 @@ function WorkDayTimeline({
   const startHour = 7;
   const endHour = 22;
   const totalHours = endHour - startHour;
-  const manualStart = new Date(startAt);
-  const manualEnd = new Date(endAt);
+  const manualStart = safeLocalInputDate(startAt);
+  const manualEnd = safeLocalInputDate(endAt);
   const hasPreview =
     !Number.isNaN(manualStart.getTime()) &&
     !Number.isNaN(manualEnd.getTime()) &&
     manualEnd.getTime() > manualStart.getTime();
   const breakPreviews = breaks
     .map((entry) => ({
-      startAt: new Date(entry.startAt),
-      endAt: new Date(entry.endAt),
+      startAt: safeLocalInputDate(entry.startAt),
+      endAt: safeLocalInputDate(entry.endAt),
     }))
     .filter(
       (entry) =>
@@ -4551,14 +4586,14 @@ export function WorkPage() {
       const breaks = manualBreaks
         .filter((entry) => entry.startAt && entry.endAt)
         .map((entry) => ({
-          startAt: new Date(entry.startAt).toISOString(),
-          endAt: new Date(entry.endAt).toISOString(),
+          startAt: zonedInputToDate(entry.startAt).toISOString(),
+          endAt: zonedInputToDate(entry.endAt).toISOString(),
         }));
       const body = {
-        startAt: new Date(manual.startAt).toISOString(),
-        endAt: new Date(manual.endAt).toISOString(),
+        startAt: zonedInputToDate(manual.startAt).toISOString(),
+        endAt: zonedInputToDate(manual.endAt).toISOString(),
         timezone:
-          editingSession?.timezone ?? correctionSession?.timezone ?? timezone,
+          editingSession?.timezone ?? correctionSession?.timezone ?? getOrganizationTimezone(),
         source: correctionSession?.source ?? "manual",
         content: manual.content,
         result: manual.result,
@@ -4597,8 +4632,8 @@ export function WorkPage() {
         ...additionalSegments.map((segment) => ({
           input: {
             ...body,
-            startAt: new Date(segment.startAt).toISOString(),
-            endAt: new Date(segment.endAt).toISOString(),
+            startAt: zonedInputToDate(segment.startAt).toISOString(),
+            endAt: zonedInputToDate(segment.endAt).toISOString(),
             content: segment.content,
             result: segment.result,
             blockers: "",
@@ -4695,7 +4730,7 @@ export function WorkPage() {
         eventId: crypto.randomUUID(),
         occurredAt: new Date().toISOString(),
         content: timerContent,
-        timezone,
+        timezone: getOrganizationTimezone(),
         visibility: "management_only",
         primaryProjectNodeId: timerPrimaryProjectNodeId || null,
         projectNodeIds: timerLinkedProjectNodes.map((node) => node.id),
@@ -5133,7 +5168,7 @@ export function WorkPage() {
                 </div>
                 {!editingSession && !correctionSession ? (
                   <div className="md:col-span-2">
-                    {new Date(manual.endAt).getTime() <= entryNow + 5 * 60_000 ? (
+                    {zonedInputToDate(manual.endAt).getTime() <= entryNow + 5 * 60_000 ? (
                       <DirectEvidenceFields
                         fileUploadsAvailable={
                           evidenceCapabilities.data?.fileUploads.available === true
@@ -5180,7 +5215,7 @@ export function WorkPage() {
                       </div>
                       {additionalSegments.map((segment, index) => {
                         const planned =
-                          new Date(segment.endAt).getTime() > entryNow + 5 * 60_000;
+                          zonedInputToDate(segment.endAt).getTime() > entryNow + 5 * 60_000;
                         const updateSegment = (update: Partial<AdditionalWorkSegment>) =>
                           setAdditionalSegments((current) =>
                             current.map((candidate) =>
@@ -6850,6 +6885,18 @@ interface PayrollOwnResponse {
     weeklyBonusSeconds: number;
     weeklyBonusEstimatedSeconds: number;
     estimatedAmount: string;
+    projectedPeriodAmount: string;
+    salaryTimeline: Array<{
+      date: string;
+      approvedAmount: string;
+      pendingAmount: string;
+      totalAmount: string;
+      workedSeconds: number;
+      bonusSeconds: number;
+      actualCumulativeAmount: string | null;
+      projectedCumulativeAmount: string;
+      forecast: boolean;
+    }>;
     includesPending: boolean;
     needsReview: boolean;
   };
@@ -6934,7 +6981,11 @@ interface PayrollManagementOverview {
     displayName: string;
     preview: NonNullable<PayrollOwnResponse["livePreview"]>;
   }>;
-  settings: { timezone: string; payrollCutoffDay: number };
+  settings: {
+    timezone: string;
+    payrollCutoffDay: number;
+    payrollCutoffMinute: number;
+  };
 }
 
 const compensationTypeLabels: Record<CompensationPlanType, string> = {
@@ -6946,6 +6997,33 @@ const compensationTypeLabels: Record<CompensationPlanType, string> = {
   hybrid: "混合计薪",
 };
 
+const payPeriodStatusLabels: Record<string, string> = {
+  open: "可计算",
+  calculating: "计算中",
+  pending_confirmation: "待导出锁定",
+  settled: "已导出",
+  locked: "已导出并锁定",
+};
+
+const payrollRunStatusLabels: Record<string, string> = {
+  queued: "排队中",
+  calculating: "计算中",
+  review_required: "需要复核",
+  ready: "可导出锁定",
+  settled: "已导出并锁定",
+  failed: "计算失败",
+  cancelled: "已撤销",
+};
+
+function cutoffTimeValue(minutes: number): string {
+  return `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
+}
+
+function cutoffTimeMinutes(value: string): number {
+  const [hour = "0", minute = "0"] = value.split(":");
+  return Number(hour) * 60 + Number(minute);
+}
+
 function formatPayrollMoney(currency: string, amount: string): string {
   try {
     return new Intl.NumberFormat("zh-CN", {
@@ -6956,6 +7034,19 @@ function formatPayrollMoney(currency: string, amount: string): string {
     }).format(Number(amount));
   } catch {
     return `${currency} ${Number(amount).toFixed(2)}`;
+  }
+}
+
+function formatPayrollAxis(currency: string, value: number): string {
+  try {
+    return new Intl.NumberFormat("zh-CN", {
+      style: "currency",
+      currency,
+      notation: "compact",
+      maximumFractionDigits: 1,
+    }).format(value);
+  } catch {
+    return Number(value).toLocaleString("zh-CN", { maximumFractionDigits: 1 });
   }
 }
 
@@ -7001,30 +7092,32 @@ function PayrollManagementPanel() {
     weeklyBonusRewardHours: 5,
   }));
   const [periodForm, setPeriodForm] = useState(() => {
-    const current = new Date();
+    const currentWall = localInput(new Date());
+    const year = Number(currentWall.slice(0, 4));
+    const month = Number(currentWall.slice(5, 7));
+    const nextYear = month === 12 ? year + 1 : year;
+    const nextMonth = month === 12 ? 1 : month + 1;
+    const currentMonthKey = `${year}-${String(month).padStart(2, "0")}`;
+    const nextMonthKey = `${nextYear}-${String(nextMonth).padStart(2, "0")}`;
     return {
-      name: `${current.getFullYear()} 年 ${current.getMonth() + 1} 月`,
-      startsAt: localInput(new Date(current.getFullYear(), current.getMonth(), 1)),
-      endsAt: localInput(new Date(current.getFullYear(), current.getMonth() + 1, 1)),
-      cutoffAt: localInput(new Date(current.getFullYear(), current.getMonth() + 1, 10, 18)),
+      name: `${year} 年 ${month} 月`,
+      startsAt: `${currentMonthKey}-01T00:00:00`,
+      endsAt: `${nextMonthKey}-01T00:00:00`,
+      cutoffAt: `${nextMonthKey}-10T18:00:00`,
     };
   });
   const [cutoffDayOverride, setCutoffDayOverride] = useState<number | null>(null);
   const cutoffDay =
     cutoffDayOverride ?? management.data?.settings?.payrollCutoffDay ?? 10;
+  const [cutoffMinuteOverride, setCutoffMinuteOverride] = useState<number | null>(null);
+  const cutoffMinute =
+    cutoffMinuteOverride ?? management.data?.settings?.payrollCutoffMinute ?? 18 * 60;
   const [periodCutoffTouched, setPeriodCutoffTouched] = useState(false);
   const defaultPeriodCutoffAt = useMemo(() => {
-    const periodEnd = new Date(periodForm.endsAt);
-    if (Number.isNaN(periodEnd.getTime())) return periodForm.cutoffAt;
-    return localInput(
-      new Date(
-        periodEnd.getFullYear(),
-        periodEnd.getMonth(),
-        cutoffDay,
-        18,
-      ),
-    );
-  }, [cutoffDay, periodForm.cutoffAt, periodForm.endsAt]);
+    const month = periodForm.endsAt.match(/^(\d{4}-\d{2})-/)?.[1];
+    if (!month) return periodForm.cutoffAt;
+    return `${month}-${String(cutoffDay).padStart(2, "0")}T${cutoffTimeValue(cutoffMinute)}:00`;
+  }, [cutoffDay, cutoffMinute, periodForm.cutoffAt, periodForm.endsAt]);
   const effectivePeriodCutoffAt = periodCutoffTouched
     ? periodForm.cutoffAt
     : defaultPeriodCutoffAt;
@@ -7036,35 +7129,53 @@ function PayrollManagementPanel() {
       (record) => payrollMemberIds.has(record.membershipId),
     );
   }, [activeMembers, management.data?.liveItems]);
-  const teamPayrollOption = useMemo<EChartsCoreOption>(() => ({
-    animationDuration: 240,
-    grid: { left: 56, right: 18, top: 20, bottom: 44 },
-    tooltip: {
-      trigger: "axis",
-      axisPointer: { type: "shadow" },
-      backgroundColor: chartPalette.surface,
-      borderColor: chartPalette.border,
-      textStyle: { color: chartPalette.text },
-    },
-    xAxis: {
-      type: "category",
-      data: currentTeamPayroll.map((record) => record.displayName),
-      axisLabel: { hideOverlap: true, color: chartPalette.textSubtle },
-      axisLine: { lineStyle: { color: chartPalette.border } },
-    },
-    yAxis: {
-      type: "value",
-      axisLabel: { color: chartPalette.textSubtle },
-      splitLine: { lineStyle: { color: chartPalette.grid } },
-    },
-    dataZoom: [{ type: "inside" }],
-    series: [{
-      type: "bar",
-      name: "本月实时预估",
-      data: currentTeamPayroll.map((record) => Number(record.preview.estimatedAmount)),
-      itemStyle: { color: chartPalette.accent, borderRadius: [7, 7, 0, 0] },
-    }],
-  }), [chartPalette, currentTeamPayroll]);
+  const teamPayrollGroups = useMemo(() => {
+    const groups = new Map<string, typeof currentTeamPayroll>();
+    currentTeamPayroll.forEach((record) => {
+      const list = groups.get(record.preview.currency) ?? [];
+      list.push(record);
+      groups.set(record.preview.currency, list);
+    });
+    return [...groups.entries()].map(([currency, records]) => ({ currency, records }));
+  }, [currentTeamPayroll]);
+  const teamPayrollOptions = useMemo(() => teamPayrollGroups.map(({ currency, records }) => ({
+    currency,
+    option: {
+      animationDuration: 240,
+      animationDurationUpdate: 180,
+      grid: { left: 64, right: 18, top: 20, bottom: 44 },
+      tooltip: {
+        trigger: "axis",
+        axisPointer: { type: "shadow" },
+        backgroundColor: chartPalette.surface,
+        borderColor: chartPalette.border,
+        textStyle: { color: chartPalette.text },
+        valueFormatter: (value: string | number) =>
+          formatPayrollMoney(currency, String(value)),
+      },
+      xAxis: {
+        type: "category",
+        data: records.map((record) => record.displayName),
+        axisLabel: { hideOverlap: true, color: chartPalette.textSubtle },
+        axisLine: { lineStyle: { color: chartPalette.border } },
+      },
+      yAxis: {
+        type: "value",
+        axisLabel: {
+          color: chartPalette.textSubtle,
+          formatter: (value: number) => formatPayrollAxis(currency, value),
+        },
+        splitLine: { lineStyle: { color: chartPalette.grid } },
+      },
+      dataZoom: [{ type: "inside", filterMode: "none" }],
+      series: [{
+        type: "bar",
+        name: "本月实时预估",
+        data: records.map((record) => Number(record.preview.estimatedAmount)),
+        itemStyle: { color: chartPalette.accent, borderRadius: [7, 7, 0, 0] },
+      }],
+    } satisfies EChartsCoreOption,
+  })), [chartPalette, teamPayrollGroups]);
   const selectMember = (membershipId: string) => {
     setSelectedMemberId(membershipId);
     const selected = activeMembers.find((item) => item.membershipId === membershipId);
@@ -7164,7 +7275,7 @@ function PayrollManagementPanel() {
           currency: planForm.currency,
           baseAmount: planForm.baseAmount,
           ...(planForm.type === "hybrid" ? { fixedAmount: planForm.fixedAmount } : {}),
-          effectiveFrom: new Date(planForm.effectiveFrom).toISOString(),
+          effectiveFrom: zonedInputToDate(planForm.effectiveFrom).toISOString(),
           pendingReviewCountsInEstimate: planForm.pendingReviewCountsInEstimate,
           rules,
         },
@@ -7185,10 +7296,10 @@ function PayrollManagementPanel() {
         method: "POST",
         body: {
           name: periodForm.name,
-          timezone: management.data?.settings?.timezone ?? timezone,
-          startsAt: new Date(periodForm.startsAt).toISOString(),
-          endsAt: new Date(periodForm.endsAt).toISOString(),
-          cutoffAt: new Date(effectivePeriodCutoffAt).toISOString(),
+          timezone: management.data?.settings?.timezone ?? getOrganizationTimezone(),
+          startsAt: zonedInputToDate(periodForm.startsAt).toISOString(),
+          endsAt: zonedInputToDate(periodForm.endsAt).toISOString(),
+          cutoffAt: zonedInputToDate(effectivePeriodCutoffAt).toISOString(),
         },
       }),
     onSuccess: refresh,
@@ -7197,7 +7308,10 @@ function PayrollManagementPanel() {
     mutationFn: () =>
       api("/api/payroll/settings", {
         method: "PATCH",
-        body: { payrollCutoffDay: cutoffDay },
+        body: {
+          payrollCutoffDay: cutoffDay,
+          payrollCutoffMinute: cutoffMinute,
+        },
       }),
     onSuccess: refresh,
   });
@@ -7209,8 +7323,29 @@ function PayrollManagementPanel() {
   const settleRun = useMutation({
     mutationFn: (runId: string) =>
       api(`/api/payroll-runs/${runId}/settle`, { method: "POST" }),
+    onSuccess: async (_response, runId) => {
+      const anchor = document.createElement("a");
+      anchor.href = `/api/payroll-runs/${runId}/finance-export.csv`;
+      anchor.rel = "noopener";
+      document.body.append(anchor);
+      anchor.click();
+      anchor.remove();
+      await refresh();
+    },
+  });
+  const reopenRun = useMutation({
+    mutationFn: (runId: string) =>
+      api(`/api/payroll-runs/${runId}/reopen`, { method: "POST" }),
     onSuccess: refresh,
   });
+  const downloadFinanceExport = (runId: string) => {
+    const anchor = document.createElement("a");
+    anchor.href = `/api/payroll-runs/${runId}/finance-export.csv`;
+    anchor.rel = "noopener";
+    document.body.append(anchor);
+    anchor.click();
+    anchor.remove();
+  };
   return (
     <section className="mb-6 space-y-5" aria-label="薪资管理">
       {currentTeamPayroll.length ? (
@@ -7224,9 +7359,21 @@ function PayrollManagementPanel() {
               <StatusLine label="已批准工时" value={formatDuration(currentTeamPayroll.reduce((sum, record) => sum + record.preview.approvedSeconds, 0))} />
               <StatusLine label="待审核工时" value={formatDuration(currentTeamPayroll.reduce((sum, record) => sum + record.preview.pendingSeconds, 0))} />
               <StatusLine label="周奖励工时" value={formatDuration(currentTeamPayroll.reduce((sum, record) => sum + (record.preview.weeklyBonusSeconds ?? 0) + (record.preview.weeklyBonusEstimatedSeconds ?? 0), 0))} />
-              <StatusLine label="本月预估金额" value={formatPayrollMoney(currentTeamPayroll[0]!.preview.currency, String(currentTeamPayroll.reduce((sum, record) => sum + Number(record.preview.estimatedAmount), 0)))} />
+              <StatusLine
+                label="本月预估金额"
+                value={teamPayrollGroups.map(({ currency, records }) =>
+                  formatPayrollMoney(currency, String(records.reduce((sum, record) => sum + Number(record.preview.estimatedAmount), 0))),
+                ).join(" · ")}
+              />
             </div>
-            <AnalyticsChart ariaLabel="团队成员薪资对比" option={teamPayrollOption} />
+            <div className={teamPayrollOptions.length > 1 ? "grid gap-4 xl:grid-cols-2" : undefined}>
+              {teamPayrollOptions.map(({ currency, option }) => (
+                <div key={currency}>
+                  {teamPayrollOptions.length > 1 ? <p className="mb-2 text-sm font-semibold text-[var(--text-muted)]">{currency}</p> : null}
+                  <AnalyticsChart ariaLabel={`团队成员薪资对比（${currency}）`} option={option} />
+                </div>
+              ))}
+            </div>
           </CardContent>
         </Card>
       ) : null}
@@ -7340,7 +7487,7 @@ function PayrollManagementPanel() {
                 </label>
                 <div className="mt-3 grid gap-3 sm:grid-cols-2">
                   <label>
-                    <span className="mb-1 block text-xs text-[var(--text-muted)]">每周超过（小时）</span>
+                    <span className="mb-1 block text-xs text-[var(--text-muted)]">每周达到（小时）</span>
                     <input
                       aria-label="周超时阈值（小时）"
                       className={fieldClass}
@@ -7370,7 +7517,7 @@ function PayrollManagementPanel() {
                     />
                   </label>
                 </div>
-                <p className="mt-2 text-xs text-[var(--text-muted)]">按组织时区的周一至周日计算；严格超过阈值后，每人每周奖励一次。</p>
+                <p className="mt-2 text-xs text-[var(--text-muted)]">以自然月为硬边界划分月内周段；达到阈值立即奖励，每人每段一次，真实工时与奖励工时分开显示。</p>
               </div>
             </div>
             <div className="xl:col-span-4 flex flex-wrap items-center gap-3">
@@ -7408,6 +7555,18 @@ function PayrollManagementPanel() {
                 value={cutoffDay}
               />
             </Field>
+            <Field hint="到达该时刻前完成核对与财务导出。" label="默认发薪截止时间">
+              <input
+                className={`${fieldClass} w-36`}
+                onChange={(event) => {
+                  setCutoffMinuteOverride(cutoffTimeMinutes(event.target.value));
+                  setPeriodCutoffTouched(false);
+                }}
+                required
+                type="time"
+                value={cutoffTimeValue(cutoffMinute)}
+              />
+            </Field>
             <Button disabled={saveSettings.isPending} size="compact" type="submit" variant="secondary">
               {saveSettings.isPending ? "保存中…" : "保存默认周期"}
             </Button>
@@ -7422,22 +7581,48 @@ function PayrollManagementPanel() {
           <div className="mt-5 space-y-2">
             {management.data?.periods.map((period) => (
               <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl bg-[var(--surface-subtle)] px-4 py-3" key={period.id}>
-                <div><p className="font-semibold">{period.name}</p><p className="text-xs text-[var(--text-muted)]">{formatDateTime(period.startsAt)} – {formatDateTime(period.endsAt)} · {period.status}</p></div>
+                <div><p className="font-semibold">{period.name}</p><p className="text-xs text-[var(--text-muted)]">{formatDateTime(period.startsAt)} – {formatDateTime(period.endsAt)} · {payPeriodStatusLabels[period.status] ?? period.status} · 截止 {formatDateTime(period.cutoffAt)}</p></div>
                 <Button disabled={period.status !== "open" || calculatePeriod.isPending} onClick={() => calculatePeriod.mutate(period.id)} type="button" variant="secondary">计算本周期</Button>
               </div>
             ))}
           </div>
-          {management.data?.runs.some((entry) => entry.run.status === "ready") ? (
+          {management.data?.runs.some((entry) => ["ready", "settled"].includes(entry.run.status)) ? (
             <div className="mt-5 space-y-2">
-              {management.data.runs.filter((entry) => entry.run.status === "ready").map((entry) => (
+              {management.data.runs.filter((entry) => ["ready", "settled"].includes(entry.run.status)).map((entry) => (
                 <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl bg-[var(--success-soft)] px-4 py-3" key={entry.run.id}>
-                  <span className="text-sm font-semibold">{entry.period.name} · 批次 #{entry.run.runNumber} 已就绪</span>
-                  <Button disabled={settleRun.isPending} onClick={() => settleRun.mutate(entry.run.id)} type="button">确认结算并锁定</Button>
+                  <span className="text-sm font-semibold">{entry.period.name} · 批次 #{entry.run.runNumber} · {payrollRunStatusLabels[entry.run.status] ?? entry.run.status}</span>
+                  <div className="flex flex-wrap gap-2">
+                    {entry.run.status === "ready" ? (
+                      <Button
+                        disabled={settleRun.isPending}
+                        onClick={() => {
+                          if (window.confirm("将导出财务账单并锁定本周期工时。确认继续？")) settleRun.mutate(entry.run.id);
+                        }}
+                        type="button"
+                      >
+                        确认导出并锁定
+                      </Button>
+                    ) : (
+                      <>
+                        <Button onClick={() => downloadFinanceExport(entry.run.id)} type="button" variant="secondary">重新导出账单</Button>
+                        <Button
+                          disabled={reopenRun.isPending}
+                          onClick={() => {
+                            if (window.confirm("撤销后会恢复本周期和对应工时的可编辑计薪状态，历史批次仍保留审计。确认撤销？")) reopenRun.mutate(entry.run.id);
+                          }}
+                          type="button"
+                          variant="ghost"
+                        >
+                          撤销导出锁定
+                        </Button>
+                      </>
+                    )}
+                  </div>
                 </div>
               ))}
             </div>
           ) : null}
-          <ErrorMessage error={saveSettings.error ?? createPeriod.error ?? calculatePeriod.error ?? settleRun.error} />
+          <ErrorMessage error={saveSettings.error ?? createPeriod.error ?? calculatePeriod.error ?? settleRun.error ?? reopenRun.error} />
         </CardContent>
       </Card>
     </section>
@@ -7489,7 +7674,7 @@ export function PayrollPage({ me }: { me: Me }) {
       splitLine: { lineStyle: { color: chartPalette.grid } },
     },
     dataZoom: [
-      { type: "inside" },
+      { type: "inside", filterMode: "none" },
       {
         type: "slider",
         height: 18,
@@ -7528,7 +7713,7 @@ export function PayrollPage({ me }: { me: Me }) {
       axisLabel: { color: chartPalette.textSubtle },
       splitLine: { lineStyle: { color: chartPalette.grid } },
     },
-    dataZoom: [{ type: "inside" }],
+    dataZoom: [{ type: "inside", filterMode: "none" }],
     series: [{
       type: "line",
       name: "周期薪资",
@@ -7585,13 +7770,155 @@ export function PayrollPage({ me }: { me: Me }) {
       },
       xAxis: { type: "category", data: labels, axisLabel: { width: 86, overflow: "truncate", rotate: 18, color: chartPalette.textSubtle }, axisLine: { lineStyle: { color: chartPalette.border } } },
       yAxis: { type: "value", axisLabel: { color: chartPalette.textSubtle }, splitLine: { lineStyle: { color: chartPalette.grid } } },
-      dataZoom: [{ type: "inside" }],
+      dataZoom: [{ type: "inside", filterMode: "none" }],
       series: [
         { type: "bar", stack: "salary-waterfall", silent: true, data: offsets, itemStyle: { color: "transparent" }, emphasis: { itemStyle: { color: "transparent" } }, tooltip: { show: false } },
         { type: "bar", name: "金额变化", stack: "salary-waterfall", data: deltas, label: { show: true, position: "top", color: chartPalette.textMuted, formatter: (params: { data?: { actual?: number } }) => `${Number(params.data?.actual ?? 0) >= 0 ? "+" : ""}${Number(params.data?.actual ?? 0).toFixed(2)}` } },
       ],
     };
   }, [chartPalette, selected]);
+  const liveDailyOption = useMemo<EChartsCoreOption>(() => {
+    const preview = payroll.data?.livePreview;
+    const timeline = preview?.salaryTimeline ?? [];
+    const currency = preview?.currency ?? "CNY";
+    return {
+      animationDuration: 180,
+      animationDurationUpdate: 160,
+      legend: { bottom: 0, textStyle: { color: chartPalette.textMuted } },
+      grid: { left: 66, right: 50, top: 24, bottom: 62, containLabel: false },
+      tooltip: {
+        trigger: "axis",
+        confine: true,
+        backgroundColor: chartPalette.surface,
+        borderColor: chartPalette.border,
+        textStyle: { color: chartPalette.text },
+        formatter: (items: Array<{ axisValue?: string; seriesName?: string; value?: number }>) => [
+          items[0]?.axisValue ?? "",
+          ...items.map((item) => `${item.seriesName ?? ""}：${item.seriesName === "周奖励工时" ? `${Number(item.value ?? 0).toFixed(2)} 小时` : formatPayrollMoney(currency, String(item.value ?? 0))}`),
+        ].join("<br/>"),
+      },
+      xAxis: {
+        type: "category",
+        data: timeline.map((item) => item.date.slice(5)),
+        axisLabel: { hideOverlap: true, color: chartPalette.textSubtle },
+        axisLine: { lineStyle: { color: chartPalette.border } },
+      },
+      yAxis: [
+        {
+          type: "value",
+          name: "金额",
+          min: 0,
+          axisLabel: {
+            formatter: (value: number) => formatPayrollAxis(currency, value),
+            color: chartPalette.textSubtle,
+          },
+          splitLine: { lineStyle: { color: chartPalette.grid } },
+        },
+        {
+          type: "value",
+          name: "奖励小时",
+          min: 0,
+          axisLabel: { formatter: "{value}h", color: chartPalette.textSubtle },
+          splitLine: { show: false },
+        },
+      ],
+      dataZoom: [{ type: "inside", filterMode: "none" }],
+      series: [
+        {
+          type: "bar",
+          name: "已批准薪资",
+          stack: "daily-pay",
+          data: timeline.map((item) => Number(item.approvedAmount)),
+          itemStyle: { color: chartPalette.accent, borderRadius: [5, 5, 0, 0] },
+        },
+        {
+          type: "bar",
+          name: "待审核预估",
+          stack: "daily-pay",
+          data: timeline.map((item) => Number(item.pendingAmount)),
+          itemStyle: { color: hexWithAlpha(chartPalette.warning, 0.62), borderRadius: [5, 5, 0, 0] },
+        },
+        {
+          type: "line",
+          name: "周奖励工时",
+          yAxisIndex: 1,
+          symbol: "diamond",
+          symbolSize: 8,
+          data: timeline.map((item) => item.bonusSeconds / 3_600),
+          lineStyle: { color: chartPalette.warning, width: 2 },
+          itemStyle: { color: chartPalette.warning },
+        },
+      ],
+    };
+  }, [chartPalette, payroll.data?.livePreview]);
+  const liveForecastOption = useMemo<EChartsCoreOption>(() => {
+    const preview = payroll.data?.livePreview;
+    const timeline = preview?.salaryTimeline ?? [];
+    const currency = preview?.currency ?? "CNY";
+    const lastActualIndex = timeline.findLastIndex((item) => !item.forecast);
+    return {
+      animationDuration: 180,
+      animationDurationUpdate: 160,
+      legend: { bottom: 0, textStyle: { color: chartPalette.textMuted } },
+      grid: { left: 68, right: 20, top: 24, bottom: 62 },
+      tooltip: {
+        trigger: "axis",
+        confine: true,
+        backgroundColor: chartPalette.surface,
+        borderColor: chartPalette.border,
+        textStyle: { color: chartPalette.text },
+        valueFormatter: (value: string | number) =>
+          formatPayrollMoney(currency, String(value)),
+      },
+      xAxis: {
+        type: "category",
+        data: timeline.map((item) => item.date.slice(5)),
+        axisLabel: { hideOverlap: true, color: chartPalette.textSubtle },
+        axisLine: { lineStyle: { color: chartPalette.border } },
+      },
+      yAxis: {
+        type: "value",
+        min: 0,
+        scale: true,
+        axisLabel: {
+          formatter: (value: number) => formatPayrollAxis(currency, value),
+          color: chartPalette.textSubtle,
+        },
+        splitLine: { lineStyle: { color: chartPalette.grid } },
+      },
+      dataZoom: [{ type: "inside", filterMode: "none" }],
+      series: [
+        {
+          type: "line",
+          name: "已发生累计",
+          connectNulls: false,
+          smooth: 0.2,
+          symbolSize: 6,
+          data: timeline.map((item) =>
+            item.actualCumulativeAmount === null
+              ? null
+              : Number(item.actualCumulativeAmount),
+          ),
+          lineStyle: { color: chartPalette.accent, width: 3 },
+          itemStyle: { color: chartPalette.accent },
+          areaStyle: { color: hexWithAlpha(chartPalette.accent, 0.1) },
+        },
+        {
+          type: "line",
+          name: "未来趋势预测",
+          smooth: 0.2,
+          showSymbol: false,
+          data: timeline.map((item, index) =>
+            item.forecast || index === lastActualIndex
+              ? Number(item.projectedCumulativeAmount)
+              : null,
+          ),
+          lineStyle: { color: chartPalette.warning, width: 2, type: "dashed" },
+          itemStyle: { color: chartPalette.warning },
+        },
+      ],
+    };
+  }, [chartPalette, payroll.data?.livePreview]);
   return (
     <>
       <PageHeader
@@ -7599,12 +7926,25 @@ export function PayrollPage({ me }: { me: Me }) {
       />
       {isPayrollManager ? <PayrollManagementPanel /> : null}
       {!isPayrollManager && payroll.data?.livePreview ? (
-        <section className="mb-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-5" aria-label="本月实时薪资">
+        <section className="mb-4 grid gap-2.5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6" aria-label="本月实时薪资">
           <Card><CardContent><StatusLine label={compensationTypeLabels[payroll.data.livePreview.planType]} value={`${money(payroll.data.livePreview.currency, payroll.data.livePreview.baseAmount)}${payroll.data.livePreview.planType === "hourly" || payroll.data.livePreview.planType === "hybrid" ? " / 小时" : ""}`} /></CardContent></Card>
           <Card><CardContent><StatusLine label="本月有效工时" value={formatDuration(payroll.data.livePreview.approvedSeconds + payroll.data.livePreview.pendingSeconds)} /></CardContent></Card>
           <Card><CardContent><StatusLine label={payroll.data.livePreview.weeklyBonusEstimatedSeconds ? "周奖励工时（含预估）" : "周奖励工时"} value={formatDuration((payroll.data.livePreview.weeklyBonusSeconds ?? 0) + (payroll.data.livePreview.weeklyBonusEstimatedSeconds ?? 0))} /></CardContent></Card>
           <Card><CardContent><StatusLine label="本月实时预估" value={money(payroll.data.livePreview.currency, payroll.data.livePreview.estimatedAmount)} /></CardContent></Card>
+          <Card><CardContent><StatusLine label="月末趋势预测" value={money(payroll.data.livePreview.currency, payroll.data.livePreview.projectedPeriodAmount)} /></CardContent></Card>
           <Card><CardContent><StatusLine label="预计发薪" value={formatDateTime(payroll.data.livePreview.period.cutoffAt)} /></CardContent></Card>
+        </section>
+      ) : null}
+      {!isPayrollManager && payroll.data?.livePreview?.salaryTimeline?.length ? (
+        <section className="mb-4 grid gap-4 xl:grid-cols-2" aria-label="实时薪资与预测图表">
+          <Card className="analytics-chart-card">
+            <CardHeader><h2 className="font-bold">每日薪资</h2><Badge>实时</Badge></CardHeader>
+            <CardContent><AnalyticsChart ariaLabel="本月每日薪资与周奖励" option={liveDailyOption} /></CardContent>
+          </Card>
+          <Card className="analytics-chart-card">
+            <CardHeader><h2 className="font-bold">薪资发展与月末预测</h2><Badge tone="warning">预测不锁定</Badge></CardHeader>
+            <CardContent><AnalyticsChart ariaLabel="本月薪资累计与未来预测" option={liveForecastOption} /></CardContent>
+          </Card>
         </section>
       ) : null}
       {!isPayrollManager && payroll.isPending ? (
@@ -7612,7 +7952,7 @@ export function PayrollPage({ me }: { me: Me }) {
           <LoadingBlock />
         </Card>
       ) : !isPayrollManager && payroll.data?.items.length && selected ? (
-        <div className="space-y-5">
+        <div className="space-y-4">
           <section className="grid gap-3 md:grid-cols-3" aria-label="薪资总览">
             {(payroll.data.summary.length ? payroll.data.summary : [{
               currency: selected.item.currency,
@@ -7643,7 +7983,7 @@ export function PayrollPage({ me }: { me: Me }) {
                 {selected.run.status === "settled"
                   ? selected.payslip?.acknowledgedAt
                     ? "已确认收款"
-                    : "已发放待确认"
+                    : "账单已导出，到账待确认"
                   : selected.item.estimate
                     ? "预估"
                     : "待结算"}
@@ -7657,7 +7997,7 @@ export function PayrollPage({ me }: { me: Me }) {
             </div>
           </div>
 
-          <section className="grid gap-5 xl:grid-cols-2" aria-label="薪资趋势图表">
+          <section className="grid gap-4 xl:grid-cols-2" aria-label="薪资趋势图表">
             <Card className="analytics-chart-card">
               <CardHeader><h2 className="font-bold">每日薪资</h2><Badge>{selected.period.name}</Badge></CardHeader>
               <CardContent><AnalyticsChart ariaLabel={`${selected.period.name}每日薪资`} option={dailyOption} /></CardContent>
@@ -8822,7 +9162,9 @@ export function AnalyticsPage({ me }: { me: Me }) {
   const analytics = useQuery({
     queryKey: ["analytics", me.user.membershipId, days, filters],
     queryFn: () => api<AnalyticsSummary>(analyticsUrl),
-    staleTime: 0,
+    placeholderData: (previous) => previous,
+    refetchOnWindowFocus: false,
+    staleTime: 15_000,
   });
   const activeFilterCount = Object.values(filters).filter(Boolean).length;
   const changeFilter = (key: keyof AnalyticsFilterState, value: string) =>
@@ -8848,15 +9190,16 @@ export function AnalyticsPage({ me }: { me: Me }) {
       },
       yAxis: {
         type: "value",
+        min: 0,
+        max: durationAxisMax(analytics.data?.byDay.map((item) => item.seconds) ?? []),
         axisLabel: {
-          formatter: (value: string | number) =>
-            `${Math.round(Number(value) / 3600)}h`,
+          formatter: formatDurationAxis,
           color: chartPalette.textSubtle,
         },
         splitLine: { lineStyle: { color: chartPalette.grid } },
       },
       dataZoom: [
-        { type: "inside" },
+        { type: "inside", filterMode: "none" },
         {
           type: "slider",
           height: 18,
@@ -8897,9 +9240,10 @@ export function AnalyticsPage({ me }: { me: Me }) {
       },
       xAxis: {
         type: "value",
+        min: 0,
+        max: durationAxisMax(analytics.data?.byProject.map((item) => item.seconds) ?? []),
         axisLabel: {
-          formatter: (value: string | number) =>
-            `${Math.round(Number(value) / 3600)}h`,
+          formatter: formatDurationAxis,
           color: chartPalette.textSubtle,
         },
         splitLine: { lineStyle: { color: chartPalette.grid } },
@@ -8933,7 +9277,7 @@ export function AnalyticsPage({ me }: { me: Me }) {
     grid: { left: 52, right: 18, top: 32, bottom: 40 },
     tooltip: { trigger: "axis", confine: true, backgroundColor: chartPalette.surface, borderColor: chartPalette.border, textStyle: { color: chartPalette.text }, valueFormatter: (value: string | number) => formatDuration(Number(value)) },
     xAxis: { type: "category", data: analytics.data?.byHour.map((item) => `${String(item.hour).padStart(2, "0")}:00`) ?? [], axisLabel: { interval: 2, color: chartPalette.textSubtle }, axisLine: { lineStyle: { color: chartPalette.border } } },
-    yAxis: { type: "value", axisLabel: { formatter: (value: string | number) => `${Math.round(Number(value) / 3600)}h`, color: chartPalette.textSubtle }, splitLine: { lineStyle: { color: chartPalette.grid } } },
+    yAxis: { type: "value", min: 0, max: durationAxisMax(analytics.data?.byHour.map((item) => item.seconds) ?? []), axisLabel: { formatter: formatDurationAxis, color: chartPalette.textSubtle }, splitLine: { lineStyle: { color: chartPalette.grid } } },
     series: [{ type: "line", name: "记录时长", smooth: true, showSymbol: false, data: analytics.data?.byHour.map((item) => item.seconds) ?? [], lineStyle: { color: chartPalette.accent, width: 3 }, areaStyle: { color: hexWithAlpha(chartPalette.accent, 0.12) } }],
   }), [analytics.data?.byHour, chartPalette]);
   const approvalOption = useMemo<EChartsCoreOption>(() => ({
@@ -8942,12 +9286,16 @@ export function AnalyticsPage({ me }: { me: Me }) {
     legend: { bottom: 0, textStyle: { color: chartPalette.textMuted } },
     series: [{ type: "pie", radius: ["45%", "70%"], center: ["50%", "44%"], avoidLabelOverlap: true, label: { show: false }, emphasis: { label: { show: true, fontWeight: "bold" } }, data: analytics.data?.byApproval.map((item) => ({ name: approvalLabels[item.status] ?? item.status, value: item.seconds, approvalState: item.status })) ?? [] }],
   }), [analytics.data?.byApproval, chartPalette]);
-  const heatmapOption = useMemo<EChartsCoreOption>(() => ({
-    tooltip: { confine: true, backgroundColor: chartPalette.surface, borderColor: chartPalette.border, textStyle: { color: chartPalette.text }, formatter: (params: { value?: [string, number] }) => `${params.value?.[0] ?? ""}<br/>${formatDuration(params.value?.[1] ?? 0)}` },
-    visualMap: { min: 0, max: Math.max(...(analytics.data?.byDay.map((item) => item.seconds) ?? [1])), show: false, inRange: { color: [chartPalette.grid, hexWithAlpha(chartPalette.accent, 0.45), chartPalette.accent] } },
-    calendar: { range: [from.toISOString().slice(0, 10), to.toISOString().slice(0, 10)], cellSize: ["auto", 18], splitLine: { show: false }, itemStyle: { color: chartPalette.grid, borderColor: chartPalette.surface, borderWidth: 3 }, dayLabel: { color: chartPalette.textSubtle }, monthLabel: { color: chartPalette.textMuted }, yearLabel: { show: false } },
-    series: [{ type: "heatmap", coordinateSystem: "calendar", data: analytics.data?.byDay.map((item) => [item.date, item.seconds]) ?? [] }],
-  }), [analytics.data?.byDay, chartPalette, from, to]);
+  const heatmapOption = useMemo<EChartsCoreOption>(() => {
+    const days = analytics.data?.byDay ?? [];
+    const range = days.length ? [days[0]!.date, days.at(-1)!.date] : [];
+    return {
+      tooltip: { confine: true, backgroundColor: chartPalette.surface, borderColor: chartPalette.border, textStyle: { color: chartPalette.text }, formatter: (params: { value?: [string, number] }) => `${params.value?.[0] ?? ""}<br/>${formatDuration(params.value?.[1] ?? 0)}` },
+      visualMap: { min: 0, max: Math.max(...days.map((item) => item.seconds), 1), show: false, inRange: { color: [chartPalette.grid, hexWithAlpha(chartPalette.accent, 0.45), chartPalette.accent] } },
+      calendar: { range, cellSize: ["auto", 18], splitLine: { show: false }, itemStyle: { color: chartPalette.grid, borderColor: chartPalette.surface, borderWidth: 3 }, dayLabel: { color: chartPalette.textSubtle }, monthLabel: { color: chartPalette.textMuted }, yearLabel: { show: false } },
+      series: [{ type: "heatmap", coordinateSystem: "calendar", data: days.map((item) => [item.date, item.seconds]) }],
+    };
+  }, [analytics.data?.byDay, chartPalette]);
   const funnelOption = useMemo<EChartsCoreOption>(() => ({
     animationDuration: 240,
     tooltip: { trigger: "item", confine: true, backgroundColor: chartPalette.surface, borderColor: chartPalette.border, textStyle: { color: chartPalette.text } },
@@ -8958,8 +9306,15 @@ export function AnalyticsPage({ me }: { me: Me }) {
     const predicted = analytics.data?.forecast.predicted ?? [];
     const labels = [...observed.map((item) => item.date.slice(5)), ...predicted.map((item) => item.date.slice(5))];
     const observedPadding = Array.from({ length: observed.length }, () => null);
+    const predictionBridge = observed.length
+      ? [
+          ...Array.from({ length: observed.length - 1 }, () => null),
+          observed.at(-1)?.seconds ?? null,
+        ]
+      : [];
     return {
       animationDuration: 240,
+      animationDurationUpdate: 180,
       legend: { bottom: 2, textStyle: { color: chartPalette.textMuted } },
       grid: { left: 54, right: 18, top: 24, bottom: 66 },
       tooltip: {
@@ -8968,7 +9323,18 @@ export function AnalyticsPage({ me }: { me: Me }) {
         backgroundColor: chartPalette.surface,
         borderColor: chartPalette.border,
         textStyle: { color: chartPalette.text },
-        valueFormatter: (value: string | number) => formatDuration(Number(value)),
+        formatter: (items: Array<{ dataIndex?: number }>) => {
+          const index = Number(items[0]?.dataIndex ?? 0);
+          const fact = observed[index];
+          if (fact) return `${fact.date}<br/>已发生事实：${formatDuration(fact.seconds)}`;
+          const prediction = predicted[index - observed.length];
+          if (!prediction) return "";
+          return [
+            prediction.date,
+            `程序预测：${formatDuration(prediction.seconds)}`,
+            `合理区间：${formatDuration(prediction.lowerSeconds)} – ${formatDuration(prediction.upperSeconds)}`,
+          ].join("<br/>");
+        },
       },
       xAxis: {
         type: "category",
@@ -8978,10 +9344,15 @@ export function AnalyticsPage({ me }: { me: Me }) {
       },
       yAxis: {
         type: "value",
-        axisLabel: { formatter: (value: string | number) => `${Math.round(Number(value) / 3_600)}h`, color: chartPalette.textSubtle },
+        min: 0,
+        max: durationAxisMax([
+          ...observed.map((item) => item.seconds),
+          ...predicted.map((item) => item.upperSeconds),
+        ]),
+        axisLabel: { formatter: formatDurationAxis, color: chartPalette.textSubtle },
         splitLine: { lineStyle: { color: chartPalette.grid } },
       },
-      dataZoom: [{ type: "inside" }],
+      dataZoom: [{ type: "inside", filterMode: "none" }],
       series: [
         {
           type: "line",
@@ -9016,58 +9387,75 @@ export function AnalyticsPage({ me }: { me: Me }) {
           name: "程序预测",
           smooth: true,
           symbol: "emptyCircle",
-          data: [...observedPadding, ...predicted.map((item) => item.seconds)],
+          data: [...predictionBridge, ...predicted.map((item) => item.seconds)],
           lineStyle: { color: chartPalette.accent, width: 2, type: "dashed" },
           itemStyle: { color: chartPalette.surface, borderColor: chartPalette.accent, borderWidth: 2 },
         },
       ],
     };
   }, [analytics.data?.forecast, chartPalette]);
-  const sankeyOption = useMemo<EChartsCoreOption>(() => ({
-    animationDuration: 260,
-    tooltip: {
-      trigger: "item",
-      confine: true,
-      backgroundColor: chartPalette.surface,
-      borderColor: chartPalette.border,
-      textStyle: { color: chartPalette.text },
-      valueFormatter: (value: string | number) => formatDuration(Number(value)),
-    },
-    series: [{
-      type: "sankey",
-      left: 10,
-      right: 22,
-      top: 16,
-      bottom: 16,
-      nodeGap: 12,
-      nodeWidth: 14,
-      draggable: false,
-      emphasis: { focus: "adjacency" },
-      lineStyle: { color: "gradient", curveness: 0.45, opacity: 0.28 },
-      label: {
-        color: chartPalette.textMuted,
-        formatter: (params: { data?: { label?: string } }) => params.data?.label ?? "",
-      },
-      data: analytics.data?.flow.nodes.map((node) => ({
-        name: node.id,
-        label: node.label,
-        kind: node.kind,
-        dimensionId: node.id.slice(node.id.indexOf(":") + 1),
-        itemStyle: {
-          color: node.kind === "project"
-            ? chartPalette.accent
-            : node.kind === "work_type"
-              ? hexWithAlpha(chartPalette.accent, 0.65)
-              : chartPalette.textSubtle,
+  const sankeyOption = useMemo<EChartsCoreOption>(() => {
+    const nodes = analytics.data?.flow.nodes ?? [];
+    const labels = new Map(nodes.map((node) => [node.id, node.label]));
+    return {
+      animationDuration: 260,
+      animationDurationUpdate: 180,
+      tooltip: {
+        trigger: "item",
+        confine: true,
+        backgroundColor: chartPalette.surface,
+        borderColor: chartPalette.border,
+        textStyle: { color: chartPalette.text },
+        formatter: (params: { dataType?: string; data?: { label?: string; sourceLabel?: string; targetLabel?: string; value?: number }; value?: number; name?: string }) => {
+          const seconds = Number(params.value ?? params.data?.value ?? 0);
+          if (params.dataType === "edge") {
+            return `${params.data?.sourceLabel ?? ""} → ${params.data?.targetLabel ?? ""}<br/>${formatDuration(seconds)}`;
+          }
+          return `${params.data?.label ?? params.name ?? ""}<br/>${formatDuration(seconds)}`;
         },
-      })) ?? [],
-      links: analytics.data?.flow.links.map((link) => ({
-        source: link.source,
-        target: link.target,
-        value: link.seconds,
-      })) ?? [],
-    }],
-  }), [analytics.data?.flow, chartPalette]);
+      },
+      series: [{
+        type: "sankey",
+        left: 10,
+        right: 22,
+        top: 16,
+        bottom: 16,
+        nodeGap: 12,
+        nodeWidth: 14,
+        nodeAlign: "justify",
+        layoutIterations: 32,
+        draggable: false,
+        emphasis: { focus: "adjacency" },
+        lineStyle: { color: "gradient", curveness: 0.45, opacity: 0.28 },
+        label: {
+          color: chartPalette.textMuted,
+          width: 112,
+          overflow: "truncate",
+          formatter: (params: { data?: { label?: string } }) => params.data?.label ?? "",
+        },
+        data: nodes.map((node) => ({
+          name: node.id,
+          label: node.label,
+          kind: node.kind,
+          dimensionId: node.id.slice(node.id.indexOf(":") + 1),
+          itemStyle: {
+            color: node.kind === "project"
+              ? chartPalette.accent
+              : node.kind === "work_type"
+                ? hexWithAlpha(chartPalette.accent, 0.65)
+                : chartPalette.textSubtle,
+          },
+        })),
+        links: analytics.data?.flow.links.map((link) => ({
+          source: link.source,
+          target: link.target,
+          sourceLabel: labels.get(link.source) ?? link.source,
+          targetLabel: labels.get(link.target) ?? link.target,
+          value: link.seconds,
+        })) ?? [],
+      }],
+    };
+  }, [analytics.data?.flow, chartPalette]);
   const sunburstOption = useMemo<EChartsCoreOption>(() => {
     const projects = new Map<string, { name: string; projectId: string | null; value: number; children: Array<{ name: string; value: number; workTypeId: string | null }> }>();
     for (const item of analytics.data?.projectWorkTypes ?? []) {
@@ -9102,21 +9490,32 @@ export function AnalyticsPage({ me }: { me: Me }) {
     animationDuration: 220,
     grid: { left: 92, right: 18, top: 18, bottom: 28 },
     tooltip: { trigger: "axis", confine: true, axisPointer: { type: "shadow" }, backgroundColor: chartPalette.surface, borderColor: chartPalette.border, textStyle: { color: chartPalette.text }, valueFormatter: (value: string | number) => formatDuration(Number(value)) },
-    xAxis: { type: "value", axisLabel: { formatter: (value: string | number) => `${Math.round(Number(value) / 3_600)}h`, color: chartPalette.textSubtle }, splitLine: { lineStyle: { color: chartPalette.grid } } },
+    xAxis: { type: "value", min: 0, max: durationAxisMax(analytics.data?.byMember.map((item) => item.seconds) ?? []), axisLabel: { formatter: formatDurationAxis, color: chartPalette.textSubtle }, splitLine: { lineStyle: { color: chartPalette.grid } } },
     yAxis: { type: "category", data: analytics.data?.byMember.map((item) => item.displayName) ?? [], axisLabel: { width: 76, overflow: "truncate", color: chartPalette.textMuted }, axisLine: { lineStyle: { color: chartPalette.border } } },
     series: [{ type: "bar", name: "范围内工时", data: analytics.data?.byMember.map((item) => ({ value: item.seconds, membershipId: item.membershipId })) ?? [], itemStyle: { color: hexWithAlpha(chartPalette.accent, 0.72), borderRadius: [0, 7, 7, 0] } }],
   }), [analytics.data?.byMember, chartPalette]);
   const projectHealthOption = useMemo<EChartsCoreOption>(() => ({
     animationDuration: 240,
+    animationDurationUpdate: 180,
     legend: { bottom: 0, textStyle: { color: chartPalette.textMuted } },
     grid: { left: 54, right: 54, top: 28, bottom: 68 },
-    tooltip: { trigger: "axis", confine: true, backgroundColor: chartPalette.surface, borderColor: chartPalette.border, textStyle: { color: chartPalette.text } },
+    tooltip: {
+      trigger: "axis",
+      confine: true,
+      backgroundColor: chartPalette.surface,
+      borderColor: chartPalette.border,
+      textStyle: { color: chartPalette.text },
+      formatter: (items: Array<{ axisValue?: string; seriesName?: string; value?: number }>) => [
+        items[0]?.axisValue ?? "",
+        ...items.map((item) => `${item.seriesName ?? ""}：${item.seriesName === "净工时" ? formatDuration(Number(item.value ?? 0)) : `${Number(item.value ?? 0).toFixed(1)}%`}`),
+      ].join("<br/>"),
+    },
     xAxis: { type: "category", data: analytics.data?.projectHealth.map((item) => item.projectName) ?? [], axisLabel: { width: 82, overflow: "truncate", color: chartPalette.textSubtle }, axisLine: { lineStyle: { color: chartPalette.border } } },
     yAxis: [
-      { type: "value", name: "工时", axisLabel: { formatter: (value: string | number) => `${Math.round(Number(value) / 3_600)}h`, color: chartPalette.textSubtle }, splitLine: { lineStyle: { color: chartPalette.grid } } },
+      { type: "value", name: "工时", min: 0, max: durationAxisMax(analytics.data?.projectHealth.map((item) => item.seconds) ?? []), axisLabel: { formatter: formatDurationAxis, color: chartPalette.textSubtle }, splitLine: { lineStyle: { color: chartPalette.grid } } },
       { type: "value", name: "进度", min: 0, max: 100, axisLabel: { formatter: "{value}%", color: chartPalette.textSubtle }, splitLine: { show: false } },
     ],
-    dataZoom: [{ type: "inside" }],
+    dataZoom: [{ type: "inside", filterMode: "none" }],
     series: [
       { type: "bar", name: "净工时", data: analytics.data?.projectHealth.map((item) => item.seconds) ?? [], itemStyle: { color: hexWithAlpha(chartPalette.accent, 0.56), borderRadius: [6, 6, 0, 0] } },
       { type: "line", name: "节点加权进度", yAxisIndex: 1, data: analytics.data?.projectHealth.map((item) => item.progress) ?? [], lineStyle: { color: chartPalette.accent, width: 3 }, itemStyle: { color: chartPalette.accent } },
