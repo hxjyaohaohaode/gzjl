@@ -7,7 +7,6 @@ import {
   ChartNoAxesCombined,
   CircleDollarSign,
   Clock3,
-  Command,
   Crown,
   FileCheck2,
   FolderKanban,
@@ -53,6 +52,21 @@ interface NotificationItem {
   actionUrl: string | null;
   readAt: string | null;
   createdAt: string;
+}
+
+interface GlobalSearchResult {
+  id: string;
+  kind:
+    | "work_session"
+    | "project"
+    | "project_node"
+    | "member"
+    | "attachment"
+    | "ai_report";
+  title: string;
+  subtitle: string | null;
+  href: string;
+  occurredAt: string | null;
 }
 
 interface PendingOwnershipTransfer {
@@ -182,8 +196,35 @@ function CommandPalette({
   onClose: () => void;
 }) {
   const [query, setQuery] = useState("");
+  const [settledQuery, setSettledQuery] = useState("");
   const navigate = useNavigate();
-  const matches = items.filter((item) => item.label.includes(query.trim()));
+  const normalizedQuery = query.trim();
+  const matches = items.filter((item) => item.label.includes(normalizedQuery));
+  useEffect(() => {
+    const timer = window.setTimeout(() => setSettledQuery(normalizedQuery), 220);
+    return () => window.clearTimeout(timer);
+  }, [normalizedQuery]);
+  const search = useQuery({
+    queryKey: ["global-search", settledQuery],
+    queryFn: () =>
+      api<{ items: GlobalSearchResult[] }>(
+        `/api/search?q=${encodeURIComponent(settledQuery)}&limit=5`,
+      ),
+    enabled: settledQuery.length >= 2,
+    staleTime: 15_000,
+  });
+  const resultKindLabel: Record<GlobalSearchResult["kind"], string> = {
+    work_session: "工作",
+    project: "项目",
+    project_node: "节点",
+    member: "成员",
+    attachment: "附件",
+    ai_report: "AI",
+  };
+  const open = (href: string) => {
+    navigate(href);
+    onClose();
+  };
   return (
     <div
       aria-label="全局导航"
@@ -198,11 +239,11 @@ function CommandPalette({
         <div className="flex items-center gap-3 border-b border-[var(--border)] px-4">
           <Search className="text-[var(--text-subtle)]" size={19} />
           <input
-            aria-label="搜索工作台页面"
+            aria-label="搜索工作台"
             autoFocus
             className="h-14 min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-[var(--text-subtle)]"
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="前往页面…"
+            placeholder="搜索工作、项目、成员、附件或报告…"
             value={query}
           />
           <Button
@@ -214,7 +255,7 @@ function CommandPalette({
             <X size={16} />
           </Button>
         </div>
-        <div className="max-h-[min(58vh,430px)] overflow-y-auto p-2">
+        <div className="max-h-[min(64vh,520px)] overflow-y-auto p-2">
           <p className="px-3 py-2 text-[11px] font-bold tracking-[0.12em] text-[var(--text-subtle)] uppercase">
             快速前往
           </p>
@@ -226,8 +267,7 @@ function CommandPalette({
                   className="flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left text-sm font-semibold transition hover:bg-[var(--surface-subtle)]"
                   key={item.to}
                   onClick={() => {
-                    navigate(item.to);
-                    onClose();
+                    open(item.to);
                   }}
                   type="button"
                 >
@@ -241,15 +281,54 @@ function CommandPalette({
                 </button>
               );
             })
-          ) : (
+          ) : normalizedQuery.length < 2 ? (
             <p className="px-3 py-8 text-center text-sm text-[var(--text-muted)]">
               没有匹配的页面。
             </p>
-          )}
-        </div>
-        <div className="flex items-center gap-2 border-t border-[var(--border)] px-4 py-3 text-xs text-[var(--text-subtle)]">
-          <Command size={14} />
-          这是安全的页面导航，不会查询或泄露未授权数据。
+          ) : null}
+          {normalizedQuery.length >= 2 ? (
+            <div className="mt-1 border-t border-[color-mix(in_srgb,var(--text)_5%,transparent)] pt-2">
+              <p className="px-3 py-2 text-[11px] font-bold tracking-[0.12em] text-[var(--text-subtle)] uppercase">
+                业务结果
+              </p>
+              {search.isPending || settledQuery !== normalizedQuery ? (
+                <p className="px-3 py-6 text-center text-sm text-[var(--text-muted)]">
+                  搜索中…
+                </p>
+              ) : search.isError ? (
+                <p className="px-3 py-6 text-center text-sm text-[var(--danger)]">
+                  搜索暂时不可用，请重试。
+                </p>
+              ) : search.data?.items.length ? (
+                search.data.items.map((item) => (
+                  <button
+                    className="flex w-full items-start gap-3 rounded-xl px-3 py-3 text-left transition hover:bg-[var(--surface-subtle)]"
+                    key={`${item.kind}:${item.id}`}
+                    onClick={() => open(item.href)}
+                    type="button"
+                  >
+                    <span className="mt-0.5 min-w-10 rounded-full bg-[var(--surface-subtle)] px-2 py-1 text-center text-[10px] font-bold text-[var(--text-muted)]">
+                      {resultKindLabel[item.kind]}
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-sm font-bold">
+                        {item.title}
+                      </span>
+                      {item.subtitle ? (
+                        <span className="mt-0.5 block truncate text-xs text-[var(--text-muted)]">
+                          {item.subtitle}
+                        </span>
+                      ) : null}
+                    </span>
+                  </button>
+                ))
+              ) : (
+                <p className="px-3 py-6 text-center text-sm text-[var(--text-muted)]">
+                  没有可见的匹配结果。
+                </p>
+              )}
+            </div>
+          ) : null}
         </div>
       </div>
     </div>

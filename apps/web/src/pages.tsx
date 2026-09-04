@@ -40,10 +40,10 @@ import {
   type InputHTMLAttributes,
   type ReactNode,
 } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { Badge, Button, Card, CardContent, CardHeader } from "@workbench/ui";
 
-import { api, hasGrant, resetCsrfToken, type Me } from "./api.js";
+import { api, ApiError, hasGrant, resetCsrfToken, type Me } from "./api.js";
 import { readableForeground } from "./color.js";
 import { sendQueueableTimerEvent } from "./offline.js";
 
@@ -269,11 +269,11 @@ function localInput(date: Date): string {
 }
 function hexWithAlpha(hex: string, alpha: number): string {
   const value = hex.replace("#", "");
-  if (!/^[0-9a-f]{6}$/i.test(value)) return "rgb(91 92 226 / " + alpha + ")";
+  if (!/^[0-9a-f]{6}$/i.test(value)) return `rgba(91, 92, 226, ${alpha})`;
   const red = Number.parseInt(value.slice(0, 2), 16);
   const green = Number.parseInt(value.slice(2, 4), 16);
   const blue = Number.parseInt(value.slice(4, 6), 16);
-  return "rgb(" + red + " " + green + " " + blue + " / " + alpha + ")";
+  return `rgba(${red}, ${green}, ${blue}, ${alpha})`;
 }
 function useChartPalette() {
   const [, setVersion] = useState(0);
@@ -1443,16 +1443,27 @@ export function SecurityPage() {
 }
 
 const notificationCategories = [
+  { category: "forgotten_work", title: "可能漏记", description: "较长时间没有新记录时提醒（默认由组织按需启用）。" },
   {
     category: "timer_long_running",
     title: "长时间计时",
     description: "计时器运行时间过长时提醒。",
   },
+  { category: "work_overlap", title: "时间重叠", description: "非并行工作记录的时间范围相交时提醒。" },
+  { category: "continuous_work_long", title: "连续工作偏长", description: "单段连续工作较长时温和提醒确认。" },
+  { category: "duration_baseline_change", title: "近期时长变化", description: "相对本人近期基线变化明显时提醒核对。" },
+  { category: "short_break", title: "工作间隔较短", description: "两段较长工作之间间隔过短时提醒。" },
+  { category: "project_due_soon", title: "项目临期", description: "负责的项目节点临近截止时间时提醒。" },
+  { category: "blocked_node_aging", title: "阻塞持续", description: "负责的项目节点持续阻塞时提醒。" },
+  { category: "approval_returned", title: "审核退回", description: "工作记录被退回后提醒补充或修正。" },
   {
     category: "payroll_cutoff_pending",
     title: "薪资截止",
     description: "薪资截止日存在待处理事项时提醒。",
   },
+  { category: "identity_request_result", title: "身份申请结果", description: "专业身份申请处理完成时提醒。" },
+  { category: "export_ready", title: "导出完成", description: "后台导出文件准备完成时提醒。" },
+  { category: "export_failed", title: "导出失败", description: "后台导出未完成时提醒并允许重试。" },
   {
     category: "ai_report_ready",
     title: "AI 报告完成",
@@ -2915,7 +2926,7 @@ function WorkRow({ item, action }: { item: WorkSession; action?: ReactNode }) {
             : "已锁定";
   const projectLinks = item.projectLinks ?? [];
   return (
-    <div className="work-row flex flex-col gap-3 px-2 py-4 first:pt-0 last:pb-0 sm:flex-row sm:items-center">
+    <div className="work-row flex flex-col gap-3 px-2 py-4 first:pt-0 last:pb-0 sm:flex-row sm:items-center" id={`work-session-${item.id}`}>
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-2">
           <p className="truncate font-semibold">{item.content}</p>
@@ -3906,6 +3917,7 @@ export function WorkPage() {
   const [editingSession, setEditingSession] = useState<WorkSession | null>(
     null,
   );
+  const [conflictSessionId, setConflictSessionId] = useState<string | null>(null);
   const [correctionSession, setCorrectionSession] =
     useState<WorkSession | null>(null);
   const [correctionReason, setCorrectionReason] = useState("");
@@ -4078,6 +4090,7 @@ export function WorkPage() {
           );
     },
     onSuccess: async () => {
+      setConflictSessionId(null);
       setShowForm(false);
       setEditingSession(null);
       setCorrectionSession(null);
@@ -4102,6 +4115,12 @@ export function WorkPage() {
       setPrimaryProjectNodeId("");
       setLinkedProjectNodes([]);
       await refresh();
+    },
+    onError: async (error) => {
+      if (error instanceof ApiError && error.status === 409 && editingSession) {
+        setConflictSessionId(editingSession.id);
+        await queryClient.invalidateQueries({ queryKey: ["work-sessions"] });
+      }
     },
   });
   const startTimer = useMutation({
@@ -4155,6 +4174,7 @@ export function WorkPage() {
     onSuccess: refresh,
   });
   const openDraftEditor = (item: WorkSession) => {
+    setConflictSessionId(null);
     setEditingSession(item);
     setCorrectionSession(null);
     setCorrectionReason("");
@@ -4193,6 +4213,19 @@ export function WorkPage() {
     setShowForm(true);
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
+  const latestConflictedSession = conflictSessionId
+    ? work.data?.items.find((item) => item.id === conflictSessionId) ?? null
+    : null;
+  useEffect(() => {
+    if (!work.data || !window.location.hash.startsWith("#work-session-")) return;
+    const targetId = window.location.hash.slice(1);
+    window.requestAnimationFrame(() => {
+      document.getElementById(targetId)?.scrollIntoView({
+        behavior: "smooth",
+        block: "center",
+      });
+    });
+  }, [work.data]);
   const openCorrectionEditor = (item: WorkSession) => {
     setEditingSession(null);
     setCorrectionSession(item);
@@ -4826,6 +4859,16 @@ export function WorkPage() {
                       </div>
                     )}
                   </>
+                ) : null}
+                {conflictSessionId ? (
+                  <div className="rounded-xl bg-[var(--warning-soft)] p-4 md:col-span-2">
+                    <p className="text-sm font-bold text-[var(--warning)]">检测到跨设备版本冲突</p>
+                    <p className="mt-1 text-xs leading-5 text-[var(--text-muted)]">服务器上的记录已被其他设备更新。本地输入仍保留在表单中；请选择加载服务器版本，或把当前本地字段重新应用到最新版本后再次保存。</p>
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      <Button disabled={!latestConflictedSession} onClick={() => latestConflictedSession && openDraftEditor(latestConflictedSession)} size="compact" type="button" variant="secondary">加载服务器版本</Button>
+                      <Button disabled={!latestConflictedSession} onClick={() => { if (!latestConflictedSession) return; setEditingSession(latestConflictedSession); setConflictSessionId(null); }} size="compact" type="button">保留本地字段并更新基线</Button>
+                    </div>
+                  </div>
                 ) : null}
                 <div className="flex items-end justify-end md:col-span-2">
                   <label className="mr-auto flex max-w-52 items-start gap-2 text-xs leading-5 text-[var(--text-muted)]">
@@ -7149,6 +7192,10 @@ interface AnalyticsSummary {
     projectName: string;
     seconds: number;
   }>;
+  byWorkType: Array<{ workTypeId: string | null; workTypeName: string; seconds: number }>;
+  byApproval: Array<{ status: string; seconds: number; count: number }>;
+  byHour: Array<{ hour: number; seconds: number; count: number }>;
+  funnel: Array<{ stage: string; count: number }>;
 }
 export function AnalyticsPage({ me }: { me: Me }) {
   const [days, setDays] = useState(30);
@@ -7261,13 +7308,38 @@ export function AnalyticsPage({ me }: { me: Me }) {
     }),
     [analytics.data?.byProject, chartPalette],
   );
-  const exportCsv = () => {
+  const rhythmOption = useMemo<EChartsCoreOption>(() => ({
+    animationDuration: 240,
+    grid: { left: 52, right: 18, top: 32, bottom: 40 },
+    tooltip: { trigger: "axis", backgroundColor: chartPalette.surface, borderColor: chartPalette.border, textStyle: { color: chartPalette.text }, valueFormatter: (value: string | number) => formatDuration(Number(value)) },
+    xAxis: { type: "category", data: analytics.data?.byHour.map((item) => `${String(item.hour).padStart(2, "0")}:00`) ?? [], axisLabel: { interval: 2, color: chartPalette.textSubtle }, axisLine: { lineStyle: { color: chartPalette.border } } },
+    yAxis: { type: "value", axisLabel: { formatter: (value: string | number) => `${Math.round(Number(value) / 3600)}h`, color: chartPalette.textSubtle }, splitLine: { lineStyle: { color: chartPalette.grid } } },
+    series: [{ type: "line", name: "记录时长", smooth: true, showSymbol: false, data: analytics.data?.byHour.map((item) => item.seconds) ?? [], lineStyle: { color: chartPalette.accent, width: 3 }, areaStyle: { color: hexWithAlpha(chartPalette.accent, 0.12) } }],
+  }), [analytics.data?.byHour, chartPalette]);
+  const approvalOption = useMemo<EChartsCoreOption>(() => ({
+    animationDuration: 240,
+    tooltip: { trigger: "item", backgroundColor: chartPalette.surface, borderColor: chartPalette.border, textStyle: { color: chartPalette.text }, formatter: (params: { name?: string; value?: number; percent?: number }) => `${params.name ?? ""}<br/>${formatDuration(Number(params.value ?? 0))} · ${params.percent ?? 0}%` },
+    legend: { bottom: 0, textStyle: { color: chartPalette.textMuted } },
+    series: [{ type: "pie", radius: ["45%", "70%"], center: ["50%", "44%"], avoidLabelOverlap: true, label: { show: false }, emphasis: { label: { show: true, fontWeight: "bold" } }, data: analytics.data?.byApproval.map((item) => ({ name: item.status, value: item.seconds })) ?? [] }],
+  }), [analytics.data?.byApproval, chartPalette]);
+  const heatmapOption = useMemo<EChartsCoreOption>(() => ({
+    tooltip: { backgroundColor: chartPalette.surface, borderColor: chartPalette.border, textStyle: { color: chartPalette.text }, formatter: (params: { value?: [string, number] }) => `${params.value?.[0] ?? ""}<br/>${formatDuration(params.value?.[1] ?? 0)}` },
+    visualMap: { min: 0, max: Math.max(...(analytics.data?.byDay.map((item) => item.seconds) ?? [1])), show: false, inRange: { color: [chartPalette.grid, hexWithAlpha(chartPalette.accent, 0.45), chartPalette.accent] } },
+    calendar: { range: [from.toISOString().slice(0, 10), to.toISOString().slice(0, 10)], cellSize: ["auto", 18], splitLine: { show: false }, itemStyle: { color: chartPalette.grid, borderColor: chartPalette.surface, borderWidth: 3 }, dayLabel: { color: chartPalette.textSubtle }, monthLabel: { color: chartPalette.textMuted }, yearLabel: { show: false } },
+    series: [{ type: "heatmap", coordinateSystem: "calendar", data: analytics.data?.byDay.map((item) => [item.date, item.seconds]) ?? [] }],
+  }), [analytics.data?.byDay, chartPalette, from, to]);
+  const funnelOption = useMemo<EChartsCoreOption>(() => ({
+    animationDuration: 240,
+    tooltip: { trigger: "item", backgroundColor: chartPalette.surface, borderColor: chartPalette.border, textStyle: { color: chartPalette.text } },
+    series: [{ type: "funnel", left: "8%", width: "84%", top: 18, bottom: 18, minSize: "24%", maxSize: "100%", sort: "none", gap: 4, label: { color: chartPalette.text }, itemStyle: { borderColor: chartPalette.surface, borderWidth: 2 }, data: analytics.data?.funnel.map((item) => ({ name: item.stage, value: item.count })) ?? [] }],
+  }), [analytics.data?.funnel, chartPalette]);
+  const exportData = (format: "csv" | "json") => {
     const params = new URLSearchParams({
       from: from.toISOString(),
       to: to.toISOString(),
     });
     window.location.assign(
-      `/api/exports/work-sessions.csv?${params.toString()}`,
+      `/api/exports/work-sessions.${format}?${params.toString()}`,
     );
   };
   const canExportOrganization = me.permissions.some(
@@ -7305,9 +7377,14 @@ export function AnalyticsPage({ me }: { me: Me }) {
               <option value={90}>最近 90 天</option>
             </select>
             {canExportOrganization ? (
-              <Button onClick={exportCsv} size="compact" variant="secondary">
-                导出 CSV
-              </Button>
+              <>
+                <Button onClick={() => exportData("csv")} size="compact" variant="secondary">
+                  导出 CSV
+                </Button>
+                <Button onClick={() => exportData("json")} size="compact" variant="secondary">
+                  导出 JSON
+                </Button>
+              </>
             ) : null}
           </>
         }
@@ -7414,6 +7491,24 @@ export function AnalyticsPage({ me }: { me: Me }) {
               </CardContent>
             </Card>
           </div>
+          <div className="mt-5 grid gap-5 xl:grid-cols-2">
+            <Card className="analytics-chart-card">
+              <CardHeader><div><p className="app-section-label">时段分布</p><h2 className="mt-2 font-extrabold tracking-[-0.025em]">24 小时工作节奏</h2></div></CardHeader>
+              <CardContent>{analytics.data.byHour.some((item) => item.seconds > 0) ? <AnalyticsChart ariaLabel="24 小时工作节奏图" option={rhythmOption} /> : <EmptyState description="该区间没有可汇总的时段。" icon={<Clock3 />} title="没有节奏数据" />}</CardContent>
+            </Card>
+            <Card className="analytics-chart-card">
+              <CardHeader><div><p className="app-section-label">日历密度</p><h2 className="mt-2 font-extrabold tracking-[-0.025em]">工作记录热力图</h2></div></CardHeader>
+              <CardContent>{analytics.data.byDay.length ? <AnalyticsChart ariaLabel="工作记录日历热力图" option={heatmapOption} /> : <EmptyState description="该区间没有工时。" icon={<CalendarDays />} title="没有热力数据" />}</CardContent>
+            </Card>
+            <Card className="analytics-chart-card">
+              <CardHeader><div><p className="app-section-label">审核结构</p><h2 className="mt-2 font-extrabold tracking-[-0.025em]">审核状态分布</h2></div></CardHeader>
+              <CardContent>{analytics.data.byApproval.length ? <AnalyticsChart ariaLabel="审核状态分布图" option={approvalOption} /> : <EmptyState description="该区间没有审核数据。" icon={<FileCheck2 />} title="没有审核分布" />}</CardContent>
+            </Card>
+            <Card className="analytics-chart-card">
+              <CardHeader><div><p className="app-section-label">事实流转</p><h2 className="mt-2 font-extrabold tracking-[-0.025em]">记录到计薪漏斗</h2></div></CardHeader>
+              <CardContent>{analytics.data.funnel[0]?.count ? <AnalyticsChart ariaLabel="记录到计薪漏斗图" option={funnelOption} /> : <EmptyState description="该区间没有可流转的记录。" icon={<ListTodo />} title="没有流转数据" />}</CardContent>
+            </Card>
+          </div>
           <Card className="mt-5">
             <CardHeader>
               <div>
@@ -7462,6 +7557,13 @@ export function AnalyticsPage({ me }: { me: Me }) {
               )}
             </CardContent>
           </Card>
+          <Card className="mt-5">
+            <CardHeader><div><p className="app-section-label">分类对账</p><h2 className="mt-2 font-extrabold tracking-[-0.025em]">工作类型与审核明细</h2></div></CardHeader>
+            <CardContent className="grid gap-6 lg:grid-cols-2">
+              <div><h3 className="text-sm font-bold">工作类型</h3><div className="mt-2 divide-y divide-[var(--border-soft)]">{analytics.data.byWorkType.map((item) => <div className="flex items-center justify-between gap-3 py-2 text-sm" key={item.workTypeId ?? "none"}><span>{item.workTypeName}</span><strong className="tabular-nums">{formatDuration(item.seconds)}</strong></div>)}</div></div>
+              <div><h3 className="text-sm font-bold">审核状态</h3><div className="mt-2 divide-y divide-[var(--border-soft)]">{analytics.data.byApproval.map((item) => <div className="flex items-center justify-between gap-3 py-2 text-sm" key={item.status}><span>{item.status} · {item.count} 条</span><strong className="tabular-nums">{formatDuration(item.seconds)}</strong></div>)}</div></div>
+            </CardContent>
+          </Card>
         </>
       ) : null}
       <div className="mt-4">
@@ -7497,6 +7599,7 @@ function Metric({
 interface AiReportRecord {
   job: {
     id: string;
+    taskType: AiTaskType;
     status: string;
     errorSummary: string | null;
     queuedAt: string;
@@ -7515,6 +7618,30 @@ interface AiReportRecord {
     generatedAt: string;
   } | null;
 }
+
+type AiTaskType =
+  | "daily_summary"
+  | "weekly_summary"
+  | "monthly_summary"
+  | "work_rhythm"
+  | "project_progress"
+  | "project_blockers"
+  | "organization_summary";
+
+const aiTaskPresets: Array<{
+  type: AiTaskType;
+  label: string;
+  rangeDays: number;
+  teamOnly?: boolean;
+}> = [
+  { type: "daily_summary", label: "总结今日", rangeDays: 1 },
+  { type: "weekly_summary", label: "生成周报", rangeDays: 7 },
+  { type: "monthly_summary", label: "月度回顾", rangeDays: 31 },
+  { type: "work_rhythm", label: "工作节奏", rangeDays: 31 },
+  { type: "project_progress", label: "项目进展", rangeDays: 31 },
+  { type: "project_blockers", label: "项目阻塞", rangeDays: 31 },
+  { type: "organization_summary", label: "团队总结", rangeDays: 7, teamOnly: true },
+];
 
 interface AiSettings {
   source: "organization" | "deployment_default";
@@ -7833,6 +7960,7 @@ function AiSettingsEditor({
 
 export function AiPage({ me }: { me: Me }) {
   const queryClient = useQueryClient();
+  const [searchParams] = useSearchParams();
   const reports = useQuery({
     queryKey: ["ai-reports"],
     queryFn: () => api<{ items: AiReportRecord[] }>("/api/ai/reports"),
@@ -7844,7 +7972,8 @@ export function AiPage({ me }: { me: Me }) {
         : false,
   });
   const [scope, setScope] = useState<"self" | "team">("self");
-  const [activeReportId, setActiveReportId] = useState<string | null>(null);
+  const [taskType, setTaskType] = useState<AiTaskType>("weekly_summary");
+  const [activeReportId, setActiveReportId] = useState<string | null>(() => searchParams.get("report"));
   const [settingsOpen, setSettingsOpen] = useState(false);
   // Keep one five-minute-aligned seven-day range for the lifetime of this
   // screen. A double click, reconnect, or React Query retry then resolves to
@@ -7854,20 +7983,31 @@ export function AiPage({ me }: { me: Me }) {
     const to = new Date();
     to.setSeconds(0, 0);
     to.setMinutes(Math.floor(to.getMinutes() / 5) * 5);
+    const days = aiTaskPresets.find((preset) => preset.type === taskType)?.rangeDays ?? 7;
     return {
-      from: new Date(to.getTime() - 7 * 86_400_000).toISOString(),
+      from: new Date(to.getTime() - days * 86_400_000).toISOString(),
       to: to.toISOString(),
     };
-  }, []);
+  }, [taskType]);
   const create = useMutation({
     mutationFn: () =>
       api("/api/ai/reports", {
         method: "POST",
-        body: { scope, ...reportRange },
+        body: { taskType, scope, ...reportRange },
       }),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["ai-reports"] });
     },
+  });
+  const cancel = useMutation({
+    mutationFn: (jobId: string) =>
+      api(`/api/ai/jobs/${jobId}/cancel`, { method: "POST" }),
+    onSuccess: async () => queryClient.invalidateQueries({ queryKey: ["ai-reports"] }),
+  });
+  const retry = useMutation({
+    mutationFn: (jobId: string) =>
+      api(`/api/ai/jobs/${jobId}/retry`, { method: "POST" }),
+    onSuccess: async () => queryClient.invalidateQueries({ queryKey: ["ai-reports"] }),
   });
   const canAnalyzeTeam = me.permissions.some(
     (grant) =>
@@ -7876,7 +8016,7 @@ export function AiPage({ me }: { me: Me }) {
   );
   const reportItems = reports.data?.items ?? [];
   const selected =
-    reportItems.find((item) => item.job.id === activeReportId) ??
+    reportItems.find((item) => item.job.id === activeReportId || item.report?.id === activeReportId) ??
     reportItems[0] ??
     null;
   const selectedReport = selected?.report ?? null;
@@ -7895,7 +8035,7 @@ export function AiPage({ me }: { me: Me }) {
             ) : null}
             <Button disabled={create.isPending} onClick={() => create.mutate()}>
               <Bot size={17} />
-              {create.isPending ? "正在创建…" : "生成近 7 天报告"}
+              {create.isPending ? "正在创建…" : "立即生成洞察"}
             </Button>
           </>
         }
@@ -7927,12 +8067,14 @@ export function AiPage({ me }: { me: Me }) {
                       onClick={() => setActiveReportId(item.job.id)}
                       type="button"
                     >
-                      <strong>{item.report?.title || "报告任务"}</strong>
+                      <strong>{item.report?.title || aiTaskPresets.find((preset) => preset.type === item.job.taskType)?.label || "报告任务"}</strong>
                       <small>
                         {item.report
                           ? `${formatDateTime(item.report.generatedAt)} · ${item.report.sourceCount} 个来源`
                           : item.job.status === "failed"
                             ? "生成失败"
+                            : item.job.status === "cancelled"
+                              ? "已取消，可重新生成"
                             : "正在生成"}
                       </small>
                     </button>
@@ -7975,11 +8117,29 @@ export function AiPage({ me }: { me: Me }) {
                   </div>
                 </div>
                 <div className="mt-5 flex flex-wrap items-center gap-3">
+                  {aiTaskPresets
+                    .filter((preset) => !preset.teamOnly || canAnalyzeTeam)
+                    .map((preset) => (
+                      <Button
+                        aria-pressed={taskType === preset.type}
+                        key={preset.type}
+                        onClick={() => {
+                          setTaskType(preset.type);
+                          if (preset.teamOnly) setScope("team");
+                        }}
+                        size="compact"
+                        variant={taskType === preset.type ? "primary" : "secondary"}
+                      >
+                        {preset.label}
+                      </Button>
+                    ))}
+                </div>
+                <div className="mt-4 flex flex-wrap items-center gap-3">
                   <Button
                     disabled={create.isPending}
                     onClick={() => create.mutate()}
                   >
-                    {create.isPending ? "正在提交任务…" : "生成当前范围报告"}
+                    {create.isPending ? "正在提交任务…" : "生成所选洞察"}
                     <ArrowUpRight size={16} />
                   </Button>
                 </div>
@@ -8008,7 +8168,9 @@ export function AiPage({ me }: { me: Me }) {
                       <p className="mt-1 text-sm text-[var(--text-muted)]">
                         {selected.job.status === "failed"
                           ? selected.job.errorSummary || "生成失败"
-                          : "后台正在基于聚合事实生成，不阻塞其他操作。"}
+                          : selected.job.status === "cancelled"
+                            ? "任务已取消，未生成或改写任何业务事实。"
+                            : "后台正在基于聚合事实生成，不阻塞其他操作。"}
                       </p>
                     </div>
                   )}
@@ -8018,7 +8180,9 @@ export function AiPage({ me }: { me: Me }) {
                         ? "positive"
                         : selected.job.status === "failed"
                           ? "danger"
-                          : "warning"
+                          : selected.job.status === "cancelled"
+                            ? "neutral"
+                            : "warning"
                     }
                   >
                     {selectedReport ? "可查看" : selected.job.status}
@@ -8059,15 +8223,32 @@ export function AiPage({ me }: { me: Me }) {
                           selected.job.status === "failed"
                             ? selected.job.errorSummary ||
                               "生成失败，请稍后重新创建报告。"
+                            : selected.job.status === "cancelled"
+                              ? "该任务已安全取消；如仍需要此报告，可以重新生成。"
                             : "报告完成后，摘要、风险和建议会基于同一授权范围显示在这里。"
                         }
                         icon={<Bot />}
                         title={
                           selected.job.status === "failed"
                             ? "报告未完成"
+                            : selected.job.status === "cancelled"
+                              ? "任务已取消"
                             : "正在整理事实"
                         }
                       />
+                      <div className="mt-4 flex justify-center gap-2">
+                        {selected.job.status === "queued" || selected.job.status === "running" ? (
+                          <Button disabled={cancel.isPending} onClick={() => cancel.mutate(selected.job.id)} size="compact" variant="secondary">
+                            {cancel.isPending ? "正在取消…" : "取消任务"}
+                          </Button>
+                        ) : null}
+                        {selected.job.status === "failed" || selected.job.status === "cancelled" ? (
+                          <Button disabled={retry.isPending} onClick={() => retry.mutate(selected.job.id)} size="compact" variant="secondary">
+                            <RotateCcw size={15} />
+                            {retry.isPending ? "正在重试…" : "重新生成"}
+                          </Button>
+                        ) : null}
+                      </div>
                     </div>
                   )}
                 </CardContent>
@@ -8122,7 +8303,7 @@ export function AiPage({ me }: { me: Me }) {
         </div>
       )}
       <div className="mt-4">
-        <ErrorMessage error={reports.error ?? create.error} />
+        <ErrorMessage error={reports.error ?? create.error ?? cancel.error ?? retry.error} />
       </div>
     </>
   );

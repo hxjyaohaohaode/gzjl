@@ -125,6 +125,47 @@ export class OperationsService {
     return { csv, sha256: digest, rowCount: rows.length };
   }
 
+  async exportWorkSessionsJson(actor: AnalyticsActor, from: Date, to: Date) {
+    const access = await this.analytics.buildAccessCondition(actor);
+    const rows = await this.db
+      .select({ session: workSessions, membershipId: workSessions.membershipId, displayName: users.displayName })
+      .from(workSessions)
+      .innerJoin(orgMemberships, eq(orgMemberships.id, workSessions.membershipId))
+      .innerJoin(users, eq(users.id, orgMemberships.userId))
+      .where(and(access, gte(workSessions.startAt, from), lt(workSessions.startAt, to), eq(workSessions.recordKind, "fact"), isNull(workSessions.deletedAt)))
+      .orderBy(workSessions.startAt);
+    const includeContent = actor.grants.some((grant) => grant.permission === "work.view_full_scope" && grant.scopeKind === "organization");
+    const payload = {
+      schemaVersion: 1,
+      exportedAt: new Date().toISOString(),
+      range: { from: from.toISOString(), to: to.toISOString() },
+      rowCount: rows.length,
+      items: rows.map(({ session, membershipId, displayName }) => ({
+        id: session.id,
+        membershipId,
+        member: displayName,
+        startAt: session.startAt.toISOString(),
+        endAt: session.endAt.toISOString(),
+        timezone: session.timezone,
+        grossSeconds: session.grossSeconds,
+        breakSeconds: session.breakSeconds,
+        netSeconds: session.netSeconds,
+        source: session.source,
+        content: includeContent || membershipId === actor.membershipId ? session.content : "[按字段策略隐藏]",
+        result: includeContent || membershipId === actor.membershipId ? session.result : "[按字段策略隐藏]",
+        visibility: session.visibility,
+        submissionStatus: session.submissionStatus,
+        approvalStatus: session.approvalStatus,
+        version: session.version,
+      })),
+    };
+    const json = JSON.stringify(payload, null, 2);
+    const digest = sha256(json);
+    const [job] = await this.db.insert(exportJobs).values({ organizationId: actor.organizationId, requestedBy: actor.membershipId, format: "json", exportType: "work_sessions", scope: { from, to }, fieldPolicySnapshot: { includeContent }, status: "completed", sha256: digest, completedAt: new Date(), expiresAt: new Date(Date.now() + 24 * 60 * 60_000) }).returning();
+    if (job) await this.db.insert(auditLogs).values({ organizationId: actor.organizationId, actorMembershipId: actor.membershipId, action: "export.work_sessions_json", entityType: "export", entityId: job.id, after: { rowCount: rows.length, sha256: digest, includeContent } });
+    return { json, sha256: digest, rowCount: rows.length };
+  }
+
   async createImportPreview(actor: AnalyticsActor, csv: string) {
     const preview = previewWorkSessionCsv(csv);
     if (preview.rowCount === 0) {
@@ -284,7 +325,7 @@ export class OperationsService {
             and(
               eq(importJobs.id, importId),
               eq(importJobs.organizationId, actor.organizationId),
-              eq(importJobs.status, "preview_ready"),
+              eq(importJobs.status, "importing"),
             ),
           );
       }

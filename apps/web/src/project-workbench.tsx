@@ -24,7 +24,7 @@ import {
   UsersRound,
 } from "lucide-react";
 import { lazy, Suspense, useEffect, useMemo, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useParams, useSearchParams } from "react-router-dom";
 import { Badge, Button, Card, CardContent, cn } from "@workbench/ui";
 
 import { api, type Me } from "./api.js";
@@ -1580,11 +1580,12 @@ function NodeInspector({
 
 export function ProjectDetailPage({ me }: { me: Me }) {
   const { projectId = "" } = useParams();
+  const [searchParams] = useSearchParams();
   const queryClient = useQueryClient();
   const [view, setView] = useState<ProjectView>("canvas");
   const [branchId, setBranchId] = useState("all");
   const [search, setSearch] = useState("");
-  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(() => searchParams.get("node"));
   const [showCreate, setShowCreate] = useState(false);
   const [showTeam, setShowTeam] = useState(false);
   const [showBranch, setShowBranch] = useState(false);

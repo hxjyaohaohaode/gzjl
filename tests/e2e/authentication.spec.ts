@@ -113,6 +113,26 @@ async function mockAuthenticatedWorkspace(
   await page.route("**/api/notifications", (route) =>
     route.fulfill({ json: { items: [] } }),
   );
+  await page.route("**/api/search?**", (route) => {
+    const query = new URL(route.request().url()).searchParams.get("q");
+    return route.fulfill({
+      json: {
+        items:
+          query === "实现"
+            ? [
+                {
+                  id: "00000000-0000-4000-8000-000000000007",
+                  kind: "project_node",
+                  title: "实现项目画布",
+                  subtitle: "工作台正式版",
+                  href: "/projects/00000000-0000-4000-8000-000000000004?node=00000000-0000-4000-8000-000000000007",
+                  occurredAt: "2026-09-02T01:00:00.000Z",
+                },
+              ]
+            : [],
+      },
+    });
+  });
   await page.route(
     "**/api/organization/ownership-transfers/pending-for-me",
     (route) => route.fulfill({ json: { transfer: null } }),
@@ -159,6 +179,24 @@ async function mockAuthenticatedWorkspace(
             projectName: "工作台正式版",
             seconds: 19_800,
           },
+        ],
+        byWorkType: [
+          { workTypeId: null, workTypeName: "未分类", seconds: 19_800 },
+        ],
+        byApproval: [
+          { status: "approved", seconds: 14_400, count: 1 },
+          { status: "pending_review", seconds: 5_400, count: 1 },
+        ],
+        byHour: Array.from({ length: 24 }, (_, hour) => ({
+          hour,
+          seconds: hour === 9 ? 19_800 : 0,
+          count: hour === 9 ? 2 : 0,
+        })),
+        funnel: [
+          { stage: "已记录", count: 2 },
+          { stage: "已提交", count: 2 },
+          { stage: "已批准", count: 1 },
+          { stage: "可计薪", count: 1 },
         ],
       },
     }),
@@ -1398,9 +1436,13 @@ test("analytics uses accessible, server-backed responsive chart containers", asy
   await page.getByLabel("邮箱或手机号").fill("owner@example.test");
   await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
   await page.getByRole("button", { name: "登录", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "林知夏，今天好" })).toBeVisible();
   await page.goto("/analytics");
   await expect(
     page.getByRole("img", { name: "每日净工时趋势图" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "下载每日净工时趋势图图片" }),
   ).toBeVisible();
   await expect(page.getByRole("img", { name: "项目投入分布图" })).toBeVisible();
   await expect(page.getByText("工作台正式版")).toBeVisible();
@@ -1417,6 +1459,7 @@ test("AI page does not expose team analysis without an organization-scoped grant
   await page.getByLabel("邮箱或手机号").fill("owner@example.test");
   await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
   await page.getByRole("button", { name: "登录", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "林知夏，今天好" })).toBeVisible();
   await page.goto("/ai");
   await expect(page.getByRole("combobox")).toHaveValue("self");
   await expect(page.getByRole("option", { name: "团队授权范围" })).toHaveCount(
@@ -1445,7 +1488,7 @@ test("AI report requests keep a stable five-minute range for cost-safe deduplica
   page,
 }) => {
   await mockAuthenticatedWorkspace(page);
-  const requests: Array<{ scope: string; from: string; to: string }> = [];
+  const requests: Array<{ taskType: string; scope: string; from: string; to: string }> = [];
   await page.route("**/api/ai/reports", async (route) => {
     if (route.request().method() === "GET") {
       await route.fulfill({ json: { items: [] } });
@@ -1454,6 +1497,7 @@ test("AI report requests keep a stable five-minute range for cost-safe deduplica
     expect(route.request().method()).toBe("POST");
     requests.push(
       route.request().postDataJSON() as {
+        taskType: string;
         scope: string;
         from: string;
         to: string;
@@ -1468,9 +1512,10 @@ test("AI report requests keep a stable five-minute range for cost-safe deduplica
   await page.getByLabel("邮箱或手机号").fill("owner@example.test");
   await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
   await page.getByRole("button", { name: "登录", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "林知夏，今天好" })).toBeVisible();
   await page.goto("/ai");
   const generate = page.getByRole("button", {
-    name: "生成近 7 天报告",
+    name: "立即生成洞察",
     exact: true,
   });
   await generate.click();
@@ -1483,10 +1528,63 @@ test("AI report requests keep a stable five-minute range for cost-safe deduplica
   const from = new Date(request.from);
   const to = new Date(request.to);
   expect(request.scope).toBe("self");
+  expect(request.taskType).toBe("weekly_summary");
   expect(to.getUTCSeconds()).toBe(0);
   expect(to.getUTCMilliseconds()).toBe(0);
   expect(to.getUTCMinutes() % 5).toBe(0);
   expect(to.getTime() - from.getTime()).toBe(7 * 86_400_000);
+});
+
+test("AI background jobs can be cancelled and deliberately retried without changing core facts", async ({
+  page,
+}) => {
+  await mockAuthenticatedWorkspace(page);
+  let status: "queued" | "cancelled" = "queued";
+  let cancelRequests = 0;
+  let retryRequests = 0;
+  const jobId = "00000000-0000-4000-8000-000000000099";
+  await page.route("**/api/ai/reports", (route) =>
+    route.fulfill({
+      json: {
+        items: [
+          {
+            job: {
+              id: jobId,
+              taskType: "weekly_summary",
+              status,
+              errorSummary: null,
+              queuedAt: "2026-09-04T01:00:00.000Z",
+              scope: { scope: "self" },
+            },
+            report: null,
+          },
+        ],
+      },
+    }),
+  );
+  await page.route(`**/api/ai/jobs/${jobId}/cancel`, async (route) => {
+    cancelRequests += 1;
+    status = "cancelled";
+    await route.fulfill({ json: { job: { id: jobId, status } } });
+  });
+  await page.route(`**/api/ai/jobs/${jobId}/retry`, async (route) => {
+    retryRequests += 1;
+    status = "queued";
+    await route.fulfill({ status: 202, json: { job: { id: jobId, status } } });
+  });
+
+  await page.goto("/login");
+  await page.getByLabel("邮箱或手机号").fill("owner@example.test");
+  await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "林知夏，今天好" })).toBeVisible();
+  await page.goto("/ai");
+  await page.getByRole("button", { name: "取消任务" }).click();
+  await expect.poll(() => cancelRequests).toBe(1);
+  await expect(page.getByRole("heading", { name: "任务已取消" })).toBeVisible();
+  await page.getByRole("button", { name: "重新生成", exact: true }).click();
+  await expect.poll(() => retryRequests).toBe(1);
+  await expect(page.getByRole("heading", { name: "正在整理事实" })).toBeVisible();
 });
 
 test("critical workspace widths do not introduce horizontal document overflow", async ({
@@ -1541,9 +1639,30 @@ test("command palette only navigates through authorized workspace destinations",
   ).toBeVisible();
   await page.keyboard.press("Control+K");
   await expect(page.getByRole("dialog", { name: "全局导航" })).toBeVisible();
-  await page.getByLabel("搜索工作台页面").fill("日历");
+  await page.getByLabel("搜索工作台").fill("日历");
   await page.getByRole("button", { name: "日历 工作空间" }).click();
   await expect(page.getByRole("heading", { name: "工作日历" })).toBeVisible();
+});
+
+test("global search returns only server-authorized business entities", async ({
+  page,
+}) => {
+  await mockAuthenticatedWorkspace(page);
+  await page.goto("/login");
+  await page.getByLabel("邮箱或手机号").fill("owner@example.test");
+  await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "林知夏，今天好" })).toBeVisible();
+  await page.keyboard.press("Control+K");
+  await page.getByLabel("搜索工作台").fill("实现");
+  const result = page.getByRole("button", {
+    name: /节点 实现项目画布 工作台正式版/,
+  });
+  await expect(result).toBeVisible();
+  await result.click();
+  await expect(
+    page.getByRole("complementary", { name: "实现项目画布 节点详情" }),
+  ).toBeVisible();
 });
 
 test("project color chips keep readable text for light server colors", async ({

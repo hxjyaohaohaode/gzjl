@@ -1,6 +1,6 @@
 import "dotenv/config";
 
-import { and, eq, gt, isNull, lt, sql } from "drizzle-orm";
+import { and, eq, gt, gte, isNull, lt, sql } from "drizzle-orm";
 import { PgBoss } from "pg-boss";
 import pino from "pino";
 import { z } from "zod";
@@ -15,9 +15,14 @@ import {
   aiReportSources,
   notifications,
   notificationPreferences,
+  organizationOwners,
   organizationAiSettings,
+  orgMemberships,
   outboxEvents,
   payPeriods,
+  projects,
+  projectNodeAssignees,
+  projectNodes,
   reminderRules,
   timerStates,
   workSessions,
@@ -102,6 +107,55 @@ async function inAppNotificationEnabled(membershipId: string, category: string):
   return preference.inAppEnabled;
 }
 
+const defaultReminderRules = [
+  { category: "timer_long_running", name: "系统默认", severity: "warning" as const, cooldownSeconds: 10_800, conditions: { thresholdSeconds: 36_000 } },
+  { category: "work_overlap", name: "系统默认", severity: "warning" as const, cooldownSeconds: 86_400, conditions: { lookbackDays: 7 } },
+  { category: "continuous_work_long", name: "系统默认", severity: "info" as const, cooldownSeconds: 86_400, conditions: { thresholdSeconds: 21_600 } },
+  { category: "short_break", name: "系统默认", severity: "info" as const, cooldownSeconds: 86_400, conditions: { minimumGapSeconds: 600, precedingWorkSeconds: 10_800 } },
+  { category: "project_due_soon", name: "系统默认", severity: "warning" as const, cooldownSeconds: 86_400, conditions: { daysBeforeDue: 3 } },
+  { category: "blocked_node_aging", name: "系统默认", severity: "warning" as const, cooldownSeconds: 86_400, conditions: { agingDays: 7 } },
+  { category: "approval_returned", name: "系统默认", severity: "warning" as const, cooldownSeconds: 86_400, conditions: { lookbackDays: 7 } },
+  { category: "duration_baseline_change", name: "系统默认", severity: "info" as const, cooldownSeconds: 86_400, conditions: { lowerRatio: 0.5, upperRatio: 2, minimumBaselineSeconds: 7_200 } },
+  { category: "forgotten_work", name: "系统默认（按需启用）", severity: "info" as const, cooldownSeconds: 86_400, conditions: { inactivityHours: 72 }, enabled: false },
+  { category: "payroll_cutoff_pending", name: "系统默认", severity: "warning" as const, cooldownSeconds: 86_400, conditions: { daysBeforeCutoff: 3 } },
+];
+
+async function ensureDefaultReminderRules(): Promise<void> {
+  const owners = await database.db.select().from(organizationOwners);
+  for (const owner of owners) {
+    await database.db.insert(reminderRules).values(defaultReminderRules.map((rule) => ({
+      organizationId: owner.organizationId,
+      createdBy: owner.membershipId,
+      channels: ["in_app"],
+      ...rule,
+    }))).onConflictDoNothing();
+  }
+}
+
+async function createRuleNotification(input: {
+  rule: typeof reminderRules.$inferSelect;
+  recipientMembershipId: string;
+  title: string;
+  body: string;
+  actionUrl: string;
+  dedupeKey: string;
+  validUntil?: Date;
+}): Promise<void> {
+  if (!await inAppNotificationEnabled(input.recipientMembershipId, input.rule.category)) return;
+  await database.db.insert(notifications).values({
+    organizationId: input.rule.organizationId,
+    recipientMembershipId: input.recipientMembershipId,
+    reminderRuleId: input.rule.id,
+    category: input.rule.category,
+    severity: input.rule.severity,
+    title: input.title,
+    body: input.body,
+    actionUrl: input.actionUrl,
+    dedupeKey: input.dedupeKey,
+    validUntil: input.validUntil ?? new Date(Date.now() + input.rule.cooldownSeconds * 1_000),
+  }).onConflictDoNothing();
+}
+
 async function enqueueAiJob(jobId: string): Promise<void> {
   const [job] = await database.db
     .select({
@@ -178,23 +232,32 @@ async function processAiJob(jobId: string): Promise<void> {
     const output = parseAiJson(content);
     const sourceSummary = job.sourceSummary as { sources?: Array<{ entityType: string; entityId: string; entityVersion?: string; label: string }> };
     await database.db.transaction(async (tx) => {
+      // Completion and cancellation race on the same conditional update. If
+      // cancellation won while the provider request was in flight, discard
+      // the paid response instead of resurrecting the cancelled job.
+      const [completedJob] = await tx.update(aiJobs).set({ status: "completed", completedAt: new Date(), errorSummary: null, inputTokens: payload.usage?.prompt_tokens ?? null, outputTokens: payload.usage?.completion_tokens ?? null, providerRequestId: payload.id ?? null }).where(and(eq(aiJobs.id, job.id), eq(aiJobs.status, "running"))).returning({ id: aiJobs.id });
+      if (!completedJob) return;
       const [report] = await tx.insert(aiReports).values({ aiJobId: job.id, title: output.title, summary: output.summary, structuredOutput: output, sourceCount: sourceSummary.sources?.length ?? 0 }).onConflictDoNothing().returning();
       if (report && sourceSummary.sources?.length) {
         await tx.insert(aiReportSources).values(sourceSummary.sources.map((source) => ({ aiReportId: report.id, entityType: source.entityType, entityId: source.entityId, entityVersion: source.entityVersion, label: source.label }))).onConflictDoNothing();
       }
-      await tx.update(aiJobs).set({ status: "completed", completedAt: new Date(), errorSummary: null, inputTokens: payload.usage?.prompt_tokens ?? null, outputTokens: payload.usage?.completion_tokens ?? null, providerRequestId: payload.id ?? null }).where(eq(aiJobs.id, job.id));
       await tx.insert(outboxEvents).values({ organizationId: job.organizationId, eventType: "ai.report.completed", entityType: "ai_job", entityId: job.id, entityVersion: attempt, payload: { jobId: job.id, reportId: report?.id ?? null } });
       if (await inAppNotificationEnabled(job.requestedBy, "ai_report_ready")) await tx.insert(notifications).values({ organizationId: job.organizationId, recipientMembershipId: job.requestedBy, category: "ai_report_ready", severity: "info", title: "AI 工作洞察已生成", body: output.title, actionUrl: report ? `/ai?report=${report.id}` : "/ai", dedupeKey: `ai-report:${job.id}` }).onConflictDoNothing();
     });
   } catch (error) {
     const finalFailure = attempt >= job.maxAttempts;
     const errorSummary = error instanceof Error ? error.message.slice(0, 2_000) : "Unknown AI error";
-    await database.db.transaction(async (tx) => {
-      await tx.update(aiJobs).set({ status: finalFailure ? "failed" : "queued", errorSummary, completedAt: finalFailure ? new Date() : null }).where(eq(aiJobs.id, job.id));
+    const failureRecorded = await database.db.transaction(async (tx) => {
+      const [updatedJob] = await tx.update(aiJobs).set({ status: finalFailure ? "failed" : "queued", errorSummary, completedAt: finalFailure ? new Date() : null }).where(and(eq(aiJobs.id, job.id), eq(aiJobs.status, "running"))).returning({ id: aiJobs.id });
+      if (!updatedJob) return false;
       if (finalFailure) {
         await tx.insert(outboxEvents).values({ organizationId: job.organizationId, eventType: "ai.report.failed", entityType: "ai_job", entityId: job.id, entityVersion: attempt, payload: { jobId: job.id } });
       }
+      return true;
     });
+    // A user cancellation is a successful terminal state, not a provider
+    // failure that pg-boss should retry or notify about.
+    if (!failureRecorded) return;
     if (finalFailure) {
       if (await inAppNotificationEnabled(job.requestedBy, "ai_report_failed")) await database.db.insert(notifications).values({ organizationId: job.organizationId, recipientMembershipId: job.requestedBy, category: "ai_report_failed", severity: "warning", title: "AI 报告生成失败", body: "事实数据未受影响，可以稍后重试生成报告。", actionUrl: "/ai", dedupeKey: `ai-report-failed:${job.id}` }).onConflictDoNothing();
     }
@@ -235,6 +298,84 @@ async function evaluateReminders(): Promise<void> {
         }
       }
     }
+    if (rule.category === "continuous_work_long") {
+      const threshold = typeof conditions.thresholdSeconds === "number" ? conditions.thresholdSeconds : 21_600;
+      const sessions = await database.db.select().from(workSessions).where(and(eq(workSessions.organizationId, rule.organizationId), eq(workSessions.recordKind, "fact"), isNull(workSessions.deletedAt), gte(workSessions.startAt, new Date(now.getTime() - 7 * 86_400_000))));
+      for (const session of sessions.filter((item) => item.netSeconds >= threshold)) {
+        await createRuleNotification({ rule, recipientMembershipId: session.membershipId, title: "连续工作时间较长", body: "这段记录持续时间较长，请确认记录准确，并按实际情况安排休息。", actionUrl: `/work?session=${session.id}`, dedupeKey: `continuous-work:${session.id}:${session.version}` });
+      }
+    }
+    if (rule.category === "work_overlap" || rule.category === "short_break") {
+      const lookbackDays = typeof conditions.lookbackDays === "number" ? conditions.lookbackDays : 7;
+      const sessions = await database.db.select().from(workSessions).where(and(eq(workSessions.organizationId, rule.organizationId), eq(workSessions.recordKind, "fact"), isNull(workSessions.deletedAt), gte(workSessions.startAt, new Date(now.getTime() - lookbackDays * 86_400_000)))).orderBy(workSessions.membershipId, workSessions.startAt);
+      const previousByMember = new Map<string, typeof workSessions.$inferSelect>();
+      for (const session of sessions) {
+        const previous = previousByMember.get(session.membershipId);
+        if (previous && rule.category === "work_overlap" && session.startAt < previous.endAt && !session.parallelWork && !previous.parallelWork) {
+          await createRuleNotification({ rule, recipientMembershipId: session.membershipId, title: "工作记录可能重叠", body: "发现两段非并行记录的时间范围相交，请确认并修正后再提交。", actionUrl: `/work?session=${session.id}`, dedupeKey: `work-overlap:${previous.id}:${session.id}` });
+        }
+        if (previous && rule.category === "short_break") {
+          const minimumGap = typeof conditions.minimumGapSeconds === "number" ? conditions.minimumGapSeconds : 600;
+          const precedingWork = typeof conditions.precedingWorkSeconds === "number" ? conditions.precedingWorkSeconds : 10_800;
+          const gapSeconds = Math.floor((session.startAt.getTime() - previous.endAt.getTime()) / 1_000);
+          if (previous.netSeconds >= precedingWork && gapSeconds >= 0 && gapSeconds < minimumGap) {
+            await createRuleNotification({ rule, recipientMembershipId: session.membershipId, title: "两段较长工作间隔较短", body: "基于近期记录，两段工作之间的间隔较短；请确认时间是否准确。", actionUrl: `/work?session=${session.id}`, dedupeKey: `short-break:${previous.id}:${session.id}` });
+          }
+        }
+        if (!previous || session.endAt > previous.endAt) previousByMember.set(session.membershipId, session);
+      }
+    }
+    if (rule.category === "project_due_soon" || rule.category === "blocked_node_aging") {
+      const days = rule.category === "project_due_soon"
+        ? (typeof conditions.daysBeforeDue === "number" ? conditions.daysBeforeDue : 3)
+        : (typeof conditions.agingDays === "number" ? conditions.agingDays : 7);
+      const assigned = await database.db.select({ node: projectNodes, membershipId: projectNodeAssignees.membershipId }).from(projectNodes).innerJoin(projects, eq(projects.id, projectNodes.projectId)).innerJoin(projectNodeAssignees, eq(projectNodeAssignees.nodeId, projectNodes.id)).where(and(eq(projects.organizationId, rule.organizationId), isNull(projects.deletedAt), isNull(projectNodes.deletedAt)));
+      for (const item of assigned) {
+        if (rule.category === "project_due_soon" && item.node.dueAt && item.node.dueAt >= now && item.node.dueAt < new Date(now.getTime() + days * 86_400_000) && item.node.status !== "completed" && item.node.status !== "cancelled") {
+          await createRuleNotification({ rule, recipientMembershipId: item.membershipId, title: "项目节点临近截止时间", body: `“${item.node.title}”即将到期，请确认真实进度或及时更新计划。`, actionUrl: `/projects/${item.node.projectId}`, dedupeKey: `project-due:${item.node.id}:${item.node.dueAt.toISOString()}` });
+        }
+        if (rule.category === "blocked_node_aging" && item.node.status === "blocked" && item.node.updatedAt < new Date(now.getTime() - days * 86_400_000)) {
+          await createRuleNotification({ rule, recipientMembershipId: item.membershipId, title: "项目阻塞持续时间较长", body: `“${item.node.title}”仍处于阻塞状态，请确认责任人、依赖与下一步。`, actionUrl: `/projects/${item.node.projectId}`, dedupeKey: `blocked-aging:${item.node.id}:${item.node.version}` });
+        }
+      }
+    }
+    if (rule.category === "approval_returned") {
+      const lookbackDays = typeof conditions.lookbackDays === "number" ? conditions.lookbackDays : 7;
+      const returned = await database.db.select().from(workSessions).where(and(eq(workSessions.organizationId, rule.organizationId), eq(workSessions.recordKind, "fact"), eq(workSessions.approvalStatus, "returned"), isNull(workSessions.deletedAt), gte(workSessions.updatedAt, new Date(now.getTime() - lookbackDays * 86_400_000))));
+      for (const session of returned) {
+        await createRuleNotification({ rule, recipientMembershipId: session.membershipId, title: "工作记录已退回", body: "记录需要补充或修正，请查看审核意见后重新提交。", actionUrl: `/work?session=${session.id}`, dedupeKey: `approval-returned:${session.id}:${session.version}` });
+      }
+    }
+    if (rule.category === "duration_baseline_change") {
+      const lower = typeof conditions.lowerRatio === "number" ? conditions.lowerRatio : 0.5;
+      const upper = typeof conditions.upperRatio === "number" ? conditions.upperRatio : 2;
+      const minimumBaseline = typeof conditions.minimumBaselineSeconds === "number" ? conditions.minimumBaselineSeconds : 7_200;
+      const boundary = new Date(now.getTime() - 7 * 86_400_000);
+      const sessions = await database.db.select().from(workSessions).where(and(eq(workSessions.organizationId, rule.organizationId), eq(workSessions.recordKind, "fact"), isNull(workSessions.deletedAt), gte(workSessions.startAt, new Date(now.getTime() - 35 * 86_400_000))));
+      const totals = new Map<string, { current: number; baseline: number }>();
+      for (const session of sessions) {
+        const total = totals.get(session.membershipId) ?? { current: 0, baseline: 0 };
+        if (session.startAt >= boundary) total.current += session.netSeconds;
+        else total.baseline += session.netSeconds / 4;
+        totals.set(session.membershipId, total);
+      }
+      for (const [membershipId, total] of totals) {
+        if (total.baseline < minimumBaseline) continue;
+        const ratio = total.current / total.baseline;
+        if (ratio >= lower && ratio <= upper) continue;
+        await createRuleNotification({ rule, recipientMembershipId: membershipId, title: "近期记录时长变化较明显", body: "基于最近一周与此前四周的记录，时长出现明显变化；请确认是否存在漏记、补录或项目节奏变化。", actionUrl: "/analytics", dedupeKey: `duration-baseline:${membershipId}:${now.toISOString().slice(0, 10)}` });
+      }
+    }
+    if (rule.category === "forgotten_work") {
+      const inactivityHours = typeof conditions.inactivityHours === "number" ? conditions.inactivityHours : 72;
+      const cutoff = new Date(now.getTime() - inactivityHours * 3_600_000);
+      const members = await database.db.select({ id: orgMemberships.id, joinedAt: orgMemberships.joinedAt }).from(orgMemberships).where(and(eq(orgMemberships.organizationId, rule.organizationId), eq(orgMemberships.status, "active")));
+      const recent = await database.db.select({ membershipId: workSessions.membershipId }).from(workSessions).where(and(eq(workSessions.organizationId, rule.organizationId), eq(workSessions.recordKind, "fact"), isNull(workSessions.deletedAt), gte(workSessions.endAt, cutoff)));
+      const active = new Set(recent.map((item) => item.membershipId));
+      for (const member of members.filter((item) => (!item.joinedAt || item.joinedAt < cutoff) && !active.has(item.id))) {
+        await createRuleNotification({ rule, recipientMembershipId: member.id, title: "近期可能有工作尚未记录", body: "近期没有看到新的工作记录；如确有工作，请确认是否需要补录。", actionUrl: "/work", dedupeKey: `forgotten-work:${member.id}:${now.toISOString().slice(0, 10)}` });
+      }
+    }
   }
 }
 
@@ -253,6 +394,7 @@ await boss.createQueue("ai-generate-report");
 await boss.work<{ jobId: string }>("ai-generate-report", { batchSize: 1 }, async (jobs) => {
   for (const job of jobs) await processAiJob(job.data.jobId);
 });
+await ensureDefaultReminderRules();
 await Promise.all([dispatchAiJobs(), evaluateReminders(), publishOutbox()]);
 const dispatchTimer = setInterval(() => void dispatchAiJobs().catch((error) => logger.error({ error }, "AI dispatch failed")), 15_000);
 const reminderTimer = setInterval(() => void evaluateReminders().catch((error) => logger.error({ error }, "reminder evaluation failed")), 60_000);

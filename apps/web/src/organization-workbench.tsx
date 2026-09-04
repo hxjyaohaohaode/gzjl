@@ -21,6 +21,7 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
+import { useSearchParams } from "react-router-dom";
 import { Badge, Button, Card, cn } from "@workbench/ui";
 
 import { api, ApiError, type Me } from "./api.js";
@@ -2032,6 +2033,7 @@ function OrganizationSidebar({
 }
 
 export function OrganizationPage({ me }: { me: Me }) {
+  const [searchParams] = useSearchParams();
   const organization = useQuery({
     queryKey: ["organization"],
     queryFn: () => api<OrganizationOverview>("/api/organization"),
@@ -2045,6 +2047,21 @@ export function OrganizationPage({ me }: { me: Me }) {
   const [selectedUnitId, setSelectedUnitId] = useState<string | null>(null);
   const [selectedMemberId, setSelectedMemberId] = useState<string | null>(null);
   const overview = organization.data;
+  useEffect(() => {
+    const memberId = searchParams.get("member");
+    if (
+      memberId &&
+      overview?.members.some((member) => member.membership.id === memberId)
+    ) {
+      const frame = window.requestAnimationFrame(() => {
+        setSelectedMemberId(memberId);
+        setSelectedUnitId(null);
+        setTab("members");
+      });
+      return () => window.cancelAnimationFrame(frame);
+    }
+    return undefined;
+  }, [overview?.members, searchParams]);
   const selectedUnit =
     overview?.units.find((unit) => unit.id === selectedUnitId) ?? null;
   const selectedMember =

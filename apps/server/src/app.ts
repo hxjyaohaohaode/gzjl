@@ -43,6 +43,8 @@ import { ProjectService } from "./projects/service.js";
 import { registerSetupRoutes } from "./setup/routes.js";
 import { SetupService } from "./setup/service.js";
 import { registerRealtimeRoutes } from "./realtime/routes.js";
+import { registerSearchRoutes } from "./search/routes.js";
+import { SearchService } from "./search/service.js";
 import { registerTimerRoutes } from "./timer/routes.js";
 import { TimerService } from "./timer/service.js";
 import { registerWorkCorrectionRoutes } from "./work/correction-routes.js";
@@ -269,6 +271,11 @@ export async function buildApp({
     await registerAnalyticsRoutes(
       app,
       analyticsService,
+      authenticate,
+    );
+    await registerSearchRoutes(
+      app,
+      new SearchService(database, analyticsService),
       authenticate,
     );
     await registerOrganizationRoutes(

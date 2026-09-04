@@ -7,8 +7,40 @@ import { aiJobs, aiReports, aiReportSources, outboxEvents } from "@workbench/db/
 import type { AnalyticsActor, AnalyticsService } from "../analytics/service.js";
 import type { AiConfigurationService } from "./configuration.js";
 
+export const aiTaskTypes = [
+  "daily_summary",
+  "weekly_summary",
+  "monthly_summary",
+  "work_rhythm",
+  "project_progress",
+  "project_blockers",
+  "organization_summary",
+] as const;
+export type AiTaskType = (typeof aiTaskTypes)[number];
+
+const taskGoals: Record<AiTaskType, string> = {
+  daily_summary: "总结当日已经记录的工作事实、产出、阻塞与下一步，不补写未发生的工作。",
+  weekly_summary: "生成本周可直接校对的工作周报，区分事实、风险和建议。",
+  monthly_summary: "生成月度工作回顾，说明投入结构、变化与仍需确认的事项。",
+  work_rhythm: "分析有记录支持的工作节奏与时段分布，不评价人格、勤奋程度或健康状况。",
+  project_progress: "按项目汇总投入和进展证据；工时不能被直接解释为完成度。",
+  project_blockers: "仅根据工作记录中的阻塞与项目事实定位风险，并给出可验证的处理建议。",
+  organization_summary: "汇总授权范围内的组织工作事实，不做员工排名、处罚或绩效结论。",
+};
+
+export interface AiReportRequest {
+  taskType: AiTaskType;
+  scope: "self" | "team";
+  from: Date;
+  to: Date;
+}
+
 export class AiUnavailableError extends Error {
   constructor() { super("AI 服务未启用或尚未配置 API Key；核心业务不受影响。") ; this.name = "AiUnavailableError"; }
+}
+
+export class AiJobConflictError extends Error {
+  constructor(message: string) { super(message); this.name = "AiJobConflictError"; }
 }
 
 export class AiService {
@@ -18,7 +50,8 @@ export class AiService {
     private readonly configuration: AiConfigurationService,
   ) {}
 
-  async requestReport(actor: AnalyticsActor, scope: "self" | "team", from: Date, to: Date) {
+  async requestReport(actor: AnalyticsActor, input: AiReportRequest) {
+    const { taskType, scope, from, to } = input;
     const provider = await this.configuration.resolveEffective(actor.organizationId);
     if (!provider) throw new AiUnavailableError();
     const facts = await this.analytics.summary(
@@ -29,6 +62,8 @@ export class AiService {
       to,
     );
     const sourceSummary = this.limitSourceSummary({
+      taskType,
+      taskGoal: taskGoals[taskType],
       scope,
       range: facts.range,
       totals: facts.totals,
@@ -58,7 +93,7 @@ export class AiService {
             model: provider.model,
             maxOutputTokens: provider.maxOutputTokens,
           },
-          template: "weekly-v2",
+          template: "structured-work-intelligence-v3",
         }),
       )
       .digest("hex");
@@ -75,14 +110,14 @@ export class AiService {
         .where(
           and(
             eq(aiJobs.organizationId, actor.organizationId),
-            eq(aiJobs.taskType, "weekly_report"),
+            eq(aiJobs.taskType, taskType),
             eq(aiJobs.inputHash, inputHash),
           ),
         )
         .limit(1);
       if (existing) return existing;
       await this.configuration.assertQuota(actor.organizationId, tx);
-      const [job] = await tx.insert(aiJobs).values({ organizationId: actor.organizationId, requestedBy: actor.membershipId, scope: { scope, from, to }, taskType: "weekly_report", provider: "openai_compatible", model: provider.model, promptTemplateVersion: "weekly-v2", inputHash, sourceSummary, maxAttempts: provider.maxAttempts, maxOutputTokens: provider.maxOutputTokens }).returning();
+      const [job] = await tx.insert(aiJobs).values({ organizationId: actor.organizationId, requestedBy: actor.membershipId, scope: { scope, from, to }, taskType, provider: "openai_compatible", model: provider.model, promptTemplateVersion: "structured-work-intelligence-v3", inputHash, sourceSummary, maxAttempts: provider.maxAttempts, maxOutputTokens: provider.maxOutputTokens }).returning();
       if (!job) throw new Error("Failed to create AI job");
       await tx.insert(outboxEvents).values({ organizationId: actor.organizationId, eventType: "ai.job.queued", entityType: "ai_job", entityId: job.id, entityVersion: 1, payload: { jobId: job.id } });
       return job;
@@ -98,6 +133,30 @@ export class AiService {
     if (!record) return null;
     const sources = await this.db.select().from(aiReportSources).where(eq(aiReportSources.aiReportId, reportId));
     return { ...record, sources };
+  }
+
+  async cancel(actor: { organizationId: string; membershipId: string }, jobId: string) {
+    const [job] = await this.db.select().from(aiJobs).where(and(eq(aiJobs.id, jobId), eq(aiJobs.organizationId, actor.organizationId), eq(aiJobs.requestedBy, actor.membershipId))).limit(1);
+    if (!job) return null;
+    if (job.status === "completed" || job.status === "failed" || job.status === "cancelled") {
+      throw new AiJobConflictError("只有排队中或生成中的任务可以取消。");
+    }
+    const [updated] = await this.db.update(aiJobs).set({ status: "cancelled", cancelledAt: new Date(), completedAt: new Date(), errorSummary: null }).where(and(eq(aiJobs.id, job.id), eq(aiJobs.status, job.status))).returning();
+    if (!updated) throw new AiJobConflictError("任务状态已经变化，请刷新后重试。");
+    await this.db.insert(outboxEvents).values({ organizationId: actor.organizationId, eventType: "ai.job.cancelled", entityType: "ai_job", entityId: job.id, entityVersion: job.attempt + 1, payload: { jobId: job.id } });
+    return updated;
+  }
+
+  async retry(actor: { organizationId: string; membershipId: string }, jobId: string) {
+    const [job] = await this.db.select().from(aiJobs).where(and(eq(aiJobs.id, jobId), eq(aiJobs.organizationId, actor.organizationId), eq(aiJobs.requestedBy, actor.membershipId))).limit(1);
+    if (!job) return null;
+    if (job.status !== "failed" && job.status !== "cancelled") {
+      throw new AiJobConflictError("只有失败或已取消的任务可以重试。");
+    }
+    const [updated] = await this.db.update(aiJobs).set({ status: "queued", attempt: 0, queuedAt: new Date(), startedAt: null, completedAt: null, cancelledAt: null, errorSummary: null }).where(and(eq(aiJobs.id, job.id), eq(aiJobs.status, job.status))).returning();
+    if (!updated) throw new AiJobConflictError("任务状态已经变化，请刷新后重试。");
+    await this.db.insert(outboxEvents).values({ organizationId: actor.organizationId, eventType: "ai.job.queued", entityType: "ai_job", entityId: job.id, entityVersion: job.attempt + 1, payload: { jobId: job.id, retry: true } });
+    return updated;
   }
 
   /**

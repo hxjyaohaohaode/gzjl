@@ -257,7 +257,7 @@ export default function ProjectCanvas({
 
   return (
     <div
-      className="project-canvas h-[min(66vh,660px)] min-h-[430px] overflow-hidden rounded-[18px] bg-[var(--surface-tint)] shadow-[var(--shadow-card)]"
+      className="project-canvas h-[min(66vh,660px)] min-h-[430px] touch-none overflow-hidden rounded-[18px] bg-[var(--surface)]"
       style={{ "--project-accent": projectAccent } as CSSProperties}
     >
       <ReactFlow
@@ -268,10 +268,15 @@ export default function ProjectCanvas({
         nodes={flowNodes}
         nodesConnectable={false}
         nodesDraggable={false}
+        minZoom={0.15}
+        maxZoom={2.5}
         onlyRenderVisibleElements
         onNodeClick={(_, node) => onNodeSelect?.(node.id)}
         panOnDrag
         panOnScroll
+        preventScrolling
+        selectionOnDrag={false}
+        zoomOnPinch
         zoomOnDoubleClick={false}
       >
         <Background color="var(--border)" gap={22} size={1} />
@@ -290,6 +295,7 @@ export default function ProjectCanvas({
         </Panel>
         <Controls showInteractive={false} />
         <MiniMap
+          className="hidden md:block"
           maskColor="rgb(91 92 226 / 0.1)"
           nodeColor={() => projectAccent}
           pannable

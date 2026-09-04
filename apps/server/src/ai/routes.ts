@@ -13,10 +13,16 @@ import {
   AiQuotaExceededError,
 } from "./configuration.js";
 import type { AiConfigurationService } from "./configuration.js";
-import { AiUnavailableError, type AiService } from "./service.js";
+import {
+  AiJobConflictError,
+  AiUnavailableError,
+  aiTaskTypes,
+  type AiService,
+} from "./service.js";
 
 const requestSchema = z
   .object({
+    taskType: z.enum(aiTaskTypes).default("weekly_summary"),
     scope: z.enum(["self", "team"]).default("self"),
     from: z.iso.datetime({ offset: true }),
     to: z.iso.datetime({ offset: true }),
@@ -40,6 +46,7 @@ const requestSchema = z
     }
   });
 const reportParams = z.object({ reportId: z.uuid() });
+const jobParams = z.object({ jobId: z.uuid() });
 const settingsSchema = z
   .object({
     enabled: z.boolean(),
@@ -142,12 +149,12 @@ export async function registerAiRoutes(
         });
       }
       try {
-        const job = await service.requestReport(
-          request.auth!,
-          input.scope,
-          new Date(input.from),
-          new Date(input.to),
-        );
+        const job = await service.requestReport(request.auth!, {
+          taskType: input.taskType,
+          scope: input.scope,
+          from: new Date(input.from),
+          to: new Date(input.to),
+        });
         return reply.code(202).send({ job });
       } catch (error) {
         if (error instanceof AiUnavailableError) {
@@ -161,6 +168,42 @@ export async function registerAiRoutes(
             error: "ai_quota_exceeded",
             message: error.message,
           });
+        }
+        throw error;
+      }
+    },
+  );
+  app.post(
+    "/api/ai/jobs/:jobId/cancel",
+    { preHandler: [app.csrfProtection, authenticate] },
+    async (request, reply) => {
+      const { jobId } = jobParams.parse(request.params);
+      try {
+        const job = await service.cancel(request.auth!, jobId);
+        return job
+          ? { job }
+          : reply.code(404).send({ error: "ai_job_not_found", message: "任务不存在。" });
+      } catch (error) {
+        if (error instanceof AiJobConflictError) {
+          return reply.code(409).send({ error: "ai_job_conflict", message: error.message });
+        }
+        throw error;
+      }
+    },
+  );
+  app.post(
+    "/api/ai/jobs/:jobId/retry",
+    { preHandler: [app.csrfProtection, authenticate] },
+    async (request, reply) => {
+      const { jobId } = jobParams.parse(request.params);
+      try {
+        const job = await service.retry(request.auth!, jobId);
+        return job
+          ? reply.code(202).send({ job })
+          : reply.code(404).send({ error: "ai_job_not_found", message: "任务不存在。" });
+      } catch (error) {
+        if (error instanceof AiJobConflictError) {
+          return reply.code(409).send({ error: "ai_job_conflict", message: error.message });
         }
         throw error;
       }
