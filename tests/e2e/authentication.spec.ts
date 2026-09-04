@@ -171,6 +171,11 @@ async function mockAuthenticatedWorkspace(
   await page.route("**/api/analytics/summary?**", (route) =>
     route.fulfill({
       json: {
+        range: {
+          from: "2026-08-05T00:00:00.000Z",
+          to: "2026-09-04T00:00:00.000Z",
+          timezone: "Asia/Shanghai",
+        },
         totals: {
           sessionCount: 2,
           totalSeconds: 19_800,
@@ -181,17 +186,33 @@ async function mockAuthenticatedWorkspace(
           { date: "2026-09-01", seconds: 7_200 },
           { date: "2026-09-02", seconds: 12_600 },
         ],
-        byMember: [],
+        byMember: [
+          {
+            membershipId: "00000000-0000-4000-8000-000000000002",
+            displayName: "林知夏",
+            seconds: 19_800,
+          },
+        ],
         byProject: [
           {
             projectId: "00000000-0000-4000-8000-000000000004",
             projectName: "工作台正式版",
+            projectStatus: "active",
+            dueAt: "2026-10-01T00:00:00.000Z",
             seconds: 19_800,
           },
         ],
         byWorkType: [
           { workTypeId: null, workTypeName: "未分类", seconds: 19_800 },
         ],
+        byOrgUnit: [
+          {
+            orgUnitId: "00000000-0000-4000-8000-000000000020",
+            orgUnitName: "产品研发",
+            seconds: 19_800,
+          },
+        ],
+        bySource: [{ source: "timer", seconds: 19_800, count: 2 }],
         byApproval: [
           { status: "approved", seconds: 14_400, count: 1 },
           { status: "pending_review", seconds: 5_400, count: 1 },
@@ -199,8 +220,62 @@ async function mockAuthenticatedWorkspace(
         byHour: Array.from({ length: 24 }, (_, hour) => ({
           hour,
           seconds: hour === 9 ? 19_800 : 0,
-          count: hour === 9 ? 2 : 0,
-        })),
+            count: hour === 9 ? 2 : 0,
+          })),
+        projectWorkTypes: [
+          {
+            projectId: "00000000-0000-4000-8000-000000000004",
+            projectName: "工作台正式版",
+            workTypeId: null,
+            workTypeName: "未分类",
+            seconds: 19_800,
+          },
+        ],
+        flow: {
+          nodes: [
+            { id: "project:00000000-0000-4000-8000-000000000004", label: "工作台正式版", kind: "project" },
+            { id: "work_type:unassigned", label: "未分类", kind: "work_type" },
+            { id: "approval:approved", label: "approved", kind: "approval" },
+          ],
+          links: [
+            { source: "project:00000000-0000-4000-8000-000000000004", target: "work_type:unassigned", seconds: 19_800 },
+            { source: "work_type:unassigned", target: "approval:approved", seconds: 19_800 },
+          ],
+        },
+        anomalies: [
+          { category: "gross_duration_over_16_hours", count: 1, seconds: 19_800 },
+        ],
+        projectHealth: [
+          {
+            projectId: "00000000-0000-4000-8000-000000000004",
+            projectName: "工作台正式版",
+            status: "active",
+            dueAt: "2026-10-01T00:00:00.000Z",
+            seconds: 19_800,
+            progress: 62.5,
+            blockedNodes: 1,
+            totalNodes: 4,
+          },
+        ],
+        forecast: {
+          observed: [
+            { date: "2026-08-31", seconds: 3_600 },
+            { date: "2026-09-01", seconds: 7_200 },
+            { date: "2026-09-02", seconds: 12_600 },
+          ],
+          predicted: [
+            { date: "2026-09-03", seconds: 9_000, lowerSeconds: 6_000, upperSeconds: 12_000 },
+            { date: "2026-09-04", seconds: 9_300, lowerSeconds: 6_300, upperSeconds: 12_300 },
+          ],
+        },
+        availableFilters: {
+          members: [{ id: "00000000-0000-4000-8000-000000000002", label: "林知夏" }],
+          projects: [{ id: "00000000-0000-4000-8000-000000000004", label: "工作台正式版" }],
+          workTypes: [],
+          orgUnits: [{ id: "00000000-0000-4000-8000-000000000020", label: "产品研发" }],
+          approvalStates: ["approved", "pending_review"],
+          sourceTypes: ["timer"],
+        },
         funnel: [
           { stage: "已记录", count: 2 },
           { stage: "已提交", count: 2 },
@@ -681,6 +756,7 @@ test("personal payroll renders reconciled totals, daily pay, period trend, and c
   await expect(page.getByText("¥900.00", { exact: true }).first()).toBeVisible();
   await expect(page.getByRole("img", { name: "2026 年 9 月每日薪资" })).toBeVisible();
   await expect(page.getByRole("img", { name: "周期薪资趋势" })).toBeVisible();
+  await expect(page.getByRole("img", { name: "2026 年 9 月薪资构成瀑布图" })).toBeVisible();
   await expect(page.getByText("基础工时", { exact: true })).toBeVisible();
   await expect(page.getByText("补贴", { exact: true })).toBeVisible();
 });
@@ -1598,6 +1674,10 @@ test("analytics uses accessible, server-backed responsive chart containers", asy
   page,
 }) => {
   await mockAuthenticatedWorkspace(page);
+  const analyticsUrls: string[] = [];
+  page.on("request", (request) => {
+    if (request.url().includes("/api/analytics/summary?")) analyticsUrls.push(request.url());
+  });
   await page.goto("/login");
   await page.getByLabel("邮箱或手机号").fill("owner@example.test");
   await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
@@ -1611,7 +1691,25 @@ test("analytics uses accessible, server-backed responsive chart containers", asy
     page.getByRole("button", { name: "下载每日净工时趋势图图片" }),
   ).toBeVisible();
   await expect(page.getByRole("img", { name: "项目投入分布图" })).toBeVisible();
-  await expect(page.getByText("工作台正式版")).toBeVisible();
+  await expect(page.getByRole("img", { name: "事实与未来工时预测带" })).toBeVisible();
+  await expect(page.getByRole("img", { name: "项目工作类型与审核流向桑基图" })).toBeVisible();
+  await expect(page.getByRole("img", { name: "项目与工作类型旭日图" })).toBeVisible();
+  await expect(page.getByRole("img", { name: "项目工时与加权进度图" })).toBeVisible();
+  await expect(page.getByRole("columnheader", { name: "阻塞节点" })).toBeVisible();
+  await page.getByLabel("筛选项目").selectOption("00000000-0000-4000-8000-000000000004");
+  await page.getByLabel("筛选审核状态").selectOption("approved");
+  await expect.poll(() => analyticsUrls.some((url) => {
+    const params = new URL(url).searchParams;
+    return params.get("projectIds") === "00000000-0000-4000-8000-000000000004"
+      && params.get("approvalStates") === "approved";
+  })).toBe(true);
+  const requestCountBeforeClear = analyticsUrls.length;
+  await page.getByRole("button", { name: "清除筛选 · 2" }).click();
+  await expect.poll(() => analyticsUrls.slice(requestCountBeforeClear).some((url) => {
+    const params = new URL(url).searchParams;
+    return !params.has("projectIds") && !params.has("approvalStates");
+  })).toBe(true);
+  await expect(page.getByRole("button", { name: "工作台正式版", exact: true })).toBeVisible();
 });
 
 test("authorized analytics users can create, cancel, retry, and download background exports", async ({

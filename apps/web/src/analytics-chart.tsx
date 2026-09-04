@@ -1,4 +1,12 @@
-import { BarChart, FunnelChart, HeatmapChart, LineChart, PieChart } from "echarts/charts";
+import {
+  BarChart,
+  FunnelChart,
+  HeatmapChart,
+  LineChart,
+  PieChart,
+  SankeyChart,
+  SunburstChart,
+} from "echarts/charts";
 import { CalendarComponent, DataZoomComponent, GridComponent, LegendComponent, ToolboxComponent, TooltipComponent, VisualMapComponent } from "echarts/components";
 import * as echarts from "echarts/core";
 import type { EChartsCoreOption } from "echarts/core";
@@ -16,6 +24,8 @@ echarts.use([
   LineChart,
   HeatmapChart,
   PieChart,
+  SankeyChart,
+  SunburstChart,
   ToolboxComponent,
   TooltipComponent,
   VisualMapComponent,
@@ -23,9 +33,11 @@ echarts.use([
 
 export default function AnalyticsChart({
   ariaLabel,
+  onDataSelect,
   option,
 }: {
   ariaLabel: string;
+  onDataSelect?: ((selection: { data: unknown; name: string; value: unknown }) => void) | undefined;
   option: EChartsCoreOption;
 }) {
   const container = useRef<HTMLDivElement>(null);
@@ -38,6 +50,15 @@ export default function AnalyticsChart({
     const chart = echarts.init(element, undefined, { renderer: "canvas" });
     chartRef.current = chart;
     chart.setOption(option, { notMerge: true });
+    const handleClick = (params: { data?: unknown; name?: string; value?: unknown }) => {
+      if (!onDataSelect) return;
+      onDataSelect({
+        data: params.data,
+        name: params.name ?? "",
+        value: params.value,
+      });
+    };
+    chart.on("click", handleClick);
     const observer = new ResizeObserver(() => chart.resize());
     observer.observe(element);
     return () => {
@@ -45,7 +66,7 @@ export default function AnalyticsChart({
       chart.dispose();
       chartRef.current = null;
     };
-  }, [option]);
+  }, [onDataSelect, option]);
 
   const downloadImage = () => {
     const chart = chartRef.current;

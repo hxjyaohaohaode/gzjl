@@ -131,15 +131,17 @@ class AnalyticsChartBoundary extends Component<
 }
 function AnalyticsChart({
   ariaLabel,
+  onDataSelect,
   option,
 }: {
   ariaLabel: string;
+  onDataSelect?: ((selection: { data: unknown; name: string; value: unknown }) => void) | undefined;
   option: EChartsCoreOption;
 }) {
   return (
     <AnalyticsChartBoundary>
       <Suspense fallback={<LoadingBlock />}>
-        <AnalyticsChartLazy ariaLabel={ariaLabel} option={option} />
+        <AnalyticsChartLazy ariaLabel={ariaLabel} onDataSelect={onDataSelect} option={option} />
       </Suspense>
     </AnalyticsChartBoundary>
   );
@@ -338,6 +340,8 @@ function useChartPalette() {
     text: token("--text", "#172036"),
     textMuted: token("--text-muted", "#65718a"),
     textSubtle: token("--text-subtle", "#929bb0"),
+    warning: token("--warning", "#a85d00"),
+    danger: token("--danger", "#c43d4b"),
   };
 }
 export function LoginPage() {
@@ -5663,7 +5667,7 @@ export function ProjectsPage({ me }: { me: Me }) {
                         project.status === "active" ? "positive" : "neutral"
                       }
                     >
-                      {project.status === "active" ? "进行中" : project.status}
+                      {projectStatusLabels[project.status] ?? project.status}
                     </Badge>
                   </div>
                   <div className="mt-6">
@@ -6854,6 +6858,58 @@ export function PayrollPage({ me }: { me: Me }) {
       areaStyle: { color: hexWithAlpha(chartPalette.accent, 0.12) },
     }],
   }), [chartPalette, payroll.data?.items]);
+  const waterfallOption = useMemo<EChartsCoreOption>(() => {
+    let running = 0;
+    const labels: string[] = [];
+    const offsets: number[] = [];
+    const deltas: Array<{ value: number; actual: number; itemStyle: { color: string; borderRadius: number[] } }> = [];
+    for (const component of selected?.components ?? []) {
+      const amount = Number(component.amount);
+      if (!Number.isFinite(amount)) continue;
+      labels.push(component.label);
+      offsets.push(Math.min(running, running + amount));
+      deltas.push({
+        value: Math.abs(amount),
+        actual: amount,
+        itemStyle: {
+          color: amount < 0 ? chartPalette.danger : chartPalette.accent,
+          borderRadius: [5, 5, 5, 5],
+        },
+      });
+      running += amount;
+    }
+    const finalAmount = Number(selected?.item.finalAmount ?? 0);
+    labels.push("最终金额");
+    offsets.push(Math.min(0, finalAmount));
+    deltas.push({
+      value: Math.abs(finalAmount),
+      actual: finalAmount,
+      itemStyle: { color: chartPalette.text, borderRadius: [5, 5, 5, 5] },
+    });
+    return {
+      animationDuration: 240,
+      grid: { left: 64, right: 18, top: 24, bottom: 74 },
+      tooltip: {
+        trigger: "axis",
+        confine: true,
+        axisPointer: { type: "shadow" },
+        backgroundColor: chartPalette.surface,
+        borderColor: chartPalette.border,
+        textStyle: { color: chartPalette.text },
+        formatter: (params: Array<{ data?: { actual?: number }; axisValue?: string }>) => {
+          const point = params.find((item) => typeof item.data?.actual === "number");
+          return `${point?.axisValue ?? ""}<br/>${money(selected?.item.currency ?? "CNY", String(point?.data?.actual ?? 0))}`;
+        },
+      },
+      xAxis: { type: "category", data: labels, axisLabel: { width: 86, overflow: "truncate", rotate: 18, color: chartPalette.textSubtle }, axisLine: { lineStyle: { color: chartPalette.border } } },
+      yAxis: { type: "value", axisLabel: { color: chartPalette.textSubtle }, splitLine: { lineStyle: { color: chartPalette.grid } } },
+      dataZoom: [{ type: "inside" }],
+      series: [
+        { type: "bar", stack: "salary-waterfall", silent: true, data: offsets, itemStyle: { color: "transparent" }, emphasis: { itemStyle: { color: "transparent" } }, tooltip: { show: false } },
+        { type: "bar", name: "金额变化", stack: "salary-waterfall", data: deltas, label: { show: true, position: "top", color: chartPalette.textMuted, formatter: (params: { data?: { actual?: number } }) => `${Number(params.data?.actual ?? 0) >= 0 ? "+" : ""}${Number(params.data?.actual ?? 0).toFixed(2)}` } },
+      ],
+    };
+  }, [chartPalette, selected]);
   return (
     <>
       <PageHeader
@@ -6907,6 +6963,10 @@ export function PayrollPage({ me }: { me: Me }) {
             <Card className="analytics-chart-card">
               <CardHeader><h2 className="font-bold">周期趋势</h2><Badge>{payroll.data.items.length} 期</Badge></CardHeader>
               <CardContent><AnalyticsChart ariaLabel="周期薪资趋势" option={periodOption} /></CardContent>
+            </Card>
+            <Card className="analytics-chart-card xl:col-span-2">
+              <CardHeader><h2 className="font-bold">薪资构成瀑布</h2><Badge>{selected.components.length} 个可追溯分项</Badge></CardHeader>
+              <CardContent><AnalyticsChart ariaLabel={`${selected.period.name}薪资构成瀑布图`} option={waterfallOption} /></CardContent>
             </Card>
           </section>
 
@@ -7596,6 +7656,7 @@ export function TeamPage() {
 }
 
 interface AnalyticsSummary {
+  range: { from: string; to: string; timezone: string };
   totals: {
     sessionCount: number;
     totalSeconds: number;
@@ -7611,12 +7672,105 @@ interface AnalyticsSummary {
   byProject: Array<{
     projectId: string | null;
     projectName: string;
+    projectStatus: string | null;
+    dueAt: string | null;
     seconds: number;
   }>;
   byWorkType: Array<{ workTypeId: string | null; workTypeName: string; seconds: number }>;
+  byOrgUnit: Array<{ orgUnitId: string | null; orgUnitName: string; seconds: number }>;
+  bySource: Array<{ source: string; seconds: number; count: number }>;
   byApproval: Array<{ status: string; seconds: number; count: number }>;
   byHour: Array<{ hour: number; seconds: number; count: number }>;
+  projectWorkTypes: Array<{
+    projectId: string | null;
+    projectName: string;
+    workTypeId: string | null;
+    workTypeName: string;
+    seconds: number;
+  }>;
+  flow: {
+    nodes: Array<{
+      id: string;
+      label: string;
+      kind: "project" | "work_type" | "approval";
+    }>;
+    links: Array<{ source: string; target: string; seconds: number }>;
+  };
+  anomalies: Array<{ category: string; count: number; seconds: number }>;
+  projectHealth: Array<{
+    projectId: string;
+    projectName: string;
+    status: string | null;
+    dueAt: string | null;
+    seconds: number;
+    progress: number;
+    blockedNodes: number;
+    totalNodes: number;
+  }>;
+  forecast: {
+    observed: Array<{ date: string; seconds: number }>;
+    predicted: Array<{
+      date: string;
+      seconds: number;
+      lowerSeconds: number;
+      upperSeconds: number;
+    }>;
+  };
+  availableFilters: {
+    members: Array<{ id: string; label: string }>;
+    projects: Array<{ id: string; label: string }>;
+    workTypes: Array<{ id: string; label: string }>;
+    orgUnits: Array<{ id: string; label: string }>;
+    approvalStates: string[];
+    sourceTypes: string[];
+  };
   funnel: Array<{ stage: string; count: number }>;
+}
+
+interface AnalyticsFilterState {
+  projectId: string;
+  workTypeId: string;
+  memberId: string;
+  orgUnitId: string;
+  approvalState: string;
+  sourceType: string;
+}
+
+const emptyAnalyticsFilters: AnalyticsFilterState = {
+  projectId: "",
+  workTypeId: "",
+  memberId: "",
+  orgUnitId: "",
+  approvalState: "",
+  sourceType: "",
+};
+
+const approvalLabels: Record<string, string> = {
+  not_requested: "未提交审核",
+  pending_review: "待审核",
+  approved: "已批准",
+  returned: "已退回",
+  locked: "已锁定",
+};
+
+const sourceLabels: Record<string, string> = {
+  manual: "手动记录",
+  timer: "实时计时",
+  import: "批量导入",
+};
+
+const projectStatusLabels: Record<string, string> = {
+  planned: "计划中",
+  active: "进行中",
+  paused: "已暂停",
+  completed: "已完成",
+  archived: "已归档",
+};
+
+function analyticsSelectionId(data: unknown, key: string): string | null {
+  if (!data || typeof data !== "object") return null;
+  const value = (data as Record<string, unknown>)[key];
+  return typeof value === "string" && value !== "unassigned" ? value : null;
 }
 
 type BackgroundExportStatus =
@@ -7884,25 +8038,42 @@ function BackgroundExportPanel({ from, to }: { from: Date; to: Date }) {
 
 export function AnalyticsPage({ me }: { me: Me }) {
   const [days, setDays] = useState(30);
+  const [filters, setFilters] = useState<AnalyticsFilterState>(emptyAnalyticsFilters);
   const chartPalette = useChartPalette();
   const to = useMemo(() => new Date(), []);
   const from = useMemo(
     () => new Date(to.getTime() - days * 86_400_000),
     [days, to],
   );
+  const analyticsUrl = useMemo(() => {
+    const query = new URLSearchParams({
+      from: from.toISOString(),
+      to: to.toISOString(),
+    });
+    if (filters.projectId) query.set("projectIds", filters.projectId);
+    if (filters.workTypeId) query.set("workTypeIds", filters.workTypeId);
+    if (filters.memberId) query.set("memberIds", filters.memberId);
+    if (filters.orgUnitId) query.set("orgUnitIds", filters.orgUnitId);
+    if (filters.approvalState) query.set("approvalStates", filters.approvalState);
+    if (filters.sourceType) query.set("sourceTypes", filters.sourceType);
+    return `/api/analytics/summary?${query.toString()}`;
+  }, [filters, from, to]);
   const analytics = useQuery({
-    queryKey: ["analytics", days],
-    queryFn: () =>
-      api<AnalyticsSummary>(
-        `/api/analytics/summary?from=${encodeURIComponent(from.toISOString())}&to=${encodeURIComponent(to.toISOString())}`,
-      ),
+    queryKey: ["analytics", days, filters],
+    queryFn: () => api<AnalyticsSummary>(analyticsUrl),
+    placeholderData: (previous) => previous,
+    staleTime: 0,
   });
+  const activeFilterCount = Object.values(filters).filter(Boolean).length;
+  const changeFilter = (key: keyof AnalyticsFilterState, value: string) =>
+    setFilters((current) => ({ ...current, [key]: value }));
   const trendOption = useMemo<EChartsCoreOption>(
     () => ({
       animationDuration: 240,
       grid: { left: 52, right: 20, top: 24, bottom: 56 },
       tooltip: {
         trigger: "axis",
+        confine: true,
         backgroundColor: chartPalette.surface,
         borderColor: chartPalette.border,
         textStyle: { color: chartPalette.text },
@@ -7956,6 +8127,7 @@ export function AnalyticsPage({ me }: { me: Me }) {
       grid: { left: 110, right: 24, top: 20, bottom: 24 },
       tooltip: {
         trigger: "axis",
+        confine: true,
         axisPointer: { type: "shadow" },
         backgroundColor: chartPalette.surface,
         borderColor: chartPalette.border,
@@ -7986,7 +8158,10 @@ export function AnalyticsPage({ me }: { me: Me }) {
         {
           type: "bar",
           name: "净工时",
-          data: analytics.data?.byProject.map((item) => item.seconds) ?? [],
+          data: analytics.data?.byProject.map((item) => ({
+            value: item.seconds,
+            projectId: item.projectId,
+          })) ?? [],
           itemStyle: { color: chartPalette.accent, borderRadius: [0, 7, 7, 0] },
         },
       ],
@@ -7996,28 +8171,205 @@ export function AnalyticsPage({ me }: { me: Me }) {
   const rhythmOption = useMemo<EChartsCoreOption>(() => ({
     animationDuration: 240,
     grid: { left: 52, right: 18, top: 32, bottom: 40 },
-    tooltip: { trigger: "axis", backgroundColor: chartPalette.surface, borderColor: chartPalette.border, textStyle: { color: chartPalette.text }, valueFormatter: (value: string | number) => formatDuration(Number(value)) },
+    tooltip: { trigger: "axis", confine: true, backgroundColor: chartPalette.surface, borderColor: chartPalette.border, textStyle: { color: chartPalette.text }, valueFormatter: (value: string | number) => formatDuration(Number(value)) },
     xAxis: { type: "category", data: analytics.data?.byHour.map((item) => `${String(item.hour).padStart(2, "0")}:00`) ?? [], axisLabel: { interval: 2, color: chartPalette.textSubtle }, axisLine: { lineStyle: { color: chartPalette.border } } },
     yAxis: { type: "value", axisLabel: { formatter: (value: string | number) => `${Math.round(Number(value) / 3600)}h`, color: chartPalette.textSubtle }, splitLine: { lineStyle: { color: chartPalette.grid } } },
     series: [{ type: "line", name: "记录时长", smooth: true, showSymbol: false, data: analytics.data?.byHour.map((item) => item.seconds) ?? [], lineStyle: { color: chartPalette.accent, width: 3 }, areaStyle: { color: hexWithAlpha(chartPalette.accent, 0.12) } }],
   }), [analytics.data?.byHour, chartPalette]);
   const approvalOption = useMemo<EChartsCoreOption>(() => ({
     animationDuration: 240,
-    tooltip: { trigger: "item", backgroundColor: chartPalette.surface, borderColor: chartPalette.border, textStyle: { color: chartPalette.text }, formatter: (params: { name?: string; value?: number; percent?: number }) => `${params.name ?? ""}<br/>${formatDuration(Number(params.value ?? 0))} · ${params.percent ?? 0}%` },
+    tooltip: { trigger: "item", confine: true, backgroundColor: chartPalette.surface, borderColor: chartPalette.border, textStyle: { color: chartPalette.text }, formatter: (params: { name?: string; value?: number; percent?: number }) => `${params.name ?? ""}<br/>${formatDuration(Number(params.value ?? 0))} · ${params.percent ?? 0}%` },
     legend: { bottom: 0, textStyle: { color: chartPalette.textMuted } },
-    series: [{ type: "pie", radius: ["45%", "70%"], center: ["50%", "44%"], avoidLabelOverlap: true, label: { show: false }, emphasis: { label: { show: true, fontWeight: "bold" } }, data: analytics.data?.byApproval.map((item) => ({ name: item.status, value: item.seconds })) ?? [] }],
+    series: [{ type: "pie", radius: ["45%", "70%"], center: ["50%", "44%"], avoidLabelOverlap: true, label: { show: false }, emphasis: { label: { show: true, fontWeight: "bold" } }, data: analytics.data?.byApproval.map((item) => ({ name: approvalLabels[item.status] ?? item.status, value: item.seconds, approvalState: item.status })) ?? [] }],
   }), [analytics.data?.byApproval, chartPalette]);
   const heatmapOption = useMemo<EChartsCoreOption>(() => ({
-    tooltip: { backgroundColor: chartPalette.surface, borderColor: chartPalette.border, textStyle: { color: chartPalette.text }, formatter: (params: { value?: [string, number] }) => `${params.value?.[0] ?? ""}<br/>${formatDuration(params.value?.[1] ?? 0)}` },
+    tooltip: { confine: true, backgroundColor: chartPalette.surface, borderColor: chartPalette.border, textStyle: { color: chartPalette.text }, formatter: (params: { value?: [string, number] }) => `${params.value?.[0] ?? ""}<br/>${formatDuration(params.value?.[1] ?? 0)}` },
     visualMap: { min: 0, max: Math.max(...(analytics.data?.byDay.map((item) => item.seconds) ?? [1])), show: false, inRange: { color: [chartPalette.grid, hexWithAlpha(chartPalette.accent, 0.45), chartPalette.accent] } },
     calendar: { range: [from.toISOString().slice(0, 10), to.toISOString().slice(0, 10)], cellSize: ["auto", 18], splitLine: { show: false }, itemStyle: { color: chartPalette.grid, borderColor: chartPalette.surface, borderWidth: 3 }, dayLabel: { color: chartPalette.textSubtle }, monthLabel: { color: chartPalette.textMuted }, yearLabel: { show: false } },
     series: [{ type: "heatmap", coordinateSystem: "calendar", data: analytics.data?.byDay.map((item) => [item.date, item.seconds]) ?? [] }],
   }), [analytics.data?.byDay, chartPalette, from, to]);
   const funnelOption = useMemo<EChartsCoreOption>(() => ({
     animationDuration: 240,
-    tooltip: { trigger: "item", backgroundColor: chartPalette.surface, borderColor: chartPalette.border, textStyle: { color: chartPalette.text } },
-    series: [{ type: "funnel", left: "8%", width: "84%", top: 18, bottom: 18, minSize: "24%", maxSize: "100%", sort: "none", gap: 4, label: { color: chartPalette.text }, itemStyle: { borderColor: chartPalette.surface, borderWidth: 2 }, data: analytics.data?.funnel.map((item) => ({ name: item.stage, value: item.count })) ?? [] }],
+    tooltip: { trigger: "item", confine: true, backgroundColor: chartPalette.surface, borderColor: chartPalette.border, textStyle: { color: chartPalette.text } },
+    series: [{ type: "funnel", left: "4%", width: "68%", top: 18, bottom: 18, minSize: "24%", maxSize: "100%", sort: "none", gap: 4, label: { color: chartPalette.text, formatter: "{b} {c}" }, labelLine: { length: 8 }, itemStyle: { borderColor: chartPalette.surface, borderWidth: 2 }, data: analytics.data?.funnel.map((item) => ({ name: item.stage, value: item.count })) ?? [] }],
   }), [analytics.data?.funnel, chartPalette]);
+  const forecastOption = useMemo<EChartsCoreOption>(() => {
+    const observed = analytics.data?.forecast.observed ?? [];
+    const predicted = analytics.data?.forecast.predicted ?? [];
+    const labels = [...observed.map((item) => item.date.slice(5)), ...predicted.map((item) => item.date.slice(5))];
+    const observedPadding = Array.from({ length: observed.length }, () => null);
+    return {
+      animationDuration: 240,
+      legend: { bottom: 2, textStyle: { color: chartPalette.textMuted } },
+      grid: { left: 54, right: 18, top: 24, bottom: 66 },
+      tooltip: {
+        trigger: "axis",
+        confine: true,
+        backgroundColor: chartPalette.surface,
+        borderColor: chartPalette.border,
+        textStyle: { color: chartPalette.text },
+        valueFormatter: (value: string | number) => formatDuration(Number(value)),
+      },
+      xAxis: {
+        type: "category",
+        data: labels,
+        axisLabel: { hideOverlap: true, color: chartPalette.textSubtle },
+        axisLine: { lineStyle: { color: chartPalette.border } },
+      },
+      yAxis: {
+        type: "value",
+        axisLabel: { formatter: (value: string | number) => `${Math.round(Number(value) / 3_600)}h`, color: chartPalette.textSubtle },
+        splitLine: { lineStyle: { color: chartPalette.grid } },
+      },
+      dataZoom: [{ type: "inside" }],
+      series: [
+        {
+          type: "line",
+          name: "已发生事实",
+          smooth: true,
+          data: [...observed.map((item) => item.seconds), ...predicted.map(() => null)],
+          lineStyle: { color: chartPalette.accent, width: 3 },
+          itemStyle: { color: chartPalette.accent },
+        },
+        {
+          type: "line",
+          name: "预测下界",
+          stack: "forecast-band",
+          symbol: "none",
+          data: [...observedPadding, ...predicted.map((item) => item.lowerSeconds)],
+          lineStyle: { opacity: 0 },
+          areaStyle: { opacity: 0 },
+          tooltip: { show: false },
+        },
+        {
+          type: "line",
+          name: "预测区间",
+          stack: "forecast-band",
+          symbol: "none",
+          data: [...observedPadding, ...predicted.map((item) => item.upperSeconds - item.lowerSeconds)],
+          lineStyle: { opacity: 0 },
+          areaStyle: { color: hexWithAlpha(chartPalette.accent, 0.2) },
+          tooltip: { show: false },
+        },
+        {
+          type: "line",
+          name: "程序预测",
+          smooth: true,
+          symbol: "emptyCircle",
+          data: [...observedPadding, ...predicted.map((item) => item.seconds)],
+          lineStyle: { color: chartPalette.accent, width: 2, type: "dashed" },
+          itemStyle: { color: chartPalette.surface, borderColor: chartPalette.accent, borderWidth: 2 },
+        },
+      ],
+    };
+  }, [analytics.data?.forecast, chartPalette]);
+  const sankeyOption = useMemo<EChartsCoreOption>(() => ({
+    animationDuration: 260,
+    tooltip: {
+      trigger: "item",
+      confine: true,
+      backgroundColor: chartPalette.surface,
+      borderColor: chartPalette.border,
+      textStyle: { color: chartPalette.text },
+      valueFormatter: (value: string | number) => formatDuration(Number(value)),
+    },
+    series: [{
+      type: "sankey",
+      left: 10,
+      right: 22,
+      top: 16,
+      bottom: 16,
+      nodeGap: 12,
+      nodeWidth: 14,
+      draggable: false,
+      emphasis: { focus: "adjacency" },
+      lineStyle: { color: "gradient", curveness: 0.45, opacity: 0.28 },
+      label: {
+        color: chartPalette.textMuted,
+        formatter: (params: { data?: { label?: string } }) => params.data?.label ?? "",
+      },
+      data: analytics.data?.flow.nodes.map((node) => ({
+        name: node.id,
+        label: node.label,
+        kind: node.kind,
+        dimensionId: node.id.slice(node.id.indexOf(":") + 1),
+        itemStyle: {
+          color: node.kind === "project"
+            ? chartPalette.accent
+            : node.kind === "work_type"
+              ? hexWithAlpha(chartPalette.accent, 0.65)
+              : chartPalette.textSubtle,
+        },
+      })) ?? [],
+      links: analytics.data?.flow.links.map((link) => ({
+        source: link.source,
+        target: link.target,
+        value: link.seconds,
+      })) ?? [],
+    }],
+  }), [analytics.data?.flow, chartPalette]);
+  const sunburstOption = useMemo<EChartsCoreOption>(() => {
+    const projects = new Map<string, { name: string; projectId: string | null; value: number; children: Array<{ name: string; value: number; workTypeId: string | null }> }>();
+    for (const item of analytics.data?.projectWorkTypes ?? []) {
+      const key = item.projectId ?? "unassigned";
+      const project = projects.get(key) ?? { name: item.projectName, projectId: item.projectId, value: 0, children: [] };
+      project.value += item.seconds;
+      project.children.push({ name: item.workTypeName, value: item.seconds, workTypeId: item.workTypeId });
+      projects.set(key, project);
+    }
+    return {
+      animationDuration: 260,
+      tooltip: {
+        trigger: "item",
+        confine: true,
+        backgroundColor: chartPalette.surface,
+        borderColor: chartPalette.border,
+        textStyle: { color: chartPalette.text },
+        valueFormatter: (value: string | number) => formatDuration(Number(value)),
+      },
+      series: [{
+        type: "sunburst",
+        radius: [30, "88%"],
+        sort: undefined,
+        emphasis: { focus: "ancestor" },
+        label: { rotate: 0, minAngle: 10, width: 80, overflow: "truncate", color: chartPalette.textMuted },
+        itemStyle: { borderColor: chartPalette.surface, borderWidth: 2 },
+        data: [...projects.values()],
+      }],
+    };
+  }, [analytics.data?.projectWorkTypes, chartPalette]);
+  const memberOption = useMemo<EChartsCoreOption>(() => ({
+    animationDuration: 220,
+    grid: { left: 92, right: 18, top: 18, bottom: 28 },
+    tooltip: { trigger: "axis", confine: true, axisPointer: { type: "shadow" }, backgroundColor: chartPalette.surface, borderColor: chartPalette.border, textStyle: { color: chartPalette.text }, valueFormatter: (value: string | number) => formatDuration(Number(value)) },
+    xAxis: { type: "value", axisLabel: { formatter: (value: string | number) => `${Math.round(Number(value) / 3_600)}h`, color: chartPalette.textSubtle }, splitLine: { lineStyle: { color: chartPalette.grid } } },
+    yAxis: { type: "category", data: analytics.data?.byMember.map((item) => item.displayName) ?? [], axisLabel: { width: 76, overflow: "truncate", color: chartPalette.textMuted }, axisLine: { lineStyle: { color: chartPalette.border } } },
+    series: [{ type: "bar", name: "范围内工时", data: analytics.data?.byMember.map((item) => ({ value: item.seconds, membershipId: item.membershipId })) ?? [], itemStyle: { color: hexWithAlpha(chartPalette.accent, 0.72), borderRadius: [0, 7, 7, 0] } }],
+  }), [analytics.data?.byMember, chartPalette]);
+  const projectHealthOption = useMemo<EChartsCoreOption>(() => ({
+    animationDuration: 240,
+    legend: { bottom: 0, textStyle: { color: chartPalette.textMuted } },
+    grid: { left: 54, right: 54, top: 28, bottom: 68 },
+    tooltip: { trigger: "axis", confine: true, backgroundColor: chartPalette.surface, borderColor: chartPalette.border, textStyle: { color: chartPalette.text } },
+    xAxis: { type: "category", data: analytics.data?.projectHealth.map((item) => item.projectName) ?? [], axisLabel: { width: 82, overflow: "truncate", color: chartPalette.textSubtle }, axisLine: { lineStyle: { color: chartPalette.border } } },
+    yAxis: [
+      { type: "value", name: "工时", axisLabel: { formatter: (value: string | number) => `${Math.round(Number(value) / 3_600)}h`, color: chartPalette.textSubtle }, splitLine: { lineStyle: { color: chartPalette.grid } } },
+      { type: "value", name: "进度", min: 0, max: 100, axisLabel: { formatter: "{value}%", color: chartPalette.textSubtle }, splitLine: { show: false } },
+    ],
+    dataZoom: [{ type: "inside" }],
+    series: [
+      { type: "bar", name: "净工时", data: analytics.data?.projectHealth.map((item) => item.seconds) ?? [], itemStyle: { color: hexWithAlpha(chartPalette.accent, 0.56), borderRadius: [6, 6, 0, 0] } },
+      { type: "line", name: "节点加权进度", yAxisIndex: 1, data: analytics.data?.projectHealth.map((item) => item.progress) ?? [], lineStyle: { color: chartPalette.accent, width: 3 }, itemStyle: { color: chartPalette.accent } },
+    ],
+  }), [analytics.data?.projectHealth, chartPalette]);
+  const anomalyOption = useMemo<EChartsCoreOption>(() => ({
+    animationDuration: 220,
+    grid: { left: 150, right: 20, top: 18, bottom: 28 },
+    tooltip: { trigger: "axis", confine: true, axisPointer: { type: "shadow" }, backgroundColor: chartPalette.surface, borderColor: chartPalette.border, textStyle: { color: chartPalette.text } },
+    xAxis: { type: "value", minInterval: 1, axisLabel: { color: chartPalette.textSubtle }, splitLine: { lineStyle: { color: chartPalette.grid } } },
+    yAxis: { type: "category", data: analytics.data?.anomalies.map((item) => item.category === "net_duration_under_60_seconds" ? "不足 1 分钟" : item.category === "gross_duration_over_16_hours" ? "超过 16 小时" : item.category) ?? [], axisLabel: { width: 136, overflow: "truncate", color: chartPalette.textMuted }, axisLine: { lineStyle: { color: chartPalette.border } } },
+    series: [{ type: "bar", name: "记录数", data: analytics.data?.anomalies.map((item) => item.count) ?? [], itemStyle: { color: chartPalette.warning, borderRadius: [0, 7, 7, 0] } }],
+  }), [analytics.data?.anomalies, chartPalette]);
   const canExport = me.permissions.some(
     (grant) => grant.permission === "export.scope",
   );
@@ -8030,7 +8382,6 @@ export function AnalyticsPage({ me }: { me: Me }) {
     <>
       <PageHeader
         title="数据分析"
-        description="所有指标均在服务端按当前角色、组织单元和项目范围裁剪；切换时间范围不会扩大权限。图表可缩放，并提供可对账的事实明细。"
         actions={
           <>
             <select
@@ -8043,12 +8394,49 @@ export function AnalyticsPage({ me }: { me: Me }) {
               <option value={30}>最近 30 天</option>
               <option value={90}>最近 90 天</option>
             </select>
+            {activeFilterCount ? (
+              <Button onClick={() => setFilters(emptyAnalyticsFilters)} size="compact" variant="secondary">
+                清除筛选 · {activeFilterCount}
+              </Button>
+            ) : null}
             {canExport ? (
               <Badge tone="info">支持 CSV / JSON / Excel / PDF</Badge>
             ) : null}
           </>
         }
       />
+      {analytics.data?.availableFilters ? (
+        <section
+          aria-label="分析联动筛选"
+          className="mb-5 grid gap-2 rounded-2xl bg-[var(--surface-subtle)] p-3 sm:grid-cols-2 xl:grid-cols-6"
+        >
+          <select aria-label="筛选项目" className={fieldClass} onChange={(event) => changeFilter("projectId", event.target.value)} value={filters.projectId}>
+            <option value="">全部项目</option>
+            {analytics.data.availableFilters.projects.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
+          </select>
+          <select aria-label="筛选工作类型" className={fieldClass} onChange={(event) => changeFilter("workTypeId", event.target.value)} value={filters.workTypeId}>
+            <option value="">全部类型</option>
+            {analytics.data.availableFilters.workTypes.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
+          </select>
+          <select aria-label="筛选成员" className={fieldClass} onChange={(event) => changeFilter("memberId", event.target.value)} value={filters.memberId}>
+            <option value="">全部可见成员</option>
+            {analytics.data.availableFilters.members.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
+          </select>
+          <select aria-label="筛选组织单元" className={fieldClass} onChange={(event) => changeFilter("orgUnitId", event.target.value)} value={filters.orgUnitId}>
+            <option value="">全部组织单元</option>
+            {analytics.data.availableFilters.orgUnits.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
+          </select>
+          <select aria-label="筛选审核状态" className={fieldClass} onChange={(event) => changeFilter("approvalState", event.target.value)} value={filters.approvalState}>
+            <option value="">全部审核状态</option>
+            {analytics.data.availableFilters.approvalStates.map((item) => <option key={item} value={item}>{approvalLabels[item] ?? item}</option>)}
+          </select>
+          <select aria-label="筛选记录来源" className={fieldClass} onChange={(event) => changeFilter("sourceType", event.target.value)} value={filters.sourceType}>
+            <option value="">全部记录来源</option>
+            {analytics.data.availableFilters.sourceTypes.map((item) => <option key={item} value={item}>{sourceLabels[item] ?? item}</option>)}
+          </select>
+          {analytics.isFetching && !analytics.isPending ? <span className="sr-only" role="status">正在更新筛选结果</span> : null}
+        </section>
+      ) : null}
       {analytics.isPending ? (
         <Card>
           <LoadingBlock />
@@ -8116,6 +8504,10 @@ export function AnalyticsPage({ me }: { me: Me }) {
                 {analytics.data.byProject.length ? (
                   <AnalyticsChart
                     ariaLabel="项目投入分布图"
+                    onDataSelect={({ data }) => {
+                      const projectId = analyticsSelectionId(data, "projectId");
+                      if (projectId) changeFilter("projectId", projectId);
+                    }}
                     option={projectOption}
                   />
                 ) : (
@@ -8139,11 +8531,78 @@ export function AnalyticsPage({ me }: { me: Me }) {
             </Card>
             <Card className="analytics-chart-card">
               <CardHeader><div><p className="app-section-label">审核结构</p><h2 className="mt-2 font-extrabold tracking-[-0.025em]">审核状态分布</h2></div></CardHeader>
-              <CardContent>{analytics.data.byApproval.length ? <AnalyticsChart ariaLabel="审核状态分布图" option={approvalOption} /> : <EmptyState description="该区间没有审核数据。" icon={<FileCheck2 />} title="没有审核分布" />}</CardContent>
+              <CardContent>{analytics.data.byApproval.length ? <AnalyticsChart ariaLabel="审核状态分布图" onDataSelect={({ data }) => { const status = analyticsSelectionId(data, "approvalState"); if (status) changeFilter("approvalState", status); }} option={approvalOption} /> : <EmptyState description="该区间没有审核数据。" icon={<FileCheck2 />} title="没有审核分布" />}</CardContent>
             </Card>
             <Card className="analytics-chart-card">
               <CardHeader><div><p className="app-section-label">事实流转</p><h2 className="mt-2 font-extrabold tracking-[-0.025em]">记录到计薪漏斗</h2></div></CardHeader>
               <CardContent>{analytics.data.funnel[0]?.count ? <AnalyticsChart ariaLabel="记录到计薪漏斗图" option={funnelOption} /> : <EmptyState description="该区间没有可流转的记录。" icon={<ListTodo />} title="没有流转数据" />}</CardContent>
+            </Card>
+          </div>
+          <div className="mt-5 grid gap-5 xl:grid-cols-2">
+            <Card className="analytics-chart-card">
+              <CardHeader>
+                <div><p className="app-section-label">趋势边界</p><h2 className="mt-2 font-extrabold tracking-[-0.025em]">事实与未来 7 天预测</h2></div>
+                <Badge tone="warning">预测不参与薪资或考核</Badge>
+              </CardHeader>
+              <CardContent>
+                {analytics.data.forecast.predicted.length ? <AnalyticsChart ariaLabel="事实与未来工时预测带" option={forecastOption} /> : <EmptyState description="至少需要 3 个自然日才能计算预测区间。" icon={<CalendarDays />} title="样本不足" />}
+              </CardContent>
+            </Card>
+            <Card className="analytics-chart-card">
+              <CardHeader><div><p className="app-section-label">投入路径</p><h2 className="mt-2 font-extrabold tracking-[-0.025em]">项目 → 类型 → 审核</h2></div></CardHeader>
+              <CardContent>
+                {analytics.data.flow.links.length ? (
+                  <AnalyticsChart
+                    ariaLabel="项目工作类型与审核流向桑基图"
+                    onDataSelect={({ data }) => {
+                      const kind = analyticsSelectionId(data, "kind");
+                      const dimensionId = analyticsSelectionId(data, "dimensionId");
+                      if (!kind || !dimensionId) return;
+                      if (kind === "project") changeFilter("projectId", dimensionId);
+                      if (kind === "work_type") changeFilter("workTypeId", dimensionId);
+                      if (kind === "approval") changeFilter("approvalState", dimensionId);
+                    }}
+                    option={sankeyOption}
+                  />
+                ) : <EmptyState description="筛选范围内没有可组成投入路径的事实。" icon={<ListTodo />} title="没有流向数据" />}
+              </CardContent>
+            </Card>
+            <Card className="analytics-chart-card">
+              <CardHeader><div><p className="app-section-label">层级占比</p><h2 className="mt-2 font-extrabold tracking-[-0.025em]">项目与工作类型</h2></div></CardHeader>
+              <CardContent>
+                {analytics.data.projectWorkTypes.length ? (
+                  <AnalyticsChart
+                    ariaLabel="项目与工作类型旭日图"
+                    onDataSelect={({ data }) => {
+                      const workTypeId = analyticsSelectionId(data, "workTypeId");
+                      const projectId = analyticsSelectionId(data, "projectId");
+                      if (workTypeId) changeFilter("workTypeId", workTypeId);
+                      else if (projectId) changeFilter("projectId", projectId);
+                    }}
+                    option={sunburstOption}
+                  />
+                ) : <EmptyState description="筛选范围内没有项目与类型的联合分布。" icon={<FolderKanban />} title="没有层级数据" />}
+              </CardContent>
+            </Card>
+            <Card className="analytics-chart-card">
+              <CardHeader><div><p className="app-section-label">团队负载</p><h2 className="mt-2 font-extrabold tracking-[-0.025em]">可见成员工作量分布</h2></div></CardHeader>
+              <CardContent>
+                {analytics.data.byMember.length ? (
+                  <AnalyticsChart
+                    ariaLabel="成员工作量分布图"
+                    onDataSelect={({ data }) => { const memberId = analyticsSelectionId(data, "membershipId"); if (memberId) changeFilter("memberId", memberId); }}
+                    option={memberOption}
+                  />
+                ) : <EmptyState description="筛选范围内没有可见成员工时。" icon={<Users />} title="没有负载数据" />}
+              </CardContent>
+            </Card>
+            <Card className="analytics-chart-card">
+              <CardHeader><div><p className="app-section-label">项目健康</p><h2 className="mt-2 font-extrabold tracking-[-0.025em]">投入与节点进度</h2></div></CardHeader>
+              <CardContent>{analytics.data.projectHealth.length ? <AnalyticsChart ariaLabel="项目工时与加权进度图" option={projectHealthOption} /> : <EmptyState description="筛选范围内没有可对账的项目节点。" icon={<FolderKanban />} title="没有项目健康数据" />}</CardContent>
+            </Card>
+            <Card className="analytics-chart-card">
+              <CardHeader><div><p className="app-section-label">异常检查</p><h2 className="mt-2 font-extrabold tracking-[-0.025em]">需要人工确认的记录</h2></div></CardHeader>
+              <CardContent>{analytics.data.anomalies.length ? <AnalyticsChart ariaLabel="异常记录类别图" option={anomalyOption} /> : <EmptyState description="当前筛选范围没有时长异常标记。" icon={<Check />} title="没有异常" />}</CardContent>
             </Card>
           </div>
           <Card className="mt-5">
@@ -8162,9 +8621,13 @@ export function AnalyticsPage({ me }: { me: Me }) {
               {analytics.data.byProject.length ? (
                 <div className="space-y-1">
                   {analytics.data.byProject.map((item) => (
-                    <div
-                      className="analytics-breakdown-row flex items-center gap-4 p-3"
+                    <button
+                      aria-pressed={item.projectId === filters.projectId}
+                      className="analytics-breakdown-row flex w-full items-center gap-4 p-3 text-left disabled:cursor-default"
+                      disabled={!item.projectId}
                       key={item.projectId ?? "none"}
+                      onClick={() => item.projectId && changeFilter("projectId", item.projectId)}
+                      type="button"
                     >
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center justify-between gap-3">
@@ -8184,7 +8647,7 @@ export function AnalyticsPage({ me }: { me: Me }) {
                           />
                         </div>
                       </div>
-                    </div>
+                    </button>
                   ))}
                 </div>
               ) : (
@@ -8194,11 +8657,37 @@ export function AnalyticsPage({ me }: { me: Me }) {
               )}
             </CardContent>
           </Card>
+          {analytics.data.projectHealth.length ? (
+            <Card className="mt-5">
+              <CardHeader><div><p className="app-section-label">项目对账</p><h2 className="mt-2 font-extrabold tracking-[-0.025em]">进度、阻塞与投入</h2></div></CardHeader>
+              <CardContent>
+                <div className="overflow-x-auto">
+                  <table className="w-full min-w-[680px] text-left text-sm">
+                    <thead className="text-xs text-[var(--text-subtle)]"><tr><th className="px-3 py-2">项目</th><th className="px-3 py-2">状态</th><th className="px-3 py-2">净工时</th><th className="px-3 py-2">加权进度</th><th className="px-3 py-2">阻塞节点</th><th className="px-3 py-2">截止时间</th></tr></thead>
+                    <tbody className="divide-y divide-[var(--border-soft)]">
+                      {analytics.data.projectHealth.map((item) => (
+                        <tr key={item.projectId}>
+                          <td className="px-3 py-3"><button className="font-semibold text-[var(--accent)]" onClick={() => changeFilter("projectId", item.projectId)} type="button">{item.projectName}</button></td>
+                          <td className="px-3 py-3">{item.status ? projectStatusLabels[item.status] ?? item.status : "—"}</td>
+                          <td className="px-3 py-3 tabular-nums">{formatDuration(item.seconds)}</td>
+                          <td className="px-3 py-3 tabular-nums">{item.progress.toFixed(1)}%</td>
+                          <td className="px-3 py-3 tabular-nums">{item.blockedNodes} / {item.totalNodes}</td>
+                          <td className="px-3 py-3">{item.dueAt ? formatDateTime(item.dueAt) : "—"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </CardContent>
+            </Card>
+          ) : null}
           <Card className="mt-5">
-            <CardHeader><div><p className="app-section-label">分类对账</p><h2 className="mt-2 font-extrabold tracking-[-0.025em]">工作类型与审核明细</h2></div></CardHeader>
-            <CardContent className="grid gap-6 lg:grid-cols-2">
-              <div><h3 className="text-sm font-bold">工作类型</h3><div className="mt-2 divide-y divide-[var(--border-soft)]">{analytics.data.byWorkType.map((item) => <div className="flex items-center justify-between gap-3 py-2 text-sm" key={item.workTypeId ?? "none"}><span>{item.workTypeName}</span><strong className="tabular-nums">{formatDuration(item.seconds)}</strong></div>)}</div></div>
-              <div><h3 className="text-sm font-bold">审核状态</h3><div className="mt-2 divide-y divide-[var(--border-soft)]">{analytics.data.byApproval.map((item) => <div className="flex items-center justify-between gap-3 py-2 text-sm" key={item.status}><span>{item.status} · {item.count} 条</span><strong className="tabular-nums">{formatDuration(item.seconds)}</strong></div>)}</div></div>
+            <CardHeader><div><p className="app-section-label">分类对账</p><h2 className="mt-2 font-extrabold tracking-[-0.025em]">类型、审核、组织与来源</h2></div></CardHeader>
+            <CardContent className="grid gap-6 md:grid-cols-2 xl:grid-cols-4">
+              <div><h3 className="text-sm font-bold">工作类型</h3><div className="mt-2 divide-y divide-[var(--border-soft)]">{analytics.data.byWorkType.map((item) => <button aria-pressed={item.workTypeId === filters.workTypeId} className="flex w-full items-center justify-between gap-3 py-2 text-left text-sm" disabled={!item.workTypeId} key={item.workTypeId ?? "none"} onClick={() => item.workTypeId && changeFilter("workTypeId", item.workTypeId)} type="button"><span>{item.workTypeName}</span><strong className="tabular-nums">{formatDuration(item.seconds)}</strong></button>)}</div></div>
+              <div><h3 className="text-sm font-bold">审核状态</h3><div className="mt-2 divide-y divide-[var(--border-soft)]">{analytics.data.byApproval.map((item) => <button aria-pressed={item.status === filters.approvalState} className="flex w-full items-center justify-between gap-3 py-2 text-left text-sm" key={item.status} onClick={() => changeFilter("approvalState", item.status)} type="button"><span>{approvalLabels[item.status] ?? item.status} · {item.count} 条</span><strong className="tabular-nums">{formatDuration(item.seconds)}</strong></button>)}</div></div>
+              <div><h3 className="text-sm font-bold">组织单元</h3><div className="mt-2 divide-y divide-[var(--border-soft)]">{analytics.data.byOrgUnit.map((item) => <button aria-pressed={item.orgUnitId === filters.orgUnitId} className="flex w-full items-center justify-between gap-3 py-2 text-left text-sm" disabled={!item.orgUnitId} key={item.orgUnitId ?? "none"} onClick={() => item.orgUnitId && changeFilter("orgUnitId", item.orgUnitId)} type="button"><span>{item.orgUnitName}</span><strong className="tabular-nums">{formatDuration(item.seconds)}</strong></button>)}</div></div>
+              <div><h3 className="text-sm font-bold">记录来源</h3><div className="mt-2 divide-y divide-[var(--border-soft)]">{analytics.data.bySource.map((item) => <button aria-pressed={item.source === filters.sourceType} className="flex w-full items-center justify-between gap-3 py-2 text-left text-sm" key={item.source} onClick={() => changeFilter("sourceType", item.source)} type="button"><span>{sourceLabels[item.source] ?? item.source} · {item.count} 条</span><strong className="tabular-nums">{formatDuration(item.seconds)}</strong></button>)}</div></div>
             </CardContent>
           </Card>
         </>
