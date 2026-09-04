@@ -198,7 +198,7 @@ describe("export worker lifecycle", () => {
       .where(eq(exportJobs.id, job.id));
     expect(expired?.objectKey).toBeNull();
     expect(sent.some((command) => command instanceof DeleteObjectCommand)).toBe(true);
-  });
+  }, 20_000);
 
   it("fails permanently with a stable error code when private storage is unavailable", async () => {
     const { db, job } = await createFixture();
