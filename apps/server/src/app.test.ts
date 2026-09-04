@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -82,6 +82,9 @@ describe("service probes", () => {
   it("serves the PWA entry point for production root and client-side routes", async () => {
     const webRoot = mkdtempSync(join(tmpdir(), "workbench-pwa-"));
     writeFileSync(join(webRoot, "index.html"), "<!doctype html><title>Workbench</title>");
+    writeFileSync(join(webRoot, "sw.js"), "self.addEventListener('fetch', () => undefined);");
+    mkdirSync(join(webRoot, "assets"));
+    writeFileSync(join(webRoot, "assets", "app-ABC123.js"), "console.log('hashed');");
     const app = await buildApp({
       config: {
         ...config,
@@ -116,6 +119,14 @@ describe("service probes", () => {
         url: "/login",
         headers: { accept: "*/*" },
       });
+      const serviceWorker = await app.inject({
+        method: "GET",
+        url: "/sw.js",
+      });
+      const hashedAsset = await app.inject({
+        method: "GET",
+        url: "/assets/app-ABC123.js",
+      });
       const missingAsset = await app.inject({
         method: "GET",
         url: "/assets/not-present.js",
@@ -131,10 +142,24 @@ describe("service probes", () => {
       expect(setup.statusCode).toBe(200);
       expect(verifyContact.statusCode).toBe(200);
       expect(embeddedLogin.statusCode).toBe(200);
+      expect(serviceWorker.statusCode).toBe(200);
+      expect(hashedAsset.statusCode).toBe(200);
       expect(missingAsset.statusCode).toBe(404);
       expect(missingApi.statusCode).toBe(404);
       expect(root.headers["content-security-policy"]).toContain(
         "connect-src 'self' https://private-evidence.storage.example.test",
+      );
+      expect(root.headers["cache-control"]).toBe(
+        "no-cache, no-store, must-revalidate",
+      );
+      expect(setup.headers["cache-control"]).toBe(
+        "no-cache, no-store, must-revalidate",
+      );
+      expect(serviceWorker.headers["cache-control"]).toBe(
+        "no-cache, no-store, must-revalidate",
+      );
+      expect(hashedAsset.headers["cache-control"]).toBe(
+        "public, max-age=31536000, immutable",
       );
       expect(setup.body).toContain("Workbench");
       expect(embeddedLogin.body).toContain("Workbench");

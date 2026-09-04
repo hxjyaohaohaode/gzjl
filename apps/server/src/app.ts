@@ -315,8 +315,19 @@ export async function buildApp({
     await app.register(staticFiles, {
       root: webRoot,
       prefix: "/",
-      immutable: true,
-      maxAge: "1 year",
+      cacheControl: false,
+      setHeaders(reply, filePath) {
+        // Only Vite's content-hashed assets are safe to cache forever. The
+        // SPA shell and service worker must revalidate, otherwise an employee
+        // can remain pinned to an old release long after Render switched the
+        // server and API to a newer commit.
+        reply.header(
+          "Cache-Control",
+          filePath.includes(`${resolve(webRoot, "assets")}`)
+            ? "public, max-age=31536000, immutable"
+            : "no-cache, no-store, must-revalidate",
+        );
+      },
     });
     app.setNotFoundHandler((request, reply) => {
       const pathname = request.url.split("?", 1)[0] ?? request.url;
