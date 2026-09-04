@@ -676,6 +676,8 @@ test("Owner can configure a versioned hourly plan and create a pay period", asyn
               baseAmount: "88.500000",
               approvedSeconds: 14_400,
               pendingSeconds: 3_600,
+              weeklyBonusSeconds: 18_000,
+              weeklyBonusEstimatedSeconds: 0,
               estimatedAmount: "442.500000",
               includesPending: true,
               needsReview: false,
@@ -689,7 +691,13 @@ test("Owner can configure a versioned hourly plan and create a pay period", asyn
   let planPayload: Record<string, unknown> | null = null;
   await page.route(`**/api/payroll/members/${memberId}/plan`, async (route) => {
     planPayload = route.request().postDataJSON() as Record<string, unknown>;
-    await route.fulfill({ json: { result: { ok: true } } });
+    await route.fulfill({
+      json: {
+        result: {
+          version: { effectiveFrom: String(planPayload.effectiveFrom) },
+        },
+      },
+    });
   });
   let periodPayload: Record<string, unknown> | null = null;
   await page.route("**/api/payroll/periods", async (route) => {
@@ -712,6 +720,7 @@ test("Owner can configure a versioned hourly plan and create a pay period", asyn
   await page.getByLabel("计薪类型").selectOption("hourly");
   await page.getByLabel("基础时薪").fill("88.50");
   await page.getByText("周末倍率", { exact: true }).click();
+  await page.getByLabel("启用周超时奖励").check();
   await page.getByRole("button", { name: "保存薪资方案新版本" }).click();
   await expect.poll(() => planPayload).not.toBeNull();
   expect(planPayload).toMatchObject({
@@ -722,6 +731,12 @@ test("Owner can configure a versioned hourly plan and create a pay period", asyn
   });
   expect(planPayload?.rules).toEqual([
     { type: "weekend", priority: 100, multiplier: "2" },
+    {
+      type: "weekly_bonus",
+      priority: 400,
+      thresholdSeconds: 108_000,
+      rewardSeconds: 18_000,
+    },
   ]);
 
   await expect(page.getByLabel("默认发薪日")).toHaveValue("15");
@@ -772,6 +787,8 @@ test("personal payroll renders reconciled totals, daily pay, period trend, and c
           baseAmount: "100.000000",
           approvedSeconds: 28_800,
           pendingSeconds: 3_600,
+          weeklyBonusSeconds: 0,
+          weeklyBonusEstimatedSeconds: 18_000,
           estimatedAmount: "900.000000",
           includesPending: true,
           needsReview: false,
@@ -853,6 +870,8 @@ test("personal payroll renders reconciled totals, daily pay, period trend, and c
   await expect(page.getByRole("heading", { name: "我的薪资" })).toBeVisible();
   await expect(page.getByText("¥100.00 / 小时", { exact: true })).toBeVisible();
   await expect(page.getByText("本月实时预估", { exact: true })).toBeVisible();
+  await expect(page.getByText("周奖励工时（含预估）", { exact: true })).toBeVisible();
+  await expect(page.getByText("5 小时 0 分", { exact: true })).toBeVisible();
   await expect(page.getByText("当前应结")).toBeVisible();
   await expect(page.getByText("¥900.00", { exact: true }).first()).toBeVisible();
   await expect(page.getByRole("img", { name: "2026 年 9 月每日薪资" })).toBeVisible();

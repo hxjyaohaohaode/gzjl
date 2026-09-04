@@ -171,4 +171,225 @@ describe("calculateHourlyPayroll", () => {
     expect(estimate.pendingSeconds).toBe(3_600);
     expect(estimate.estimate).toBe(true);
   });
+
+  it("awards five virtual hours only after weekly work strictly exceeds thirty hours", () => {
+    const rule = {
+      id: "weekly-reward",
+      type: "weekly_bonus" as const,
+      priority: 400,
+      multiplier: "1",
+      thresholdSeconds: 30 * 3_600,
+      rewardSeconds: 5 * 3_600,
+    };
+    const exactThreshold = calculateHourlyPayroll({
+      hourlyRate: "100",
+      timezone: "UTC",
+      intervals: [{
+        sourceId: "exact",
+        startAt: new Date("2026-09-07T00:00:00.000Z"),
+        endAt: new Date("2026-09-08T06:00:00.000Z"),
+        approvalStatus: "approved",
+      }],
+      rules: [rule],
+      includePendingAsEstimate: false,
+    });
+    expect(exactThreshold.weeklyBonusSeconds).toBe(0);
+    expect(exactThreshold.grossAmount).toBe("3000.000000");
+
+    const exceeded = calculateHourlyPayroll({
+      hourlyRate: "100",
+      timezone: "UTC",
+      intervals: [{
+        sourceId: "exceeded",
+        startAt: new Date("2026-09-07T00:00:00.000Z"),
+        endAt: new Date("2026-09-08T06:00:01.000Z"),
+        approvalStatus: "approved",
+      }],
+      rules: [rule],
+      includePendingAsEstimate: false,
+    });
+    expect(exceeded.weeklyBonusSeconds).toBe(18_000);
+    expect(exceeded.weeklyBonusEstimatedSeconds).toBe(0);
+    expect(exceeded.weeklyBonusWeekStarts).toEqual(["2026-09-07"]);
+    expect(exceeded.grossAmount).toBe("3500.027778");
+    expect(exceeded.components.find((component) => component.type === "bonus")).toMatchObject({
+      label: "周超时奖励",
+      seconds: 18_000,
+      amount: "500.000000",
+      estimate: false,
+      trace: {
+        weekStartDate: "2026-09-07",
+        thresholdSeconds: 108_000,
+        rewardSeconds: 18_000,
+      },
+    });
+  });
+
+  it("resets weekly reward by organization-local Monday and awards at most once per week", () => {
+    const result = calculateHourlyPayroll({
+      hourlyRate: "60",
+      timezone: "Asia/Shanghai",
+      intervals: [
+        {
+          sourceId: "sunday",
+          startAt: new Date("2026-09-06T09:59:59.000Z"),
+          endAt: new Date("2026-09-06T16:00:00.000Z"),
+          approvalStatus: "approved",
+        },
+        {
+          sourceId: "monday-first",
+          startAt: new Date("2026-09-07T00:00:00.000Z"),
+          endAt: new Date("2026-09-07T06:00:01.000Z"),
+          approvalStatus: "approved",
+        },
+        {
+          sourceId: "monday-extra",
+          startAt: new Date("2026-09-08T00:00:00.000Z"),
+          endAt: new Date("2026-09-08T02:00:00.000Z"),
+          approvalStatus: "approved",
+        },
+      ],
+      rules: [{
+        id: "weekly-reward",
+        type: "weekly_bonus",
+        priority: 400,
+        multiplier: "1",
+        thresholdSeconds: 6 * 3_600,
+        rewardSeconds: 3_600,
+      }],
+      includePendingAsEstimate: false,
+    });
+    expect(result.weeklyBonusWeekStarts).toEqual(["2026-08-31", "2026-09-07"]);
+    expect(result.weeklyBonusSeconds).toBe(7_200);
+    expect(result.components.filter((component) => component.type === "bonus")).toHaveLength(2);
+  });
+
+  it("marks a weekly reward as estimated only when pending work is needed to pass the threshold", () => {
+    const input = {
+      hourlyRate: "80",
+      timezone: "UTC",
+      intervals: [
+        {
+          sourceId: "approved",
+          startAt: new Date("2026-09-07T00:00:00.000Z"),
+          endAt: new Date("2026-09-08T05:00:00.000Z"),
+          approvalStatus: "approved" as const,
+        },
+        {
+          sourceId: "pending",
+          startAt: new Date("2026-09-08T05:00:00.000Z"),
+          endAt: new Date("2026-09-08T07:00:00.000Z"),
+          approvalStatus: "pending_review" as const,
+        },
+      ],
+      rules: [{
+        id: "weekly-reward",
+        type: "weekly_bonus" as const,
+        priority: 400,
+        multiplier: "1",
+        thresholdSeconds: 30 * 3_600,
+        rewardSeconds: 5 * 3_600,
+      }],
+    };
+    const approvedOnly = calculateHourlyPayroll({
+      ...input,
+      includePendingAsEstimate: false,
+    });
+    expect(approvedOnly.weeklyBonusSeconds).toBe(0);
+    expect(approvedOnly.weeklyBonusEstimatedSeconds).toBe(0);
+
+    const estimate = calculateHourlyPayroll({
+      ...input,
+      includePendingAsEstimate: true,
+    });
+    expect(estimate.weeklyBonusSeconds).toBe(0);
+    expect(estimate.weeklyBonusEstimatedSeconds).toBe(18_000);
+    expect(estimate.components.find((component) => component.type === "bonus")?.estimate).toBe(true);
+  });
+
+  it("uses prior-period weekly context without awarding outside the current calculation segment", () => {
+    const context = [
+      {
+        sourceId: "prior-period",
+        startAt: new Date("2026-08-31T00:00:00.000Z"),
+        endAt: new Date("2026-09-01T05:00:00.000Z"),
+        approvalStatus: "approved" as const,
+      },
+      {
+        sourceId: "current-period",
+        startAt: new Date("2026-09-01T05:00:00.000Z"),
+        endAt: new Date("2026-09-01T07:00:00.000Z"),
+        approvalStatus: "approved" as const,
+      },
+    ];
+    const rule = [{
+      id: "weekly-reward",
+      type: "weekly_bonus" as const,
+      priority: 400,
+      multiplier: "1",
+      thresholdSeconds: 30 * 3_600,
+      rewardSeconds: 5 * 3_600,
+    }];
+    const current = calculateHourlyPayroll({
+      hourlyRate: "100",
+      timezone: "UTC",
+      intervals: [context[1]!],
+      weeklyContextIntervals: context,
+      rules: rule,
+      includePendingAsEstimate: false,
+    });
+    expect(current.weeklyBonusSeconds).toBe(18_000);
+    expect(current.grossAmount).toBe("700.000000");
+
+    const excluded = calculateHourlyPayroll({
+      hourlyRate: "100",
+      timezone: "UTC",
+      intervals: [context[1]!],
+      weeklyContextIntervals: context,
+      excludedWeeklyBonusWeekStarts: ["2026-08-31"],
+      rules: rule,
+      includePendingAsEstimate: false,
+    });
+    expect(excluded.weeklyBonusSeconds).toBe(0);
+    expect(excluded.grossAmount).toBe("200.000000");
+
+    const enabledAfterCrossing = calculateHourlyPayroll({
+      hourlyRate: "100",
+      timezone: "UTC",
+      intervals: [context[1]!],
+      weeklyContextIntervals: context,
+      weeklyBonusEligibilityIntervals: [{
+        ...context[1]!,
+        startAt: new Date("2026-09-01T06:30:00.000Z"),
+      }],
+      rules: rule,
+      includePendingAsEstimate: false,
+    });
+    expect(enabledAfterCrossing.weeklyBonusSeconds).toBe(0);
+    expect(enabledAfterCrossing.grossAmount).toBe("200.000000");
+
+    const afterCrossing = calculateHourlyPayroll({
+      hourlyRate: "100",
+      timezone: "UTC",
+      intervals: [{
+        sourceId: "later",
+        startAt: new Date("2026-09-01T08:00:00.000Z"),
+        endAt: new Date("2026-09-01T09:00:00.000Z"),
+        approvalStatus: "approved",
+      }],
+      weeklyContextIntervals: [
+        ...context,
+        {
+          sourceId: "later",
+          startAt: new Date("2026-09-01T08:00:00.000Z"),
+          endAt: new Date("2026-09-01T09:00:00.000Z"),
+          approvalStatus: "approved",
+        },
+      ],
+      rules: rule,
+      includePendingAsEstimate: false,
+    });
+    expect(afterCrossing.weeklyBonusSeconds).toBe(0);
+    expect(afterCrossing.grossAmount).toBe("100.000000");
+  });
 });

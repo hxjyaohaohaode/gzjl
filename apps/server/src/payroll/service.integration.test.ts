@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
+import { eq } from "drizzle-orm";
 import { afterEach, describe, expect, it } from "vitest";
 import type { Database } from "@workbench/db";
 import {
@@ -13,6 +14,7 @@ import {
   orgMemberships,
   payPeriods,
   payrollItems,
+  payrollItemComponents,
   payrollRuns,
   payslips,
   users,
@@ -214,5 +216,140 @@ describe("employee payroll view and receipt acknowledgement", () => {
         day: "2-digit",
       }).format(new Date(after.livePreview!.period.cutoffAt)),
     ).toBe("15");
+  });
+
+  it("persists a member weekly reward and uses locked cross-period work exactly once", async () => {
+    const db = await createTestDatabase();
+    const [organization] = await db
+      .insert(organizations)
+      .values({ name: "周奖励测试", timezone: "UTC", payrollCutoffDay: 10 })
+      .returning();
+    const [ownerUser] = await db.insert(users).values({ displayName: "Owner" }).returning();
+    const [ownerMembership] = await db
+      .insert(orgMemberships)
+      .values({
+        organizationId: organization!.id,
+        userId: ownerUser!.id,
+        status: "active",
+        joinedAt: new Date("2025-01-01T00:00:00.000Z"),
+      })
+      .returning();
+    await db.insert(organizationOwners).values({
+      organizationId: organization!.id,
+      membershipId: ownerMembership!.id,
+    });
+    const [employeeUser] = await db.insert(users).values({ displayName: "员工" }).returning();
+    const [employeeMembership] = await db
+      .insert(orgMemberships)
+      .values({
+        organizationId: organization!.id,
+        userId: employeeUser!.id,
+        status: "active",
+        joinedAt: new Date("2025-01-01T00:00:00.000Z"),
+      })
+      .returning();
+    const ownerActor = {
+      organizationId: organization!.id,
+      membershipId: ownerMembership!.id,
+    };
+    const service = new PayrollService(db);
+    await service.configurePlan(ownerActor, {
+      membershipId: employeeMembership!.id,
+      name: "含周奖励的时薪",
+      type: "hourly",
+      currency: "CNY",
+      baseAmount: "100",
+      effectiveFrom: new Date("2026-08-01T00:00:00.000Z"),
+      pendingReviewCountsInEstimate: true,
+      rules: [{
+        type: "weekly_bonus",
+        priority: 400,
+        thresholdSeconds: 30 * 3_600,
+        rewardSeconds: 5 * 3_600,
+      }],
+    });
+    const overview = await service.managementOverview(ownerActor);
+    expect(overview.members.find(
+      (member) => member.membershipId === employeeMembership!.id,
+    )?.plan?.rules).toEqual([
+      expect.objectContaining({
+        type: "weekly_bonus",
+        thresholdSeconds: 108_000,
+        rewardSeconds: 18_000,
+      }),
+    ]);
+
+    await db.insert(workSessions).values([
+      {
+        organizationId: organization!.id,
+        membershipId: employeeMembership!.id,
+        startAt: new Date("2026-08-31T00:00:00.000Z"),
+        endAt: new Date("2026-09-01T00:00:00.000Z"),
+        timezone: "UTC",
+        grossSeconds: 24 * 3_600,
+        netSeconds: 24 * 3_600,
+        source: "manual",
+        content: "上一周期已锁定工作",
+        result: "完成",
+        submissionStatus: "submitted",
+        approvalStatus: "locked",
+        visibility: "management_only",
+      },
+      {
+        organizationId: organization!.id,
+        membershipId: employeeMembership!.id,
+        startAt: new Date("2026-09-01T00:00:00.000Z"),
+        endAt: new Date("2026-09-01T07:00:00.000Z"),
+        timezone: "UTC",
+        grossSeconds: 7 * 3_600,
+        netSeconds: 7 * 3_600,
+        source: "manual",
+        content: "本周期工作",
+        result: "完成",
+        submissionStatus: "submitted",
+        approvalStatus: "approved",
+        visibility: "management_only",
+      },
+    ]);
+    const [period] = await db
+      .insert(payPeriods)
+      .values({
+        organizationId: organization!.id,
+        name: "2026 年 9 月",
+        timezone: "UTC",
+        startsAt: new Date("2026-09-01T00:00:00.000Z"),
+        endsAt: new Date("2026-10-01T00:00:00.000Z"),
+        cutoffAt: new Date("2026-10-10T10:00:00.000Z"),
+      })
+      .returning();
+    const run = await service.calculate(ownerActor, period!.id);
+    expect(run.calculationVersion).toBe("payroll-engine-v3-weekly-bonus");
+    const [item] = await db
+      .select()
+      .from(payrollItems)
+      .where(eq(payrollItems.payrollRunId, run.id));
+    expect(item).toMatchObject({
+      approvedSeconds: 25_200,
+      pendingSeconds: 0,
+      grossAmount: "1200.000000",
+      finalAmount: "1200.000000",
+      estimate: false,
+    });
+    const components = await db
+      .select()
+      .from(payrollItemComponents)
+      .where(eq(payrollItemComponents.payrollItemId, item!.id));
+    expect(components.filter((component) => component.type === "bonus")).toHaveLength(1);
+    expect(components.find((component) => component.type === "bonus")).toMatchObject({
+      label: "周超时奖励",
+      quantity: "18000.000000",
+      unit: "second",
+      amount: "500.000000",
+      calculationTrace: expect.objectContaining({
+        weekStartDate: "2026-08-31",
+        thresholdSeconds: 108_000,
+        rewardSeconds: 18_000,
+      }),
+    });
   });
 });

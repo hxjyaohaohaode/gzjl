@@ -26,6 +26,7 @@ const rateRuleSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("holiday"), priority: z.number().int().min(1).max(10_000).default(100), multiplier, holidayDates: z.array(z.iso.date()).max(366).default([]) }),
   z.object({ type: z.literal("night_window"), priority: z.number().int().min(1).max(10_000).default(100), multiplier, startHour: z.number().int().min(0).max(23), endHour: z.number().int().min(0).max(23) }),
   z.object({ type: z.literal("overtime"), priority: z.number().int().min(1).max(10_000).default(100), multiplier, thresholdSeconds: z.number().int().min(60).max(604_800) }),
+  z.object({ type: z.literal("weekly_bonus"), priority: z.number().int().min(1).max(10_000).default(400), thresholdSeconds: z.number().int().min(60).max(604_800), rewardSeconds: z.number().int().min(60).max(604_800) }),
 ]);
 const planSchema = z.object({
   name: z.string().trim().min(2).max(120),
@@ -39,6 +40,13 @@ const planSchema = z.object({
 }).superRefine((input, context) => {
   if (input.type === "hybrid" && input.fixedAmount === undefined) {
     context.addIssue({ code: "custom", path: ["fixedAmount"], message: "混合计薪必须填写固定部分金额。" });
+  }
+  const weeklyBonusRules = input.rules.filter((rule) => rule.type === "weekly_bonus");
+  if (weeklyBonusRules.length > 1) {
+    context.addIssue({ code: "custom", path: ["rules"], message: "每个薪资方案只能配置一条周超时奖励规则。" });
+  }
+  if (weeklyBonusRules.length > 0 && !["hourly", "hybrid"].includes(input.type)) {
+    context.addIssue({ code: "custom", path: ["rules"], message: "周超时奖励仅适用于时薪或混合计薪方案。" });
   }
 });
 const createPeriodSchema = z.object({

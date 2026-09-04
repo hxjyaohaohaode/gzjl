@@ -55,15 +55,23 @@ export interface ConfigureCompensationPlanInput {
   effectiveFrom: Date;
   pendingReviewCountsInEstimate: boolean;
   fixedAmount?: string | undefined;
-  rules: Array<{
-    type: "weekday" | "weekend" | "holiday" | "night_window" | "overtime";
-    priority: number;
-    multiplier: string;
-    startHour?: number | undefined;
-    endHour?: number | undefined;
-    thresholdSeconds?: number | undefined;
-    holidayDates?: string[] | undefined;
-  }>;
+  rules: Array<
+    | {
+        type: "weekly_bonus";
+        priority: number;
+        thresholdSeconds: number;
+        rewardSeconds: number;
+      }
+    | {
+        type: "weekday" | "weekend" | "holiday" | "night_window" | "overtime";
+        priority: number;
+        multiplier: string;
+        startHour?: number | undefined;
+        endHour?: number | undefined;
+        thresholdSeconds?: number | undefined;
+        holidayDates?: string[] | undefined;
+      }
+  >;
 }
 
 export interface CreatePayPeriodInput {
@@ -122,10 +130,16 @@ function splitMicros(value: bigint, count: number): bigint[] {
 }
 
 function parseRule(row: typeof rateRules.$inferSelect): PayrollRateRule | null {
-  if (!["weekday", "weekend", "holiday", "night_window", "overtime"].includes(row.type)) {
+  const conditions = (row.conditions ?? {}) as Record<string, unknown>;
+  if (
+    row.type !== "bonus" &&
+    !["weekday", "weekend", "holiday", "night_window", "overtime"].includes(row.type)
+  ) {
     return null;
   }
-  const conditions = (row.conditions ?? {}) as Record<string, unknown>;
+  if (row.type === "bonus" && conditions.kind !== "weekly_hours_threshold") {
+    return null;
+  }
   const calculation = (row.calculation ?? {}) as Record<string, unknown>;
   const multiplier = String(calculation.multiplier ?? "1");
   const parseHour = (value: unknown, fallback: number) => {
@@ -135,7 +149,7 @@ function parseRule(row: typeof rateRules.$inferSelect): PayrollRateRule | null {
   };
   return {
     id: row.id,
-    type: row.type as PayrollRateRule["type"],
+    type: row.type === "bonus" ? "weekly_bonus" : row.type as PayrollRateRule["type"],
     priority: row.priority,
     multiplier,
     stack: calculation.stack === true,
@@ -147,6 +161,18 @@ function parseRule(row: typeof rateRules.$inferSelect): PayrollRateRule | null {
       : {}),
     ...(row.type === "overtime" && typeof conditions.thresholdSeconds === "number"
       ? { thresholdSeconds: conditions.thresholdSeconds }
+      : {}),
+    ...(row.type === "bonus"
+      ? {
+          thresholdSeconds:
+            typeof conditions.thresholdSeconds === "number"
+              ? conditions.thresholdSeconds
+              : 108_000,
+          rewardSeconds:
+            typeof calculation.rewardSeconds === "number"
+              ? calculation.rewardSeconds
+              : 18_000,
+        }
       : {}),
     ...(row.type === "holiday" && Array.isArray(conditions.dates)
       ? { holidayDates: conditions.dates.filter((item): item is string => typeof item === "string") }
@@ -187,7 +213,9 @@ function payableIntervals(
         startAt: interval.startAt,
         endAt: new Date(interval.startAt.getTime() + seconds * 1_000),
         approvalStatus:
-          session.approvalStatus === "approved" ? "approved" : "pending_review",
+          session.approvalStatus === "approved" || session.approvalStatus === "locked"
+            ? "approved"
+            : "pending_review",
       });
       remaining -= seconds;
     }
@@ -289,6 +317,7 @@ export class PayrollService {
   ) {
     const startsAt = zonedMonthBoundary(organization.timezone, 0);
     const endsAt = zonedMonthBoundary(organization.timezone, 1);
+    const weeklyContextStartsAt = new Date(startsAt.getTime() - 7 * 24 * 60 * 60_000);
     const currentSessions = await this.db
       .select()
       .from(workSessions)
@@ -297,10 +326,10 @@ export class PayrollService {
           eq(workSessions.organizationId, actor.organizationId),
           eq(workSessions.membershipId, actor.membershipId),
           eq(workSessions.recordKind, "fact"),
-          inArray(workSessions.approvalStatus, ["approved", "pending_review"]),
+          inArray(workSessions.approvalStatus, ["approved", "pending_review", "locked"]),
           isNull(workSessions.deletedAt),
           lt(workSessions.startAt, endsAt),
-          gt(workSessions.endAt, startsAt),
+          gt(workSessions.endAt, weeklyContextStartsAt),
         ),
       );
     const currentSessionIds = currentSessions.map((session) => session.id);
@@ -320,10 +349,15 @@ export class PayrollService {
         entry,
       ]);
     }
-    const intervals = clipPayableIntervals(
+    const weeklyContextIntervals = clipPayableIntervals(
       currentSessions.flatMap((session) =>
         payableIntervals(session, currentBreaksBySession.get(session.id) ?? []),
       ),
+      weeklyContextStartsAt,
+      endsAt,
+    );
+    const intervals = clipPayableIntervals(
+      weeklyContextIntervals,
       startsAt,
       endsAt,
     );
@@ -350,6 +384,8 @@ export class PayrollService {
     const version = currentPlan.version;
     let estimatedAmount: string;
     let needsReview = false;
+    let weeklyBonusSeconds = 0;
+    let weeklyBonusEstimatedSeconds = 0;
     if (version.type === "hourly" || version.type === "hybrid") {
       const currentRules = await this.db
         .select()
@@ -360,12 +396,20 @@ export class PayrollService {
         hourlyRate: version.baseAmount,
         timezone: organization.timezone,
         intervals,
+        weeklyContextIntervals,
+        weeklyBonusEligibilityIntervals: clipPayableIntervals(
+          intervals,
+          version.effectiveFrom > startsAt ? version.effectiveFrom : startsAt,
+          endsAt,
+        ),
         rules: currentRules
           .map(parseRule)
           .filter((rule): rule is PayrollRateRule => Boolean(rule)),
         includePendingAsEstimate: version.pendingReviewCountsInEstimate,
       });
       estimatedAmount = hourly.grossAmount;
+      weeklyBonusSeconds = hourly.weeklyBonusSeconds;
+      weeklyBonusEstimatedSeconds = hourly.weeklyBonusEstimatedSeconds;
       if (version.type === "hybrid") {
         const fixedAmount = (version.config as Record<string, unknown>)
           .fixedAmount;
@@ -404,6 +448,8 @@ export class PayrollService {
       baseAmount: version.baseAmount,
       approvedSeconds,
       pendingSeconds,
+      weeklyBonusSeconds,
+      weeklyBonusEstimatedSeconds,
       estimatedAmount,
       includesPending: version.pendingReviewCountsInEstimate,
       needsReview,
@@ -701,17 +747,25 @@ export class PayrollService {
         await tx.insert(rateRules).values(
           input.rules.map((rule) => ({
             compensationPlanVersionId: version.id,
-            type: rule.type,
+            type: rule.type === "weekly_bonus" ? ("bonus" as const) : rule.type,
             priority: rule.priority,
             conditions:
               rule.type === "night_window"
                 ? { start: `${rule.startHour ?? 22}:00`, end: `${rule.endHour ?? 6}:00` }
                 : rule.type === "overtime"
                   ? { thresholdSeconds: rule.thresholdSeconds ?? 28_800 }
+                  : rule.type === "weekly_bonus"
+                    ? {
+                        kind: "weekly_hours_threshold",
+                        thresholdSeconds: rule.thresholdSeconds ?? 108_000,
+                      }
                   : rule.type === "holiday"
                     ? { dates: rule.holidayDates ?? [] }
                     : {},
-            calculation: { multiplier: rule.multiplier, stack: false },
+            calculation:
+              rule.type === "weekly_bonus"
+                ? { rewardSeconds: rule.rewardSeconds ?? 18_000 }
+                : { multiplier: rule.multiplier, stack: false },
           })),
         );
       }
@@ -816,21 +870,27 @@ export class PayrollService {
       );
     if (planRows.length === 0) throw new PayrollConflictError("当前周期没有生效的薪资方案。")
 
-    const sessions = await this.db
+    const weeklyContextStartsAt = new Date(
+      period.startsAt.getTime() - 7 * 24 * 60 * 60_000,
+    );
+    const contextSessions = await this.db
       .select()
       .from(workSessions)
       .where(
         and(
           eq(workSessions.organizationId, actor.organizationId),
           lt(workSessions.startAt, period.endsAt),
-          gt(workSessions.endAt, period.startsAt),
+          gt(workSessions.endAt, weeklyContextStartsAt),
           eq(workSessions.recordKind, "fact"),
-          inArray(workSessions.approvalStatus, ["approved", "pending_review"]),
+          inArray(workSessions.approvalStatus, ["approved", "pending_review", "locked"]),
           isNull(workSessions.deletedAt),
         ),
       )
       .orderBy(workSessions.membershipId, workSessions.startAt);
-    const sessionIds = sessions.map((session) => session.id);
+    const sessions = contextSessions.filter(
+      (session) => session.startAt < period.endsAt && session.endAt > period.startsAt,
+    );
+    const sessionIds = contextSessions.map((session) => session.id);
     const breaks =
       sessionIds.length > 0
         ? await this.db
@@ -896,13 +956,18 @@ export class PayrollService {
     }
 
     const calculatedItems = [...groupedPlans.values()].map(({ plan, versions }) => {
-      const memberSessions = sessions.filter(
+      const memberSessions = contextSessions.filter(
         (session) => session.membershipId === plan.membershipId,
       );
-      const intervals = clipPayableIntervals(
+      const weeklyContextIntervals = clipPayableIntervals(
         memberSessions.flatMap((session) =>
           payableIntervals(session, breaksBySession.get(session.id) ?? []),
         ),
+        weeklyContextStartsAt,
+        period.endsAt,
+      );
+      const intervals = clipPayableIntervals(
+        weeklyContextIntervals,
         period.startsAt,
         period.endsAt,
       );
@@ -925,7 +990,7 @@ export class PayrollService {
       let estimate = false;
       let needsReview = false;
       const components: Array<{
-        type: "base" | "weekday" | "weekend" | "holiday" | "night" | "overtime" | "project";
+        type: "base" | "weekday" | "weekend" | "holiday" | "night" | "overtime" | "project" | "bonus";
         label: string;
         amount: string;
         planVersionId: string;
@@ -943,6 +1008,7 @@ export class PayrollService {
       const periodSeconds = Math.floor(
         (period.endsAt.getTime() - period.startsAt.getTime()) / 1_000,
       );
+      const awardedWeeklyBonusWeeks = new Set<string>();
 
       for (const version of orderedVersions) {
         const segmentStart =
@@ -965,10 +1031,18 @@ export class PayrollService {
             hourlyRate: version.baseAmount,
             timezone: period.timezone,
             intervals: versionIntervals,
+            // Every version sees the final approved/pending state for the
+            // whole natural week. Eligibility is still constrained by
+            // `versionIntervals`, so a rule cannot award before it became
+            // effective, while an early estimated crossing cannot mask a
+            // later fully-approved crossing in another version segment.
+            weeklyContextIntervals,
+            excludedWeeklyBonusWeekStarts: [...awardedWeeklyBonusWeeks],
             rules: rulesByVersion.get(version.id) ?? [],
             includePendingAsEstimate: version.pendingReviewCountsInEstimate,
           });
           grossAmount = addDecimalAmounts(grossAmount, hourly.grossAmount);
+          hourly.weeklyBonusWeekStarts.forEach((week) => awardedWeeklyBonusWeeks.add(week));
           estimate ||= hourly.estimate;
           components.push(
             ...hourly.components.map((component) => ({
@@ -1106,11 +1180,13 @@ export class PayrollService {
     });
 
     const snapshotPayload = {
-      calculationVersion: "payroll-engine-v2-daily-trace",
+      calculationVersion: "payroll-engine-v3-weekly-bonus",
       period,
       plans: planRows,
       rules,
       sessions,
+      weeklyContextStartsAt,
+      weeklyContextSessions: contextSessions,
       breaks,
       adjustments,
       calculatedItems,
@@ -1140,7 +1216,7 @@ export class PayrollService {
           status: calculatedItems.some((item) => item.needsReview)
             ? "review_required"
             : "ready",
-          calculationVersion: "payroll-engine-v2-daily-trace",
+          calculationVersion: "payroll-engine-v3-weekly-bonus",
           requestedBy: actor.membershipId,
           inputHash,
           startedAt: new Date(),

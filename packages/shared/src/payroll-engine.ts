@@ -3,7 +3,13 @@ export type PayrollRuleKind =
   | "weekend"
   | "holiday"
   | "night_window"
-  | "overtime";
+  | "overtime"
+  | "weekly_bonus";
+
+export type PayrollComponentType =
+  | Exclude<PayrollRuleKind, "weekly_bonus">
+  | "base"
+  | "bonus";
 
 export interface PayrollRateRule {
   id: string;
@@ -14,6 +20,7 @@ export interface PayrollRateRule {
   startHour?: number;
   endHour?: number;
   thresholdSeconds?: number;
+  rewardSeconds?: number;
   holidayDates?: string[];
 }
 
@@ -25,7 +32,7 @@ export interface PayableInterval {
 }
 
 export interface PayrollComponentResult {
-  type: PayrollRuleKind | "base";
+  type: PayrollComponentType;
   label: string;
   sourceIds: string[];
   seconds: number;
@@ -37,12 +44,20 @@ export interface PayrollComponentResult {
     ruleIds: string[];
     timezone: string;
     date: string;
+    weekStartDate?: string;
+    thresholdSeconds?: number;
+    rewardSeconds?: number;
+    earnedAt?: string;
+    actualSeconds?: number;
   };
 }
 
 export interface PayrollCalculationResult {
   approvedSeconds: number;
   pendingSeconds: number;
+  weeklyBonusSeconds: number;
+  weeklyBonusEstimatedSeconds: number;
+  weeklyBonusWeekStarts: string[];
   grossAmount: string;
   estimate: boolean;
   components: PayrollComponentResult[];
@@ -186,10 +201,80 @@ interface MutableComponent {
   ruleIds: string[];
 }
 
+interface WeeklyThresholdCrossing {
+  weekStartDate: string;
+  date: string;
+  earnedAt: Date;
+  sourceId: string;
+  sourceIds: Set<string>;
+  actualSeconds: number;
+}
+
+function weekStartDate(date: string): string {
+  const [year, month, day] = date.split("-").map(Number);
+  const value = new Date(Date.UTC(year!, month! - 1, day));
+  const daysSinceMonday = (value.getUTCDay() + 6) % 7;
+  value.setUTCDate(value.getUTCDate() - daysSinceMonday);
+  return value.toISOString().slice(0, 10);
+}
+
+function weeklyThresholdCrossings(
+  intervals: readonly PayableInterval[],
+  timezone: string,
+  thresholdSeconds: number,
+): Map<string, WeeklyThresholdCrossing> {
+  const cumulativeByWeek = new Map<string, number>();
+  const sourceIdsByWeek = new Map<string, Set<string>>();
+  const crossings = new Map<string, WeeklyThresholdCrossing>();
+  for (const interval of [...intervals].sort(
+    (left, right) => left.startAt.getTime() - right.startAt.getTime(),
+  )) {
+    if (interval.endAt <= interval.startAt) {
+      throw new RangeError("Payroll intervals must have a positive duration");
+    }
+    let cursor = new Date(interval.startAt);
+    while (cursor < interval.endAt) {
+      const nextMinute = new Date(
+        Math.min(
+          interval.endAt.getTime(),
+          Math.floor(cursor.getTime() / 60_000) * 60_000 + 60_000,
+        ),
+      );
+      const seconds = Math.ceil((nextMinute.getTime() - cursor.getTime()) / 1_000);
+      if (seconds <= 0) break;
+      const parts = localParts(cursor, timezone);
+      const week = weekStartDate(parts.date);
+      const cumulative = cumulativeByWeek.get(week) ?? 0;
+      const sourceIds = sourceIdsByWeek.get(week) ?? new Set<string>();
+      sourceIds.add(interval.sourceId);
+      sourceIdsByWeek.set(week, sourceIds);
+      if (!crossings.has(week) && cumulative + seconds > thresholdSeconds) {
+        const earnedAt = new Date(
+          cursor.getTime() + Math.max(0, thresholdSeconds - cumulative) * 1_000,
+        );
+        crossings.set(week, {
+          weekStartDate: week,
+          date: localParts(earnedAt, timezone).date,
+          earnedAt,
+          sourceId: interval.sourceId,
+          sourceIds: new Set(sourceIds),
+          actualSeconds: cumulative + seconds,
+        });
+      }
+      cumulativeByWeek.set(week, cumulative + seconds);
+      cursor = nextMinute;
+    }
+  }
+  return crossings;
+}
+
 export function calculateHourlyPayroll(input: {
   hourlyRate: string;
   timezone: string;
   intervals: readonly PayableInterval[];
+  weeklyContextIntervals?: readonly PayableInterval[];
+  weeklyBonusEligibilityIntervals?: readonly PayableInterval[];
+  excludedWeeklyBonusWeekStarts?: readonly string[];
   rules: readonly PayrollRateRule[];
   includePendingAsEstimate: boolean;
 }): PayrollCalculationResult {
@@ -271,7 +356,10 @@ export function calculateHourlyPayroll(input: {
           : segmentSeconds;
 
         const appliedRules = [calendarRule, nightRule, overtimeRule].filter(
-          (rule): rule is PayrollRateRule => Boolean(rule),
+          (
+            rule,
+          ): rule is PayrollRateRule & { type: Exclude<PayrollRuleKind, "weekly_bonus"> } =>
+            Boolean(rule) && rule?.type !== "weekly_bonus",
         );
         let selectedType: PayrollComponentResult["type"] = "base";
         let multiplierMicros = SCALE;
@@ -328,7 +416,7 @@ export function calculateHourlyPayroll(input: {
     }
   }
 
-  const resultComponents = [...components.values()].map((component) => ({
+  const resultComponents: PayrollComponentResult[] = [...components.values()].map((component) => ({
     type: component.type,
     label: component.label,
     sourceIds: [...component.sourceIds],
@@ -345,6 +433,81 @@ export function calculateHourlyPayroll(input: {
       date: component.date,
     },
   }));
+  let weeklyBonusSeconds = 0;
+  let weeklyBonusEstimatedSeconds = 0;
+  const weeklyBonusWeekStarts: string[] = [];
+  const excludedWeeks = new Set(input.excludedWeeklyBonusWeekStarts ?? []);
+  const weeklyContext = input.weeklyContextIntervals ?? input.intervals;
+  const weeklyBonusEligibility =
+    input.weeklyBonusEligibilityIntervals ?? input.intervals;
+  const approvedContext = weeklyContext.filter(
+    (interval) => interval.approvalStatus === "approved",
+  );
+  const combinedContext = weeklyContext.filter(
+    (interval) =>
+      interval.approvalStatus === "approved" || input.includePendingAsEstimate,
+  );
+  for (const rule of input.rules
+    .filter((candidate) => candidate.type === "weekly_bonus")
+    .sort((left, right) => right.priority - left.priority)
+    .slice(0, 1)) {
+    const thresholdSeconds = rule.thresholdSeconds ?? 108_000;
+    const rewardSeconds = rule.rewardSeconds ?? 18_000;
+    if (thresholdSeconds <= 0 || rewardSeconds <= 0) continue;
+    const approvedCrossings = weeklyThresholdCrossings(
+      approvedContext,
+      input.timezone,
+      thresholdSeconds,
+    );
+    const combinedCrossings = input.includePendingAsEstimate
+      ? weeklyThresholdCrossings(combinedContext, input.timezone, thresholdSeconds)
+      : new Map<string, WeeklyThresholdCrossing>();
+    const weeks = new Set([...approvedCrossings.keys(), ...combinedCrossings.keys()]);
+    for (const week of [...weeks].sort()) {
+      if (excludedWeeks.has(week)) continue;
+      const approvedCrossing = approvedCrossings.get(week);
+      const crossing = approvedCrossing ?? combinedCrossings.get(week);
+      if (!crossing) continue;
+      const belongsToCalculation = weeklyBonusEligibility.some(
+        (interval) =>
+          interval.sourceId === crossing.sourceId &&
+          crossing.earnedAt >= interval.startAt &&
+          crossing.earnedAt < interval.endAt &&
+          (approvedCrossing !== undefined || input.includePendingAsEstimate),
+      );
+      if (!belongsToCalculation) continue;
+      const estimate = approvedCrossing === undefined;
+      const amount = formatDecimal(
+        divideRounded(
+          rateMicros * SCALE * BigInt(rewardSeconds),
+          SCALE * SECONDS_PER_HOUR,
+        ),
+      );
+      resultComponents.push({
+        type: "bonus",
+        label: "周超时奖励",
+        sourceIds: [...crossing.sourceIds],
+        seconds: rewardSeconds,
+        hourlyRate: input.hourlyRate,
+        multiplier: "1.000000",
+        amount,
+        estimate,
+        trace: {
+          ruleIds: [rule.id],
+          timezone: input.timezone,
+          date: crossing.date,
+          weekStartDate: crossing.weekStartDate,
+          thresholdSeconds,
+          rewardSeconds,
+          earnedAt: crossing.earnedAt.toISOString(),
+          actualSeconds: crossing.actualSeconds,
+        },
+      });
+      weeklyBonusWeekStarts.push(week);
+      if (estimate) weeklyBonusEstimatedSeconds += rewardSeconds;
+      else weeklyBonusSeconds += rewardSeconds;
+    }
+  }
   const grossAmount = resultComponents.reduce(
     (total, component) => total + parseDecimal(component.amount),
     0n,
@@ -352,8 +515,11 @@ export function calculateHourlyPayroll(input: {
   return {
     approvedSeconds,
     pendingSeconds,
+    weeklyBonusSeconds,
+    weeklyBonusEstimatedSeconds,
+    weeklyBonusWeekStarts,
     grossAmount: formatDecimal(grossAmount),
-    estimate: pendingSeconds > 0,
+    estimate: pendingSeconds > 0 || weeklyBonusEstimatedSeconds > 0,
     components: resultComponents,
   };
 }

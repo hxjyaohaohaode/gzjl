@@ -6847,6 +6847,8 @@ interface PayrollOwnResponse {
     baseAmount: string;
     approvedSeconds: number;
     pendingSeconds: number;
+    weeklyBonusSeconds: number;
+    weeklyBonusEstimatedSeconds: number;
     estimatedAmount: string;
     includesPending: boolean;
     needsReview: boolean;
@@ -6890,12 +6892,13 @@ interface PayrollManagementOverview {
       };
       rules: Array<{
         id: string;
-        type: "weekday" | "weekend" | "holiday" | "night_window" | "overtime";
+        type: "weekday" | "weekend" | "holiday" | "night_window" | "overtime" | "weekly_bonus";
         priority: number;
         multiplier: string;
         startHour?: number;
         endHour?: number;
         thresholdSeconds?: number;
+        rewardSeconds?: number;
         holidayDates?: string[];
       }>;
     };
@@ -6993,6 +6996,9 @@ function PayrollManagementPanel() {
     overtimeEnabled: false,
     overtimeMultiplier: "1.5",
     overtimeHours: 8,
+    weeklyBonusEnabled: false,
+    weeklyBonusThresholdHours: 30,
+    weeklyBonusRewardHours: 5,
   }));
   const [periodForm, setPeriodForm] = useState(() => {
     const current = new Date();
@@ -7068,6 +7074,7 @@ function PayrollManagementPanel() {
     const holidayRule = selectedRules.find((item) => item.type === "holiday");
     const nightRule = selectedRules.find((item) => item.type === "night_window");
     const overtimeRule = selectedRules.find((item) => item.type === "overtime");
+    const weeklyBonusRule = selectedRules.find((item) => item.type === "weekly_bonus");
     setPlanForm((current) => ({
       ...current,
       name: selected?.plan?.plan.name ?? "主薪资方案",
@@ -7091,6 +7098,9 @@ function PayrollManagementPanel() {
       overtimeEnabled: Boolean(overtimeRule),
       overtimeMultiplier: overtimeRule?.multiplier ?? "1.5",
       overtimeHours: (overtimeRule?.thresholdSeconds ?? 28_800) / 3_600,
+      weeklyBonusEnabled: Boolean(weeklyBonusRule),
+      weeklyBonusThresholdHours: (weeklyBonusRule?.thresholdSeconds ?? 108_000) / 3_600,
+      weeklyBonusRewardHours: (weeklyBonusRule?.rewardSeconds ?? 18_000) / 3_600,
       effectiveFrom: localInput(new Date(Date.now() + 60_000)),
     }));
   };
@@ -7137,8 +7147,16 @@ function PayrollManagementPanel() {
               thresholdSeconds: Math.round(planForm.overtimeHours * 3_600),
             }]
           : []),
+        ...(planForm.weeklyBonusEnabled && ["hourly", "hybrid"].includes(planForm.type)
+          ? [{
+              type: "weekly_bonus",
+              priority: 400,
+              thresholdSeconds: Math.round(planForm.weeklyBonusThresholdHours * 3_600),
+              rewardSeconds: Math.round(planForm.weeklyBonusRewardHours * 3_600),
+            }]
+          : []),
       ];
-      return api(`/api/payroll/members/${selectedMemberId}/plan`, {
+      return api<{ result: { version: { effectiveFrom: string } } }>(`/api/payroll/members/${selectedMemberId}/plan`, {
         method: "PUT",
         body: {
           name: planForm.name,
@@ -7152,7 +7170,14 @@ function PayrollManagementPanel() {
         },
       });
     },
-    onSuccess: refresh,
+    onSuccess: async (response) => {
+      const savedEffectiveAt = new Date(response.result.version.effectiveFrom).getTime();
+      setPlanForm((current) => ({
+        ...current,
+        effectiveFrom: localInput(new Date(Math.max(Date.now(), savedEffectiveAt) + 60_000)),
+      }));
+      await refresh();
+    },
   });
   const createPeriod = useMutation({
     mutationFn: () =>
@@ -7195,9 +7220,10 @@ function PayrollManagementPanel() {
             <Badge tone="info">{currentTeamPayroll.length} 人</Badge>
           </CardHeader>
           <CardContent>
-            <div className="mb-4 grid gap-3 sm:grid-cols-3">
+            <div className="mb-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
               <StatusLine label="已批准工时" value={formatDuration(currentTeamPayroll.reduce((sum, record) => sum + record.preview.approvedSeconds, 0))} />
               <StatusLine label="待审核工时" value={formatDuration(currentTeamPayroll.reduce((sum, record) => sum + record.preview.pendingSeconds, 0))} />
+              <StatusLine label="周奖励工时" value={formatDuration(currentTeamPayroll.reduce((sum, record) => sum + (record.preview.weeklyBonusSeconds ?? 0) + (record.preview.weeklyBonusEstimatedSeconds ?? 0), 0))} />
               <StatusLine label="本月预估金额" value={formatPayrollMoney(currentTeamPayroll[0]!.preview.currency, String(currentTeamPayroll.reduce((sum, record) => sum + Number(record.preview.estimatedAmount), 0)))} />
             </div>
             <AnalyticsChart ariaLabel="团队成员薪资对比" option={teamPayrollOption} />
@@ -7245,7 +7271,16 @@ function PayrollManagementPanel() {
               </select>
             </Field>
             <Field label="计薪类型">
-              <select className={fieldClass} onChange={(event) => setPlanForm({ ...planForm, type: event.target.value as CompensationPlanType })} value={planForm.type}>
+              <select className={fieldClass} onChange={(event) => {
+                const type = event.target.value as CompensationPlanType;
+                setPlanForm({
+                  ...planForm,
+                  type,
+                  weeklyBonusEnabled: ["hourly", "hybrid"].includes(type)
+                    ? planForm.weeklyBonusEnabled
+                    : false,
+                });
+              }} value={planForm.type}>
                 {Object.entries(compensationTypeLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
               </select>
             </Field>
@@ -7292,6 +7327,51 @@ function PayrollManagementPanel() {
                 <span className="flex items-center gap-2 font-semibold"><input checked={planForm.overtimeEnabled} onChange={(event) => setPlanForm({ ...planForm, overtimeEnabled: event.target.checked })} type="checkbox" />超过 8 小时倍率</span>
                 <input className={`${fieldClass} mt-2`} disabled={!planForm.overtimeEnabled} min="0" onChange={(event) => setPlanForm({ ...planForm, overtimeMultiplier: event.target.value })} step="0.01" type="number" value={planForm.overtimeMultiplier} />
               </label>
+              <div className="rounded-xl bg-[var(--accent-soft)] p-3 text-sm md:col-span-2 xl:col-span-5">
+                <label className="flex items-center gap-2 font-semibold">
+                  <input
+                    aria-label="启用周超时奖励"
+                    checked={planForm.weeklyBonusEnabled}
+                    disabled={!["hourly", "hybrid"].includes(planForm.type)}
+                    onChange={(event) => setPlanForm({ ...planForm, weeklyBonusEnabled: event.target.checked })}
+                    type="checkbox"
+                  />
+                  周超时奖励
+                </label>
+                <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                  <label>
+                    <span className="mb-1 block text-xs text-[var(--text-muted)]">每周超过（小时）</span>
+                    <input
+                      aria-label="周超时阈值（小时）"
+                      className={fieldClass}
+                      disabled={!planForm.weeklyBonusEnabled}
+                      max="168"
+                      min="0.016667"
+                      onChange={(event) => setPlanForm({ ...planForm, weeklyBonusThresholdHours: Number(event.target.value) })}
+                      required={planForm.weeklyBonusEnabled}
+                      step="any"
+                      type="number"
+                      value={planForm.weeklyBonusThresholdHours}
+                    />
+                  </label>
+                  <label>
+                    <span className="mb-1 block text-xs text-[var(--text-muted)]">奖励计薪时长（小时）</span>
+                    <input
+                      aria-label="周超时奖励时长（小时）"
+                      className={fieldClass}
+                      disabled={!planForm.weeklyBonusEnabled}
+                      max="168"
+                      min="0.016667"
+                      onChange={(event) => setPlanForm({ ...planForm, weeklyBonusRewardHours: Number(event.target.value) })}
+                      required={planForm.weeklyBonusEnabled}
+                      step="any"
+                      type="number"
+                      value={planForm.weeklyBonusRewardHours}
+                    />
+                  </label>
+                </div>
+                <p className="mt-2 text-xs text-[var(--text-muted)]">按组织时区的周一至周日计算；严格超过阈值后，每人每周奖励一次。</p>
+              </div>
             </div>
             <div className="xl:col-span-4 flex flex-wrap items-center gap-3">
               <Button disabled={!selectedMemberId || savePlan.isPending} type="submit">{savePlan.isPending ? "正在保存版本…" : "保存薪资方案新版本"}</Button>
@@ -7519,9 +7599,10 @@ export function PayrollPage({ me }: { me: Me }) {
       />
       {isPayrollManager ? <PayrollManagementPanel /> : null}
       {!isPayrollManager && payroll.data?.livePreview ? (
-        <section className="mb-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4" aria-label="本月实时薪资">
+        <section className="mb-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-5" aria-label="本月实时薪资">
           <Card><CardContent><StatusLine label={compensationTypeLabels[payroll.data.livePreview.planType]} value={`${money(payroll.data.livePreview.currency, payroll.data.livePreview.baseAmount)}${payroll.data.livePreview.planType === "hourly" || payroll.data.livePreview.planType === "hybrid" ? " / 小时" : ""}`} /></CardContent></Card>
           <Card><CardContent><StatusLine label="本月有效工时" value={formatDuration(payroll.data.livePreview.approvedSeconds + payroll.data.livePreview.pendingSeconds)} /></CardContent></Card>
+          <Card><CardContent><StatusLine label={payroll.data.livePreview.weeklyBonusEstimatedSeconds ? "周奖励工时（含预估）" : "周奖励工时"} value={formatDuration((payroll.data.livePreview.weeklyBonusSeconds ?? 0) + (payroll.data.livePreview.weeklyBonusEstimatedSeconds ?? 0))} /></CardContent></Card>
           <Card><CardContent><StatusLine label="本月实时预估" value={money(payroll.data.livePreview.currency, payroll.data.livePreview.estimatedAmount)} /></CardContent></Card>
           <Card><CardContent><StatusLine label="预计发薪" value={formatDateTime(payroll.data.livePreview.period.cutoffAt)} /></CardContent></Card>
         </section>
@@ -7605,7 +7686,7 @@ export function PayrollPage({ me }: { me: Me }) {
               <div className="mt-5 divide-y divide-[var(--border)]">
                 {selected.components.map((component) => (
                   <div className="flex items-center justify-between gap-4 py-3 text-sm" key={component.id}>
-                    <div><p className="font-semibold">{component.label}</p><p className="text-xs text-[var(--text-muted)]">{component.quantity ? `${Number(component.quantity).toLocaleString("zh-CN")} ${component.unit ?? ""}` : component.type}{component.multiplier ? ` · ${Number(component.multiplier)}×` : ""}</p></div>
+                    <div><p className="font-semibold">{component.label}</p><p className="text-xs text-[var(--text-muted)]">{component.quantity ? component.unit === "second" ? formatDuration(Number(component.quantity)) : `${Number(component.quantity).toLocaleString("zh-CN")} ${component.unit ?? ""}` : component.type}{component.multiplier ? ` · ${Number(component.multiplier)}×` : ""}</p></div>
                     <strong className="tabular-nums">{money(selected.item.currency, component.amount)}</strong>
                   </div>
                 ))}
