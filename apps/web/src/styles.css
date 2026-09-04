@@ -1295,10 +1295,7 @@ input[type="file"]::file-selector-button {
 .ai-workspace {
   display: grid;
   gap: 1.25rem;
-  grid-template-columns: minmax(13.75rem, 0.65fr) minmax(0, 1.55fr) minmax(
-      15rem,
-      0.7fr
-    );
+  grid-template-columns: minmax(13.75rem, 0.52fr) minmax(0, 2fr);
 }
 
 .ai-history,
@@ -1455,9 +1452,52 @@ input[type="file"]::file-selector-button {
   white-space: nowrap;
 }
 
+.ai-provider-check {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.45rem 0.75rem;
+  border-radius: 0.8rem;
+  background: color-mix(in srgb, var(--surface-subtle) 72%, transparent);
+  padding: 0.7rem 0.8rem;
+}
+
+.ai-provider-check strong,
+.ai-provider-check span,
+.ai-provider-check small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-provider-check strong {
+  font-size: 0.76rem;
+}
+
+.ai-provider-check span,
+.ai-provider-check small {
+  color: var(--text-subtle);
+  font-size: 0.68rem;
+}
+
+.ai-provider-check small {
+  grid-column: 2 / -1;
+  white-space: normal;
+}
+
 @media (max-width: 760px) {
   .ai-settings-status-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .ai-provider-check {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .ai-provider-check span,
+  .ai-provider-check small {
+    grid-column: 2;
   }
 }
 
@@ -5151,6 +5191,8 @@ body {
 .metric-card,
 .analytics-chart-card,
 .ai-report-card,
+.ai-chat-card,
+.ai-compose-card,
 .ai-settings-card,
 .calendar-audit-card,
 .project-card {
@@ -5183,7 +5225,11 @@ body {
 
 @media (max-width: 640px) {
   .app-main {
-    padding-block: 1rem !important;
+    padding-top: 1rem !important;
+    /* Do not let the compact mobile spacing override the fixed-navigation
+     * safety area declared above. The prior padding-block shorthand made the
+     * last actionable control intermittently untappable behind the nav. */
+    padding-bottom: calc(8.5rem + env(safe-area-inset-bottom)) !important;
   }
 
   [data-ui="card-header"],

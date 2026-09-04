@@ -37,6 +37,7 @@ import {
   Suspense,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type InputHTMLAttributes,
   type ReactNode,
@@ -8790,6 +8791,19 @@ interface AiSettings {
   usage: { daily: number; monthly: number; timezone: string };
 }
 
+interface AiProviderCheck {
+  id: string;
+  source: "organization" | "deployment_default";
+  endpointHost: string;
+  model: string;
+  status: "running" | "succeeded" | "failed";
+  latencyMs: number;
+  httpStatus: number | null;
+  errorSummary: string | null;
+  providerRequestId: string | null;
+  checkedAt: string;
+}
+
 function AiSettingsPanel({ onClose }: { onClose: () => void }) {
   const settings = useQuery({
     queryKey: ["ai-settings"],
@@ -8843,6 +8857,11 @@ function AiSettingsEditor({
   onClose: () => void;
 }) {
   const queryClient = useQueryClient();
+  const checks = useQuery({
+    queryKey: ["ai-provider-checks"],
+    queryFn: () =>
+      api<{ items: AiProviderCheck[] }>("/api/ai/settings/checks"),
+  });
   const [form, setForm] = useState(() => ({
     enabled: current.enabled,
     baseUrl: current.baseUrl,
@@ -8887,6 +8906,22 @@ function AiSettingsEditor({
       });
       queryClient.setQueryData<AiSettings>(["ai-settings"], updated);
       await queryClient.invalidateQueries({ queryKey: ["ai-settings"] });
+    },
+  });
+  const checkProvider = useMutation({
+    mutationFn: () =>
+      api<{ check: AiProviderCheck }>("/api/ai/settings/check", {
+        method: "POST",
+        body: {
+          password: form.password,
+          ...(form.totpCode.trim() ? { totpCode: form.totpCode.trim() } : {}),
+        },
+      }),
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["ai-provider-checks"] }),
+        queryClient.invalidateQueries({ queryKey: ["ai-settings"] }),
+      ]);
     },
   });
   const updateNumber = (
@@ -9078,14 +9113,51 @@ function AiSettingsEditor({
               <KeyRound size={16} />
               {save.isPending ? "正在安全保存…" : "验证并保存组织配置"}
             </Button>
-            <span className="text-xs leading-5 text-[var(--text-subtle)]">
-              报告只接收服务端裁剪后的授权聚合事实，不会把原始附件或员工密码发送给模型。
-            </span>
+            <Button
+              disabled={
+                checkProvider.isPending ||
+                form.password.length < 8 ||
+                !current.usable
+              }
+              onClick={() => checkProvider.mutate()}
+              type="button"
+              variant="secondary"
+            >
+              <Bot size={16} />
+              {checkProvider.isPending ? "正在测试…" : "测试已保存配置"}
+            </Button>
           </div>
           <div className="md:col-span-2">
-            <ErrorMessage error={save.error} />
+            <ErrorMessage error={save.error ?? checkProvider.error} />
           </div>
         </form>
+        <section className="mt-5" aria-label="AI 连接测试历史">
+          <div className="flex items-center justify-between gap-3">
+            <h3 className="text-sm font-bold">连接记录</h3>
+            <span className="text-xs text-[var(--text-subtle)]">
+              测试会产生一次极小调用
+            </span>
+          </div>
+          {checks.isPending ? (
+            <div className="mt-3"><LoadingBlock /></div>
+          ) : checks.data?.items.length ? (
+            <div className="mt-3 grid gap-2">
+              {checks.data.items.map((item) => (
+                <div className="ai-provider-check" key={item.id}>
+                  <Badge tone={item.status === "succeeded" ? "positive" : item.status === "running" ? "warning" : "danger"}>
+                    {item.status === "succeeded" ? "连接成功" : item.status === "running" ? "测试中" : "连接失败"}
+                  </Badge>
+                  <strong>{item.endpointHost} · {item.model}</strong>
+                  <span>{item.latencyMs} ms · {formatDateTime(item.checkedAt)}</span>
+                  {item.errorSummary ? <small>{item.errorSummary}</small> : null}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="mt-3 text-sm text-[var(--text-muted)]">尚未测试连接。</p>
+          )}
+          <ErrorMessage error={checks.error} />
+        </section>
       </CardContent>
     </Card>
   );
@@ -9109,6 +9181,7 @@ export function AiPage({ me }: { me: Me }) {
   const [question, setQuestion] = useState("");
   const [activeReportId, setActiveReportId] = useState<string | null>(() => searchParams.get("report"));
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const chatScrollRef = useRef<HTMLDivElement | null>(null);
   // Keep one five-minute-aligned seven-day range for the lifetime of this
   // screen. A double click, reconnect, or React Query retry then resolves to
   // the same server-side job instead of paying for a nearly-identical prompt
@@ -9178,6 +9251,14 @@ export function AiPage({ me }: { me: Me }) {
         (item.job.scope.conversationId ?? "primary") === "primary",
     )
     .reverse();
+  const chatUpdateKey = chatItems
+    .map((item) => `${item.job.id}:${item.job.status}:${Boolean(item.report)}`)
+    .join("|");
+  useEffect(() => {
+    const container = chatScrollRef.current;
+    if (!container) return;
+    container.scrollTo({ top: container.scrollHeight, behavior: "smooth" });
+  }, [chatUpdateKey]);
   const selected =
     reportItems.find((item) => item.job.id === activeReportId || item.report?.id === activeReportId) ??
     reportItems[0] ??
@@ -9190,16 +9271,22 @@ export function AiPage({ me }: { me: Me }) {
         title="AI 工作洞察"
         actions={
           <>
+            <label className="sr-only" htmlFor="ai-scope">AI 分析范围</label>
+            <select
+              className={`${fieldClass} min-h-10 w-auto min-w-32`}
+              id="ai-scope"
+              onChange={(event) => setScope(event.target.value as "self" | "team")}
+              value={scope}
+            >
+              <option value="self">本人范围</option>
+              {canAnalyzeTeam ? <option value="team">团队范围</option> : null}
+            </select>
             {me.user.isOwner ? (
               <Button onClick={() => setSettingsOpen((open) => !open)} variant="secondary">
                 <Settings2 size={16} />
                 组织 AI 配置
               </Button>
             ) : null}
-            <Button disabled={create.isPending} onClick={() => create.mutate()}>
-              <Bot size={17} />
-              {create.isPending ? "正在创建…" : "立即生成洞察"}
-            </Button>
           </>
         }
       />
@@ -9257,11 +9344,11 @@ export function AiPage({ me }: { me: Me }) {
                   <p className="app-page-kicker">基于当前授权事实</p>
                   <h2 className="mt-1 text-xl font-extrabold tracking-[-0.04em]">和 AI 对话</h2>
                 </div>
-                <Badge tone="info">{scope === "team" ? "团队" : "本人"}</Badge>
+                <Badge tone="info">实时授权上下文</Badge>
               </CardHeader>
               <CardContent>
                 {chatItems.length ? (
-                  <div className="max-h-[32rem] space-y-4 overflow-y-auto pr-1" aria-live="polite">
+                  <div className="max-h-[32rem] space-y-4 overflow-y-auto pr-1" aria-live="polite" ref={chatScrollRef}>
                     {chatItems.map((item) => (
                       <div className="space-y-2" key={item.job.id}>
                         <div className="ml-auto max-w-[88%] rounded-2xl rounded-br-md bg-[var(--accent)] px-4 py-3 text-sm leading-6 text-[var(--accent-foreground)]">
@@ -9274,6 +9361,18 @@ export function AiPage({ me }: { me: Me }) {
                               : item.job.status === "cancelled"
                                 ? "本次对话已取消。"
                                 : "正在结合最新工时、成员和项目状态生成回答…")}
+                          {!item.report && ["queued", "running"].includes(item.job.status) ? (
+                            <div className="mt-2">
+                              <Button disabled={cancel.isPending} onClick={() => cancel.mutate(item.job.id)} size="compact" variant="secondary">取消</Button>
+                            </div>
+                          ) : null}
+                          {!item.report && ["failed", "cancelled"].includes(item.job.status) ? (
+                            <div className="mt-2">
+                              <Button disabled={retry.isPending} onClick={() => retry.mutate(item.job.id)} size="compact" variant="secondary">
+                                <RotateCcw size={14} />重试
+                              </Button>
+                            </div>
+                          ) : null}
                         </div>
                       </div>
                     ))}
@@ -9300,7 +9399,10 @@ export function AiPage({ me }: { me: Me }) {
                   />
                   <div className="flex flex-wrap items-center justify-between gap-3">
                     <div className="flex flex-wrap gap-2">
-                      {["总结我今天的工作", "梳理当前项目阻塞", "给出下一步优先级"].map((prompt) => (
+                      {(scope === "team"
+                        ? ["总结团队今天的进展", "梳理项目阻塞与责任人", "列出下一步协作优先级"]
+                        : ["总结我今天的工作", "梳理当前项目阻塞", "给出下一步优先级"]
+                      ).map((prompt) => (
                         <button className="rounded-lg bg-[var(--surface-subtle)] px-3 py-2 text-xs font-semibold hover:bg-[var(--accent-soft)]" key={prompt} onClick={() => setQuestion(prompt)} type="button">{prompt}</button>
                       ))}
                     </div>
@@ -9314,31 +9416,11 @@ export function AiPage({ me }: { me: Me }) {
             </Card>
             <Card className="ai-compose-card mt-5">
               <CardContent>
-                <div className="flex flex-col gap-5 sm:flex-row sm:items-start sm:justify-between">
-                  <div>
-                    <h2 className="text-xl font-extrabold tracking-[-0.04em]">
-                      快捷分析报告
-                    </h2>
-                  </div>
-                  <div className="min-w-[10rem]">
-                    <label className="app-field block">
-                      <span className="mb-1.5 block text-xs font-semibold">
-                        分析范围
-                      </span>
-                      <select
-                        className={fieldClass}
-                        onChange={(event) =>
-                          setScope(event.target.value as "self" | "team")
-                        }
-                        value={scope}
-                      >
-                        <option value="self">本人范围</option>
-                        {canAnalyzeTeam ? (
-                          <option value="team">团队授权范围</option>
-                        ) : null}
-                      </select>
-                    </label>
-                  </div>
+                <div className="flex items-start justify-between gap-3">
+                  <h2 className="text-xl font-extrabold tracking-[-0.04em]">
+                    快捷分析报告
+                  </h2>
+                  <Badge>{scope === "team" ? "团队" : "本人"}</Badge>
                 </div>
                 <div className="mt-5 flex flex-wrap items-center gap-3">
                   {aiTaskPresets
@@ -9486,44 +9568,13 @@ export function AiPage({ me }: { me: Me }) {
                       生成第一份报告
                     </Button>
                   }
-                  description="报告基于近 7 天的真实聚合事实，并在后台异步生成。"
+                  description="选择一种报告，系统会在后台整理当前授权范围内的事实。"
                   icon={<Bot />}
                   title="从一份可追溯的报告开始"
                 />
               </Card>
             )}
           </section>
-          <aside className="ai-context">
-            <Card>
-              <CardHeader>
-                <div>
-                  <h2 className="font-extrabold tracking-[-0.025em]">
-                    本次范围
-                  </h2>
-                </div>
-              </CardHeader>
-              <CardContent>
-                <div className="ai-context-line">
-                  <p className="text-xs font-semibold text-[var(--text-muted)]">
-                    当前范围
-                  </p>
-                  <p className="mt-1 text-sm font-bold">
-                    {scope === "team" ? "团队授权范围" : "本人范围"}
-                  </p>
-                </div>
-                <div className="ai-context-line">
-                  <p className="text-xs font-semibold text-[var(--text-muted)]">
-                    所选报告来源
-                  </p>
-                  <p className="mt-1 text-sm font-bold">
-                    {selectedReport
-                      ? `${selectedReport.sourceCount} 个授权来源`
-                      : "尚未生成"}
-                  </p>
-                </div>
-              </CardContent>
-            </Card>
-          </aside>
         </div>
       )}
       <div className="mt-4">
@@ -9543,7 +9594,7 @@ function InsightList({
   tone: "positive" | "danger" | "info";
 }) {
   return (
-    <div className="rounded-xl border border-[var(--border)] bg-[var(--surface-tint)] p-4">
+    <div className="rounded-xl bg-[var(--surface-tint)] p-4">
       <Badge tone={tone}>{title}</Badge>
       {items.length ? (
         <ul className="mt-3 space-y-2 text-sm leading-6">

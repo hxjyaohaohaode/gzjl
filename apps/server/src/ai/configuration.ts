@@ -1,6 +1,6 @@
 import { isIP } from "node:net";
 
-import { and, count, eq, gte } from "drizzle-orm";
+import { and, count, desc, eq, gte, sql } from "drizzle-orm";
 import {
   decryptSecret,
   encryptSecret,
@@ -9,6 +9,7 @@ import {
 } from "@workbench/db";
 import {
   aiJobs,
+  aiProviderChecks,
   auditLogs,
   organizationAiSettings,
   organizationOwners,
@@ -67,6 +68,24 @@ export class AiQuotaExceededError extends Error {
     super(message);
     this.name = "AiQuotaExceededError";
   }
+}
+
+export function safeAiProviderError(error: unknown): string {
+  if (error instanceof DOMException && error.name === "AbortError") {
+    return "连接超时，请检查 Base URL、网络或供应商状态。";
+  }
+  if (error instanceof Error) {
+    if (/^AI provider returned HTTP \d{3}$/.test(error.message)) {
+      return error.message.replace("AI provider returned", "供应商返回");
+    }
+    if (error.message === "AI provider returned an invalid response") {
+      return "供应商响应格式不兼容。";
+    }
+  }
+  // Network errors can contain internal socket details or a credential-bearing
+  // upstream URL.  Keep the persisted/UI message useful but deliberately
+  // generic, while normal server logs retain the original exception.
+  return "无法连接 AI 供应商，请检查地址、密钥、模型和供应商状态。";
 }
 
 function isBlockedIpv4(address: string): boolean {
@@ -191,6 +210,7 @@ export class AiConfigurationService {
   constructor(
     private readonly db: Database,
     private readonly config: ServerConfig,
+    private readonly providerFetch: typeof fetch = fetch,
   ) {}
 
   async assertOwner(actor: OrganizationAiActor): Promise<void> {
@@ -359,6 +379,159 @@ export class AiConfigurationService {
       });
     });
     return this.getSettings(actor);
+  }
+
+  async listProviderChecks(actor: OrganizationAiActor, limit = 10) {
+    await this.assertOwner(actor);
+    return this.db
+      .select({
+        id: aiProviderChecks.id,
+        source: aiProviderChecks.source,
+        endpointHost: aiProviderChecks.endpointHost,
+        model: aiProviderChecks.model,
+        status: aiProviderChecks.status,
+        latencyMs: aiProviderChecks.latencyMs,
+        httpStatus: aiProviderChecks.httpStatus,
+        errorSummary: aiProviderChecks.errorSummary,
+        providerRequestId: aiProviderChecks.providerRequestId,
+        checkedAt: aiProviderChecks.checkedAt,
+      })
+      .from(aiProviderChecks)
+      .where(eq(aiProviderChecks.organizationId, actor.organizationId))
+      .orderBy(desc(aiProviderChecks.checkedAt))
+      .limit(Math.max(1, Math.min(20, limit)));
+  }
+
+  async checkProvider(actor: OrganizationAiActor) {
+    await this.assertOwner(actor);
+    const provider = await this.resolveEffective(actor.organizationId);
+    if (!provider) {
+      throw new AiConfigurationError("请先启用 AI 并保存有效的 API Key。");
+    }
+    const startedAt = Date.now();
+    const endpointHost = new URL(provider.baseUrl).host;
+    // Reserve the probe before making the paid provider request. The
+    // organization-scoped transaction lock closes the multi-tab/multi-device
+    // race where two Owners (or two requests from the same Owner) could both
+    // pass a read-then-call cooldown check.
+    const reservation = await this.db.transaction(async (tx) => {
+      await tx.execute(
+        sql`select pg_advisory_xact_lock(hashtext(${actor.organizationId}))`,
+      );
+      const [latest] = await tx
+        .select({ checkedAt: aiProviderChecks.checkedAt })
+        .from(aiProviderChecks)
+        .where(eq(aiProviderChecks.organizationId, actor.organizationId))
+        .orderBy(desc(aiProviderChecks.checkedAt))
+        .limit(1);
+      if (latest && startedAt - latest.checkedAt.getTime() < 30_000) {
+        throw new AiConfigurationError("连接测试最多每 30 秒执行一次，请稍后再试。");
+      }
+      const [reserved] = await tx
+        .insert(aiProviderChecks)
+        .values({
+          organizationId: actor.organizationId,
+          requestedBy: actor.membershipId,
+          source: provider.source,
+          endpointHost,
+          model: provider.model,
+          status: "running",
+          latencyMs: 0,
+          checkedAt: new Date(startedAt),
+        })
+        .returning({ id: aiProviderChecks.id });
+      if (!reserved) throw new Error("Failed to reserve AI provider check");
+      return reserved;
+    });
+
+    const controller = new AbortController();
+    const timeout = setTimeout(
+      () => controller.abort(),
+      Math.min(this.config.AI_REQUEST_TIMEOUT_MS, 30_000),
+    );
+    let status: "succeeded" | "failed" = "failed";
+    let httpStatus: number | null = null;
+    let providerRequestId: string | null = null;
+    let errorSummary: string | null = null;
+    try {
+      const response = await this.providerFetch(
+        `${provider.baseUrl.replace(/\/$/, "")}/chat/completions`,
+        {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${provider.apiKey}`,
+            "content-type": "application/json",
+          },
+          signal: controller.signal,
+          body: JSON.stringify({
+            model: provider.model,
+            temperature: 0,
+            max_tokens: 8,
+            messages: [
+              {
+                role: "user",
+                content: "这是一次连接测试。只回复 OK。",
+              },
+            ],
+          }),
+        },
+      );
+      httpStatus = response.status;
+      if (!response.ok) {
+        throw new Error(`AI provider returned HTTP ${response.status}`);
+      }
+      const raw = await response.text();
+      if (raw.length > 262_144) {
+        throw new Error("AI provider returned an invalid response");
+      }
+      const payload = JSON.parse(raw) as {
+        id?: unknown;
+        choices?: Array<{ message?: { content?: unknown } }>;
+      };
+      const content = payload.choices?.[0]?.message?.content;
+      if (typeof content !== "string" || !content.trim()) {
+        throw new Error("AI provider returned an invalid response");
+      }
+      providerRequestId =
+        typeof payload.id === "string" ? payload.id.slice(0, 255) : null;
+      status = "succeeded";
+    } catch (error) {
+      errorSummary = safeAiProviderError(error);
+    } finally {
+      clearTimeout(timeout);
+    }
+
+    const latencyMs = Math.max(0, Date.now() - startedAt);
+    return this.db.transaction(async (tx) => {
+      const [check] = await tx
+        .update(aiProviderChecks)
+        .set({
+          status,
+          latencyMs,
+          httpStatus,
+          errorSummary,
+          providerRequestId,
+        })
+        .where(eq(aiProviderChecks.id, reservation.id))
+        .returning();
+      if (!check) throw new Error("Failed to finish AI provider check");
+      await tx.insert(auditLogs).values({
+        organizationId: actor.organizationId,
+        actorMembershipId: actor.membershipId,
+        action: "organization.ai_provider_checked",
+        entityType: "organization",
+        entityId: actor.organizationId,
+        after: {
+          status,
+          source: provider.source,
+          endpointHost,
+          model: provider.model,
+          latencyMs,
+          httpStatus,
+        },
+      });
+      return check;
+    });
   }
 
   async assertQuota(

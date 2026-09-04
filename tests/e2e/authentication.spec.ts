@@ -1852,7 +1852,7 @@ test("AI page does not expose team analysis without an organization-scoped grant
   await expect(page.getByRole("heading", { name: "林知夏，今天好" })).toBeVisible();
   await page.goto("/ai");
   await expect(page.getByRole("combobox")).toHaveValue("self");
-  await expect(page.getByRole("option", { name: "团队授权范围" })).toHaveCount(
+  await expect(page.getByRole("option", { name: "团队范围" })).toHaveCount(
     0,
   );
 });
@@ -1872,6 +1872,70 @@ test("AI provider configuration is visible only to the unique Owner", async ({
   await expect(
     page.getByRole("button", { name: "组织 AI 配置" }),
   ).toHaveCount(0);
+});
+
+test("Owner can verify the saved AI provider and review a redacted health record", async ({
+  page,
+}) => {
+  await mockAuthenticatedWorkspace(page);
+  let checkRequest: Record<string, unknown> | null = null;
+  let checkRows: Array<Record<string, unknown>> = [];
+  await page.route("**/api/ai/reports", (route) =>
+    route.fulfill({ json: { items: [] } }),
+  );
+  await page.route("**/api/ai/settings", (route) =>
+    route.fulfill({
+      json: {
+        source: "organization",
+        enabled: true,
+        baseUrl: "https://provider.example/v1",
+        model: "safe-model",
+        hasApiKey: true,
+        encryptionReady: true,
+        usable: true,
+        dailyRequestLimit: 20,
+        monthlyRequestLimit: 300,
+        maxOutputTokens: 1_200,
+        usage: { daily: 1, monthly: 4, timezone: "Asia/Shanghai" },
+      },
+    }),
+  );
+  await page.route("**/api/ai/settings/checks", (route) =>
+    route.fulfill({ json: { items: checkRows } }),
+  );
+  await page.route("**/api/ai/settings/check", async (route) => {
+    checkRequest = route.request().postDataJSON() as Record<string, unknown>;
+    checkRows = [
+      {
+        id: "00000000-0000-4000-8000-000000000088",
+        source: "organization",
+        endpointHost: "provider.example",
+        model: "safe-model",
+        status: "succeeded",
+        latencyMs: 218,
+        httpStatus: 200,
+        errorSummary: null,
+        providerRequestId: "request-redacted",
+        checkedAt: "2026-09-04T02:00:00.000Z",
+      },
+    ];
+    await route.fulfill({ json: { check: checkRows[0] } });
+  });
+
+  await page.goto("/login");
+  await page.getByLabel("邮箱或手机号").fill("owner@example.test");
+  await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+  await page.goto("/ai");
+  await page.getByRole("button", { name: "组织 AI 配置" }).click();
+  await page.getByLabel("当前 Owner 密码").fill("Current-owner-password-123!");
+  await page.getByRole("button", { name: "测试已保存配置" }).click();
+
+  await expect.poll(() => checkRequest).not.toBeNull();
+  expect(checkRequest).toEqual({ password: "Current-owner-password-123!" });
+  await expect(page.getByText("连接成功", { exact: true })).toBeVisible();
+  await expect(page.getByText(/provider\.example · safe-model/)).toBeVisible();
+  await expect(page.getByText(/218 ms/)).toBeVisible();
 });
 
 test("AI report requests keep a stable five-minute range for cost-safe deduplication", async ({
@@ -1905,7 +1969,7 @@ test("AI report requests keep a stable five-minute range for cost-safe deduplica
   await expect(page.getByRole("heading", { name: "林知夏，今天好" })).toBeVisible();
   await page.goto("/ai");
   const generate = page.getByRole("button", {
-    name: "立即生成洞察",
+    name: "生成所选洞察",
     exact: true,
   });
   await generate.click();

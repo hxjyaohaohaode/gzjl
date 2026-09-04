@@ -87,6 +87,10 @@ const updateSettingsSchema = settingsSchema.extend({
   password: z.string().min(8).max(1_024),
   totpCode: z.string().regex(/^\d{6}$/).optional(),
 });
+const checkSettingsSchema = z.object({
+  password: z.string().min(8).max(1_024),
+  totpCode: z.string().regex(/^\d{6}$/).optional(),
+});
 
 function sendConfigurationError(error: unknown, reply: {
   code: (statusCode: number) => { send: (payload: object) => unknown };
@@ -244,6 +248,35 @@ export async function registerAiRoutes(
           input.totpCode,
         );
         return await configuration.updateSettings(request.auth!, input);
+      } catch (error) {
+        return sendConfigurationError(error, reply);
+      }
+    },
+  );
+  app.get(
+    "/api/ai/settings/checks",
+    { preHandler: authenticate },
+    async (request, reply) => {
+      try {
+        return { items: await configuration.listProviderChecks(request.auth!) };
+      } catch (error) {
+        return sendConfigurationError(error, reply);
+      }
+    },
+  );
+  app.post(
+    "/api/ai/settings/check",
+    { preHandler: [app.csrfProtection, authenticate] },
+    async (request, reply) => {
+      const input = checkSettingsSchema.parse(request.body);
+      try {
+        await configuration.assertOwner(request.auth!);
+        await authService.verifySensitiveAction(
+          request.auth!,
+          input.password,
+          input.totpCode,
+        );
+        return { check: await configuration.checkProvider(request.auth!) };
       } catch (error) {
         return sendConfigurationError(error, reply);
       }

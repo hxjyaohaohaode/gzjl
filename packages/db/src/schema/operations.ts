@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 import {
   boolean,
+  check,
   index,
   integer,
   jsonb,
@@ -125,6 +126,44 @@ export const aiReportSources = pgTable(
       table.entityType,
       table.entityId,
     ),
+  ],
+);
+
+/**
+ * Explicit, Owner-triggered provider connection checks.  This is deliberately
+ * separate from report jobs: a connectivity probe must never create a report,
+ * consume business facts, or expose the encrypted provider credential.
+ */
+export const aiProviderChecks = pgTable(
+  "ai_provider_checks",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    organizationId: uuid("organization_id")
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    requestedBy: uuid("requested_by")
+      .notNull()
+      .references(() => orgMemberships.id, { onDelete: "restrict" }),
+    source: text("source").notNull(),
+    endpointHost: text("endpoint_host").notNull(),
+    model: text("model").notNull(),
+    status: text("status").notNull(),
+    latencyMs: integer("latency_ms").notNull(),
+    httpStatus: integer("http_status"),
+    errorSummary: text("error_summary"),
+    providerRequestId: text("provider_request_id"),
+    checkedAt: timestamp("checked_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("ai_provider_checks_org_checked_idx").on(
+      table.organizationId,
+      table.checkedAt,
+    ),
+    check(
+      "ai_provider_checks_status_check",
+      sql`${table.status} in ('running', 'succeeded', 'failed')`,
+    ),
+    check("ai_provider_checks_latency_check", sql`${table.latencyMs} >= 0`),
   ],
 );
 

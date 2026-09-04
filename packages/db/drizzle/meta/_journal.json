@@ -64,6 +64,13 @@
       "when": 1788504419838,
       "tag": "0008_heavy_taskmaster",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1788514771967,
+      "tag": "0009_spooky_skin",
+      "breakpoints": true
     }
   ]
 }

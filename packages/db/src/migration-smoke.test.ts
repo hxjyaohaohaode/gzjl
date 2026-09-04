@@ -21,7 +21,29 @@ describe("generated PostgreSQL migration", () => {
       const tables = await database.query<{ count: number }>(
         "select count(*)::int as count from information_schema.tables where table_schema = 'public' and table_type = 'BASE TABLE'",
       );
-      expect(tables.rows[0]?.count).toBe(68);
+      expect(tables.rows[0]?.count).toBe(69);
+      const aiProviderCheckColumns = await database.query<{
+        column_name: string;
+        is_nullable: string;
+      }>(
+        "select column_name, is_nullable from information_schema.columns where table_schema = 'public' and table_name = 'ai_provider_checks' order by ordinal_position",
+      );
+      expect(aiProviderCheckColumns.rows.map((row) => row.column_name)).toEqual(
+        expect.arrayContaining([
+          "organization_id",
+          "requested_by",
+          "endpoint_host",
+          "model",
+          "status",
+          "latency_ms",
+          "http_status",
+          "error_summary",
+          "checked_at",
+        ]),
+      );
+      expect(
+        aiProviderCheckColumns.rows.find((row) => row.column_name === "status"),
+      ).toMatchObject({ is_nullable: "NO" });
       const planKindColumn = await database.query<{
         column_default: string | null;
         is_nullable: string;

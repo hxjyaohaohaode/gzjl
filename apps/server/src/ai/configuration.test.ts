@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   AiConfigurationError,
   normalizeAiBaseUrl,
+  safeAiProviderError,
 } from "./configuration.js";
 
 describe("organization AI base URL validation", () => {
@@ -28,6 +29,29 @@ describe("organization AI base URL validation", () => {
   ])("rejects an unsafe production target: %s", (value) => {
     expect(() => normalizeAiBaseUrl(value, "production")).toThrow(
       AiConfigurationError,
+    );
+  });
+});
+
+describe("AI provider error redaction", () => {
+  it("keeps a safe HTTP status for diagnosis", () => {
+    expect(safeAiProviderError(new Error("AI provider returned HTTP 401"))).toBe(
+      "供应商返回 HTTP 401",
+    );
+  });
+
+  it("does not persist network error details or upstream URLs", () => {
+    const message = safeAiProviderError(
+      new Error("connect failed https://secret:token@internal.example/v1"),
+    );
+    expect(message).toBe("无法连接 AI 供应商，请检查地址、密钥、模型和供应商状态。");
+    expect(message).not.toContain("token");
+    expect(message).not.toContain("internal.example");
+  });
+
+  it("turns aborts into a clear timeout message", () => {
+    expect(safeAiProviderError(new DOMException("aborted", "AbortError"))).toContain(
+      "连接超时",
     );
   });
 });

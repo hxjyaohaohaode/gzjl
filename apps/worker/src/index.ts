@@ -299,8 +299,8 @@ async function processAiJob(jobId: string): Promise<void> {
               role: "system",
               content:
                 job.taskType === "assistant_chat"
-                  ? "你是工作事实对话助手。先直接回答 question，再用当前 JSON 中已授权的成员、工时、审批、项目与节点事实解释依据；conversationHistory 仅用于理解上下文，最新事实优先。不能编造数据、泄露范围外信息、推测人格，也不能把建议写成事实。只输出一个可解析 JSON 对象，不能输出 Markdown、代码围栏或对象外文字。对象必须且只能包含 title、summary、highlights、risks、suggestions；summary 是自然、完整、简洁的对话回答，其他数组只放有事实支撑且确有价值的补充。"
-                  : "你是工作事实分析助手。只能依据输入 JSON 的已授权聚合事实，不能编造数据、推测人格或把建议表述成事实。只输出一个可解析的 JSON 对象，不能输出 Markdown、代码围栏或对象外文字。对象必须且只能包含 title、summary、highlights、risks、suggestions；每一条风险和建议都应说明所依据的可见事实；内容简洁、可执行、避免重复。",
+                  ? "你是工作事实对话助手。先直接回答 question，再用当前 JSON 中已授权的成员、工时、审批、项目、节点与 recentRecords 工作记录事实解释依据；conversationHistory 仅用于理解上下文，最新事实优先。不能编造数据、泄露范围外信息、推测人格，也不能把建议写成事实。只输出一个可解析 JSON 对象，不能输出 Markdown、代码围栏或对象外文字。对象必须且只能包含 title、summary、highlights、risks、suggestions；summary 是自然、完整、简洁的对话回答，其他数组只放有事实支撑且确有价值的补充。"
+                  : "你是工作事实分析助手。只能依据输入 JSON 的已授权聚合数据与 recentRecords 工作记录事实，不能编造数据、推测人格或把建议表述成事实。只输出一个可解析的 JSON 对象，不能输出 Markdown、代码围栏或对象外文字。对象必须且只能包含 title、summary、highlights、risks、suggestions；每一条风险和建议都应说明所依据的可见事实；内容简洁、可执行、避免重复。",
             },
             { role: "user", content: JSON.stringify(job.sourceSummary) },
           ],
@@ -334,7 +334,21 @@ async function processAiJob(jobId: string): Promise<void> {
     });
   } catch (error) {
     const finalFailure = attempt >= job.maxAttempts;
-    const errorSummary = error instanceof Error ? error.message.slice(0, 2_000) : "Unknown AI error";
+    const errorSummary = (() => {
+      if (error instanceof DOMException && error.name === "AbortError") {
+        return "AI 供应商响应超时，请稍后重试。";
+      }
+      if (error instanceof Error && /^AI provider returned \d{3}$/.test(error.message)) {
+        return error.message.replace("AI provider returned", "AI 供应商返回 HTTP");
+      }
+      if (error instanceof SyntaxError || error instanceof z.ZodError) {
+        return "AI 供应商返回了不兼容的结构化内容。";
+      }
+      if (error instanceof Error && error.message === "AI provider returned no content") {
+        return "AI 供应商未返回可用内容。";
+      }
+      return "AI 供应商暂时不可用，请检查组织配置或稍后重试。";
+    })();
     const failureRecorded = await database.db.transaction(async (tx) => {
       const [updatedJob] = await tx.update(aiJobs).set({ status: finalFailure ? "failed" : "queued", errorSummary, completedAt: finalFailure ? new Date() : null }).where(and(eq(aiJobs.id, job.id), eq(aiJobs.status, "running"))).returning({ id: aiJobs.id });
       if (!updatedJob) return false;

@@ -1,16 +1,20 @@
 import { createHash } from "node:crypto";
 
-import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, isNull, lt, sql } from "drizzle-orm";
 import type { Database } from "@workbench/db";
 import {
   aiJobs,
   aiReports,
   aiReportSources,
   orgMemberships,
+  orgUnits,
   outboxEvents,
+  projectMembers,
   projectNodes,
   projects,
   users,
+  workSessions,
+  workTypes,
 } from "@workbench/db/schema";
 
 import type { AnalyticsActor, AnalyticsService } from "../analytics/service.js";
@@ -69,23 +73,24 @@ export class AiService {
     const conversationId = input.conversationId?.trim() || "primary";
     const provider = await this.configuration.resolveEffective(actor.organizationId);
     if (!provider) throw new AiUnavailableError();
-    const facts = await this.analytics.summary(
+    const analysisActor =
       scope === "self"
         ? { ...actor, grants: actor.grants.filter((grant) => grant.scopeKind === "self") }
-        : actor,
-      from,
-      to,
-    );
+        : actor;
+    const facts = await this.analytics.summary(analysisActor, from, to);
     const memberRows = await this.db
       .select({
         membershipId: orgMemberships.id,
         displayName: users.displayName,
         status: orgMemberships.status,
         orgUnitId: orgMemberships.orgUnitId,
+        orgUnitName: orgUnits.name,
+        positionTitle: orgMemberships.positionTitle,
         joinedAt: orgMemberships.joinedAt,
       })
       .from(orgMemberships)
       .innerJoin(users, eq(users.id, orgMemberships.userId))
+      .leftJoin(orgUnits, eq(orgUnits.id, orgMemberships.orgUnitId))
       .where(
         and(
           eq(orgMemberships.organizationId, actor.organizationId),
@@ -93,9 +98,66 @@ export class AiService {
         ),
       )
       .limit(200);
-    const accessibleProjectIds = facts.byProject
-      .map((item) => item.projectId)
-      .filter((id): id is string => Boolean(id));
+    const [memberProjects, access] = await Promise.all([
+      scope === "self"
+        ? this.db
+            .select({ projectId: projectMembers.projectId })
+            .from(projectMembers)
+            .where(
+              and(
+                eq(projectMembers.membershipId, actor.membershipId),
+                isNull(projectMembers.leftAt),
+              ),
+            )
+        : Promise.resolve([]),
+      this.analytics.buildAccessCondition(analysisActor),
+    ]);
+    const accessibleProjectIds = [
+      ...new Set([
+        ...facts.byProject
+          .map((item) => item.projectId)
+          .filter((id): id is string => Boolean(id)),
+        ...memberProjects.map((item) => item.projectId),
+      ]),
+    ];
+    const recentRecords = await this.db
+      .select({
+        id: workSessions.id,
+        version: workSessions.version,
+        memberId: workSessions.membershipId,
+        displayName: users.displayName,
+        startAt: workSessions.startAt,
+        endAt: workSessions.endAt,
+        netSeconds: workSessions.netSeconds,
+        content: workSessions.content,
+        result: workSessions.result,
+        blockers: workSessions.blockers,
+        nextStep: workSessions.nextStep,
+        submissionStatus: workSessions.submissionStatus,
+        approvalStatus: workSessions.approvalStatus,
+        workType: workTypes.name,
+        projectId: projects.id,
+        projectName: projects.name,
+        nodeId: projectNodes.id,
+        nodeTitle: projectNodes.title,
+      })
+      .from(workSessions)
+      .innerJoin(orgMemberships, eq(orgMemberships.id, workSessions.membershipId))
+      .innerJoin(users, eq(users.id, orgMemberships.userId))
+      .leftJoin(workTypes, eq(workTypes.id, workSessions.workTypeId))
+      .leftJoin(projectNodes, eq(projectNodes.id, workSessions.primaryProjectNodeId))
+      .leftJoin(projects, eq(projects.id, projectNodes.projectId))
+      .where(
+        and(
+          access,
+          gt(workSessions.endAt, from),
+          lt(workSessions.startAt, to),
+          eq(workSessions.recordKind, "fact"),
+          isNull(workSessions.deletedAt),
+        ),
+      )
+      .orderBy(desc(workSessions.startAt))
+      .limit(60);
     const projectRows =
       scope === "self" && accessibleProjectIds.length === 0
         ? []
@@ -223,7 +285,24 @@ export class AiService {
         nodes: project.nodes.slice(0, 40),
         nodesTruncated: project.nodes.length > 40,
       })),
+      recentRecords: recentRecords.map((record) => ({
+        ...record,
+        // The model needs the work narrative, not unlimited editor text. The
+        // durable record remains untouched and is referenced by id/version.
+        content: record.content.slice(0, 2_000),
+        result: record.result.slice(0, 2_000),
+        blockers: record.blockers.slice(0, 1_000),
+        nextStep: record.nextStep.slice(0, 1_000),
+      })),
       sources: [
+        // Keep record-level provenance first so a large organization cannot
+        // crowd it out of the bounded source list with roster entries.
+        ...recentRecords.map((record) => ({
+          entityType: "work_session",
+          entityId: record.id,
+          entityVersion: String(record.version),
+          label: `工作记录 · ${record.displayName} · ${record.startAt.toISOString().slice(0, 10)}`,
+        })),
         ...facts.byProject
           .filter((item) => item.projectId)
           .map((item) => ({ entityType: "project", entityId: item.projectId!, label: item.projectName })),
@@ -287,7 +366,7 @@ export class AiService {
   }
 
   async list(actor: { organizationId: string; membershipId: string }) {
-    return this.db.select({ job: aiJobs, report: aiReports }).from(aiJobs).leftJoin(aiReports, eq(aiReports.aiJobId, aiJobs.id)).where(and(eq(aiJobs.organizationId, actor.organizationId), eq(aiJobs.requestedBy, actor.membershipId))).orderBy(desc(aiJobs.queuedAt)).limit(50);
+    return this.db.select({ job: aiJobs, report: aiReports }).from(aiJobs).leftJoin(aiReports, eq(aiReports.aiJobId, aiJobs.id)).where(and(eq(aiJobs.organizationId, actor.organizationId), eq(aiJobs.requestedBy, actor.membershipId))).orderBy(desc(aiJobs.queuedAt)).limit(100);
   }
 
   async detail(actor: { organizationId: string; membershipId: string }, reportId: string) {
@@ -337,6 +416,7 @@ export class AiService {
       byMember: cap(summary.byMember, 200),
       members: cap(summary.members, 200),
       projects: cap(summary.projects, 200),
+      recentRecords: cap(summary.recentRecords, 60),
       conversationHistory: cap(summary.conversationHistory, 10),
       sources: cap(summary.sources, 200),
     } as T;
@@ -348,6 +428,7 @@ export class AiService {
       byMember: cap(summary.byMember, 80),
       members: cap(summary.members, 80),
       projects: cap(summary.projects, 80),
+      recentRecords: cap(summary.recentRecords, 24),
       conversationHistory: cap(summary.conversationHistory, 6),
       sources: cap(summary.sources, 80),
       inputTruncated: true,
@@ -371,6 +452,7 @@ export class AiService {
       byMember: cap(summary.byMember, 50),
       members: cap(summary.members, 50),
       projects: compactProjects,
+      recentRecords: cap(summary.recentRecords, 10),
       conversationHistory: cap(summary.conversationHistory, 4),
       sources: cap(summary.sources, 48),
       inputTruncated: true,
