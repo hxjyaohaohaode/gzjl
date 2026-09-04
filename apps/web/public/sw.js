@@ -1,8 +1,18 @@
-const CACHE_NAME = "workbench-shell-v1";
+const CACHE_NAME = "workbench-shell-v2";
 const SHELL = ["/", "/manifest.webmanifest"];
 
 self.addEventListener("install", (event) => {
-  event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(SHELL)));
+  event.waitUntil(
+    caches.open(CACHE_NAME).then((cache) =>
+      Promise.all(
+        SHELL.map(async (url) => {
+          const response = await fetch(url, { cache: "reload" });
+          if (!response.ok) throw new Error(`Unable to cache app shell: ${url}`);
+          await cache.put(url, response);
+        }),
+      ),
+    ),
+  );
   self.skipWaiting();
 });
 
@@ -20,7 +30,7 @@ self.addEventListener("fetch", (event) => {
   if (request.method !== "GET" || new URL(request.url).origin !== self.location.origin) return;
   if (new URL(request.url).pathname.startsWith("/api/")) return;
   event.respondWith(
-    fetch(request)
+    fetch(request, { cache: request.mode === "navigate" ? "no-store" : "default" })
       .then((response) => {
         if (response.ok) {
           const copy = response.clone();
