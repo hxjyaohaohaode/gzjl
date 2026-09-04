@@ -14,6 +14,8 @@ import {
   payPeriods,
   payslips,
   rateRules,
+  organizations,
+  organizationOwners,
   orgMemberships,
   users,
   workBreaks,
@@ -208,11 +210,208 @@ function clipPayableIntervals(
   });
 }
 
+function zonedMonthBoundary(timezone: string, monthOffset: number): Date {
+  const nowParts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: timezone,
+    year: "numeric",
+    month: "2-digit",
+  }).formatToParts(new Date());
+  const year = Number(nowParts.find((part) => part.type === "year")?.value);
+  const month = Number(nowParts.find((part) => part.type === "month")?.value);
+  const targetAsUtc = new Date(Date.UTC(year, month - 1 + monthOffset, 1));
+  const offsetParts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: timezone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(targetAsUtc);
+  const read = (type: Intl.DateTimeFormatPartTypes) =>
+    Number(offsetParts.find((part) => part.type === type)?.value ?? 0);
+  const representedLocalAsUtc = Date.UTC(
+    read("year"),
+    read("month") - 1,
+    read("day"),
+    read("hour"),
+    read("minute"),
+    read("second"),
+  );
+  return new Date(targetAsUtc.getTime() - (representedLocalAsUtc - targetAsUtc.getTime()));
+}
+
+function zonedCutoffAt(timezone: string, cutoffDay: number): Date {
+  const nowParts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: timezone,
+    year: "numeric",
+    month: "2-digit",
+  }).formatToParts(new Date());
+  const year = Number(nowParts.find((part) => part.type === "year")?.value);
+  const month = Number(nowParts.find((part) => part.type === "month")?.value);
+  const targetAsUtc = new Date(
+    Date.UTC(year, month, cutoffDay, 18),
+  );
+  const offsetParts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: timezone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(targetAsUtc);
+  const read = (type: Intl.DateTimeFormatPartTypes) =>
+    Number(offsetParts.find((part) => part.type === type)?.value ?? 0);
+  const representedLocalAsUtc = Date.UTC(
+    read("year"),
+    read("month") - 1,
+    read("day"),
+    read("hour"),
+    read("minute"),
+    read("second"),
+  );
+  return new Date(targetAsUtc.getTime() - (representedLocalAsUtc - targetAsUtc.getTime()));
+}
+
 export class PayrollService {
   constructor(private readonly db: Database) {}
 
+  private async buildLivePreview(
+    actor: PayrollActor,
+    currentPlan: {
+      plan: typeof compensationPlans.$inferSelect;
+      version: typeof compensationPlanVersions.$inferSelect;
+    },
+    organization: { timezone: string; payrollCutoffDay: number },
+  ) {
+    const startsAt = zonedMonthBoundary(organization.timezone, 0);
+    const endsAt = zonedMonthBoundary(organization.timezone, 1);
+    const currentSessions = await this.db
+      .select()
+      .from(workSessions)
+      .where(
+        and(
+          eq(workSessions.organizationId, actor.organizationId),
+          eq(workSessions.membershipId, actor.membershipId),
+          eq(workSessions.recordKind, "fact"),
+          inArray(workSessions.approvalStatus, ["approved", "pending_review"]),
+          isNull(workSessions.deletedAt),
+          lt(workSessions.startAt, endsAt),
+          gt(workSessions.endAt, startsAt),
+        ),
+      );
+    const currentSessionIds = currentSessions.map((session) => session.id);
+    const currentBreaks = currentSessionIds.length
+      ? await this.db
+          .select()
+          .from(workBreaks)
+          .where(inArray(workBreaks.workSessionId, currentSessionIds))
+      : [];
+    const currentBreaksBySession = new Map<
+      string,
+      Array<typeof workBreaks.$inferSelect>
+    >();
+    for (const entry of currentBreaks) {
+      currentBreaksBySession.set(entry.workSessionId, [
+        ...(currentBreaksBySession.get(entry.workSessionId) ?? []),
+        entry,
+      ]);
+    }
+    const intervals = clipPayableIntervals(
+      currentSessions.flatMap((session) =>
+        payableIntervals(session, currentBreaksBySession.get(session.id) ?? []),
+      ),
+      startsAt,
+      endsAt,
+    );
+    const approvedSeconds = intervals
+      .filter((interval) => interval.approvalStatus === "approved")
+      .reduce(
+        (total, interval) =>
+          total +
+          Math.floor(
+            (interval.endAt.getTime() - interval.startAt.getTime()) / 1_000,
+          ),
+        0,
+      );
+    const pendingSeconds = intervals
+      .filter((interval) => interval.approvalStatus === "pending_review")
+      .reduce(
+        (total, interval) =>
+          total +
+          Math.floor(
+            (interval.endAt.getTime() - interval.startAt.getTime()) / 1_000,
+          ),
+        0,
+      );
+    const version = currentPlan.version;
+    let estimatedAmount: string;
+    let needsReview = false;
+    if (version.type === "hourly" || version.type === "hybrid") {
+      const currentRules = await this.db
+        .select()
+        .from(rateRules)
+        .where(eq(rateRules.compensationPlanVersionId, version.id))
+        .orderBy(asc(rateRules.priority));
+      const hourly = calculateHourlyPayroll({
+        hourlyRate: version.baseAmount,
+        timezone: organization.timezone,
+        intervals,
+        rules: currentRules
+          .map(parseRule)
+          .filter((rule): rule is PayrollRateRule => Boolean(rule)),
+        includePendingAsEstimate: version.pendingReviewCountsInEstimate,
+      });
+      estimatedAmount = hourly.grossAmount;
+      if (version.type === "hybrid") {
+        const fixedAmount = (version.config as Record<string, unknown>)
+          .fixedAmount;
+        if (typeof fixedAmount === "string") {
+          estimatedAmount = addDecimalAmounts(estimatedAmount, fixedAmount);
+        }
+      }
+    } else if (version.type === "daily") {
+      const payableDates = localDateKeysForIntervals(
+        intervals.filter(
+          (interval) =>
+            interval.approvalStatus === "approved" ||
+            version.pendingReviewCountsInEstimate,
+        ),
+        organization.timezone,
+      );
+      estimatedAmount = multiplyDecimalAmount(
+        version.baseAmount,
+        payableDates.length,
+      );
+    } else {
+      estimatedAmount = version.baseAmount;
+      needsReview = version.type === "project_based";
+    }
+    return {
+      period: {
+        startsAt,
+        endsAt,
+        cutoffAt: zonedCutoffAt(
+          organization.timezone,
+          organization.payrollCutoffDay,
+        ),
+      },
+      currency: currentPlan.plan.currency,
+      planType: version.type,
+      baseAmount: version.baseAmount,
+      approvedSeconds,
+      pendingSeconds,
+      estimatedAmount,
+      includesPending: version.pendingReviewCountsInEstimate,
+      needsReview,
+    };
+  }
+
   async managementOverview(actor: PayrollActor) {
-    const [members, planRows, periods, runs] = await Promise.all([
+    const [members, planRows, periods, runs, organization, owner, payrollRecords] = await Promise.all([
       this.db
         .select({
           membershipId: orgMemberships.id,
@@ -251,6 +450,33 @@ export class PayrollService {
         .innerJoin(payPeriods, eq(payPeriods.id, payrollRuns.payPeriodId))
         .where(eq(payPeriods.organizationId, actor.organizationId))
         .orderBy(desc(payrollRuns.createdAt)),
+      this.db
+        .select({
+          timezone: organizations.timezone,
+          payrollCutoffDay: organizations.payrollCutoffDay,
+        })
+        .from(organizations)
+        .where(eq(organizations.id, actor.organizationId))
+        .limit(1),
+      this.db
+        .select({ membershipId: organizationOwners.membershipId })
+        .from(organizationOwners)
+        .where(eq(organizationOwners.organizationId, actor.organizationId))
+        .limit(1),
+      this.db
+        .select({
+          item: payrollItems,
+          run: payrollRuns,
+          period: payPeriods,
+          displayName: users.displayName,
+        })
+        .from(payrollItems)
+        .innerJoin(payrollRuns, eq(payrollRuns.id, payrollItems.payrollRunId))
+        .innerJoin(payPeriods, eq(payPeriods.id, payrollRuns.payPeriodId))
+        .innerJoin(orgMemberships, eq(orgMemberships.id, payrollItems.membershipId))
+        .innerJoin(users, eq(users.id, orgMemberships.userId))
+        .where(eq(payPeriods.organizationId, actor.organizationId))
+        .orderBy(desc(payPeriods.endsAt), desc(payrollRuns.runNumber)),
     ]);
     const activeVersionIds = planRows.map((row) => row.version.id);
     const activeRuleRows =
@@ -276,14 +502,77 @@ export class PayrollService {
         { ...row, rules: rulesByVersion.get(row.version.id) ?? [] },
       ] as const),
     );
+    const latestPayrollItems = new Map<string, (typeof payrollRecords)[number]>();
+    for (const record of payrollRecords) {
+      const key = `${record.period.id}:${record.item.membershipId}`;
+      if (!latestPayrollItems.has(key)) latestPayrollItems.set(key, record);
+    }
+    const organizationSettings = organization[0] ?? {
+      timezone: "Asia/Shanghai",
+      payrollCutoffDay: 10,
+    };
+    const liveItems = (
+      await Promise.all(
+        members
+          .filter(
+            (member) =>
+              member.status === "active" &&
+              member.membershipId !== owner[0]?.membershipId,
+          )
+          .map(async (member) => {
+            const plan = plansByMember.get(member.membershipId);
+            if (!plan) return null;
+            return {
+              membershipId: member.membershipId,
+              displayName: member.displayName,
+              preview: await this.buildLivePreview(
+                { ...actor, membershipId: member.membershipId },
+                plan,
+                organizationSettings,
+              ),
+            };
+          }),
+      )
+    ).filter((item): item is NonNullable<typeof item> => item !== null);
     return {
       members: members.map((member) => ({
         ...member,
+        isOwner: member.membershipId === owner[0]?.membershipId,
         plan: plansByMember.get(member.membershipId) ?? null,
       })),
       periods,
       runs,
+      latestItems: [...latestPayrollItems.values()],
+      liveItems,
+      settings: organizationSettings,
     };
+  }
+
+  async updateSettings(actor: PayrollActor, payrollCutoffDay: number) {
+    const [before] = await this.db
+      .select({ payrollCutoffDay: organizations.payrollCutoffDay })
+      .from(organizations)
+      .where(eq(organizations.id, actor.organizationId))
+      .limit(1);
+    if (!before) throw new PayrollNotFoundError();
+    const [settings] = await this.db
+      .update(organizations)
+      .set({ payrollCutoffDay, updatedAt: new Date() })
+      .where(eq(organizations.id, actor.organizationId))
+      .returning({
+        timezone: organizations.timezone,
+        payrollCutoffDay: organizations.payrollCutoffDay,
+      });
+    await this.db.insert(auditLogs).values({
+      organizationId: actor.organizationId,
+      actorMembershipId: actor.membershipId,
+      action: "payroll.settings_updated",
+      entityType: "organization",
+      entityId: actor.organizationId,
+      before,
+      after: settings,
+    });
+    return settings;
   }
 
   async configurePlan(
@@ -1060,10 +1349,16 @@ export class PayrollService {
     range?: { from: Date; to: Date },
   ) {
     const records = await this.db
-      .select({ item: payrollItems, run: payrollRuns, period: payPeriods })
+      .select({
+        item: payrollItems,
+        run: payrollRuns,
+        period: payPeriods,
+        payslip: payslips,
+      })
       .from(payrollItems)
       .innerJoin(payrollRuns, eq(payrollRuns.id, payrollItems.payrollRunId))
       .innerJoin(payPeriods, eq(payPeriods.id, payrollRuns.payPeriodId))
+      .leftJoin(payslips, eq(payslips.payrollItemId, payrollItems.id))
       .where(
         and(
           eq(payrollItems.membershipId, actor.membershipId),
@@ -1163,8 +1458,42 @@ export class PayrollService {
       else current.pendingAmount += amount;
       totals.set(record.item.currency, current);
     }
+    const [[currentPlan], [organization]] = await Promise.all([
+      this.db
+      .select({ plan: compensationPlans, version: compensationPlanVersions })
+      .from(compensationPlans)
+      .innerJoin(
+        compensationPlanVersions,
+        and(
+          eq(compensationPlanVersions.compensationPlanId, compensationPlans.id),
+          eq(compensationPlanVersions.version, compensationPlans.activeVersion),
+        ),
+      )
+      .where(
+        and(
+          eq(compensationPlans.organizationId, actor.organizationId),
+          eq(compensationPlans.membershipId, actor.membershipId),
+          isNull(compensationPlans.archivedAt),
+        ),
+      )
+      .limit(1),
+      this.db
+        .select({
+          timezone: organizations.timezone,
+          payrollCutoffDay: organizations.payrollCutoffDay,
+        })
+        .from(organizations)
+        .where(eq(organizations.id, actor.organizationId))
+        .limit(1),
+    ]);
+    const livePreview =
+      currentPlan && organization
+        ? await this.buildLivePreview(actor, currentPlan, organization)
+        : null;
     return {
       items,
+      currentPlan: currentPlan ?? null,
+      livePreview,
       summary: [...totals].map(([currency, amount]) => ({
         currency,
         settledAmount: formatMicros(amount.settledAmount),
@@ -1172,5 +1501,43 @@ export class PayrollService {
         totalAmount: formatMicros(amount.totalAmount),
       })),
     };
+  }
+
+  async acknowledgePayslip(actor: PayrollActor, payslipId: string) {
+    const [record] = await this.db
+      .select({ payslip: payslips, item: payrollItems, run: payrollRuns, period: payPeriods })
+      .from(payslips)
+      .innerJoin(payrollItems, eq(payrollItems.id, payslips.payrollItemId))
+      .innerJoin(payrollRuns, eq(payrollRuns.id, payrollItems.payrollRunId))
+      .innerJoin(payPeriods, eq(payPeriods.id, payrollRuns.payPeriodId))
+      .where(
+        and(
+          eq(payslips.id, payslipId),
+          eq(payrollItems.membershipId, actor.membershipId),
+          eq(payPeriods.organizationId, actor.organizationId),
+        ),
+      )
+      .limit(1);
+    if (!record) throw new PayrollNotFoundError();
+    if (record.run.status !== "settled") {
+      throw new PayrollConflictError("薪资尚未由发放方确认结算，暂不能确认收款。");
+    }
+    if (record.payslip.acknowledgedAt) return record.payslip;
+    const acknowledgedAt = new Date();
+    const [acknowledged] = await this.db
+      .update(payslips)
+      .set({ acknowledgedAt })
+      .where(and(eq(payslips.id, payslipId), isNull(payslips.acknowledgedAt)))
+      .returning();
+    if (!acknowledged) throw new PayrollConflictError("该工资单已由其他设备确认，请刷新查看。");
+    await this.db.insert(auditLogs).values({
+      organizationId: actor.organizationId,
+      actorMembershipId: actor.membershipId,
+      action: "payroll.payslip_acknowledged",
+      entityType: "payslip",
+      entityId: acknowledged.id,
+      after: { acknowledgedAt },
+    });
+    return acknowledged;
   }
 }

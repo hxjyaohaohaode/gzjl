@@ -224,7 +224,12 @@ export function calculateHourlyPayroll(input: {
           Math.floor(cursor.getTime() / 60_000) * 60_000 + 60_000,
         ),
       );
-      let segmentSeconds = Math.floor((nextMinute.getTime() - cursor.getTime()) / 1_000);
+      // Timer events carry millisecond precision. Rounding down the first
+      // partial minute left the cursor just before the same minute boundary;
+      // the next pass then had zero whole seconds and could discard the rest
+      // of an otherwise valid hour. Ceiling advances to the boundary while
+      // the interval's integer-second total remains exact.
+      let segmentSeconds = Math.ceil((nextMinute.getTime() - cursor.getTime()) / 1_000);
       if (segmentSeconds <= 0) break;
 
       while (segmentSeconds > 0) {
@@ -316,7 +321,9 @@ export function calculateHourlyPayroll(input: {
         else approvedSeconds += pieceSeconds;
         cumulativeSecondsByDate.set(parts.date, cumulativeSeconds + pieceSeconds);
         segmentSeconds -= pieceSeconds;
-        cursor = new Date(cursor.getTime() + pieceSeconds * 1_000);
+        cursor = new Date(
+          Math.min(interval.endAt.getTime(), cursor.getTime() + pieceSeconds * 1_000),
+        );
       }
     }
   }

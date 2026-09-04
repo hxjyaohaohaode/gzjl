@@ -76,9 +76,9 @@ function isPlanRecord(value: string): value is "plan" {
  */
 function assertPlanWindow(startAt: Date, endAt: Date): void {
   const now = Date.now();
-  if (startAt.getTime() <= now + factualFutureGraceMs) {
+  if (endAt.getTime() <= now + factualFutureGraceMs) {
     throw new WorkSessionValidationError(
-      "云端计划草稿只用于尚未开始的未来时段；已发生或已开始的工作请保存为真实工时草稿。",
+      "云端计划草稿必须包含尚未结束的时间；已经完成的工作请保存为真实工时草稿。",
     );
   }
   if (
@@ -143,6 +143,38 @@ export class WorkSessionService {
       inputs.map((input) => ({ input })),
       requestMeta,
     );
+  }
+
+  /**
+   * Saves a normal end-of-day entry containing several independent work
+   * segments in one database transaction. Completed segments become factual
+   * drafts, while an explicitly marked not-yet-finished segment remains a
+   * private plan. A validation or overlap failure rolls the entire batch back,
+   * so the member never has to guess which half of the form was persisted.
+   */
+  async createStructuredBatch(
+    actor: WorkActor,
+    records: Array<{
+      recordKind: WorkRecordKind;
+      input: CreateWorkSessionInput;
+    }>,
+    requestMeta: { requestId?: string; userAgent?: string } = {},
+  ) {
+    return this.db.transaction(async (tx) => {
+      const created = [];
+      for (const record of records) {
+        created.push(
+          await this.createManualWithExecutor(
+            tx,
+            actor,
+            record.input,
+            requestMeta,
+            { recordKind: record.recordKind },
+          ),
+        );
+      }
+      return created;
+    });
   }
 
   /**

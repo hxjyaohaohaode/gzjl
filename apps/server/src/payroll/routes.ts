@@ -11,6 +11,7 @@ import {
 const periodParams = z.object({ payPeriodId: z.uuid() });
 const runParams = z.object({ runId: z.uuid() });
 const memberParams = z.object({ membershipId: z.uuid() });
+const payslipParams = z.object({ payslipId: z.uuid() });
 const money = z
   .string()
   .trim()
@@ -95,6 +96,15 @@ export async function registerPayrollRoutes(
     },
   );
 
+  app.patch(
+    "/api/payroll/settings",
+    { preHandler: [app.csrfProtection, authenticate, configurePermission] },
+    async (request) => {
+      const input = z.object({ payrollCutoffDay: z.number().int().min(1).max(28) }).parse(request.body);
+      return { settings: await service.updateSettings(request.auth!, input.payrollCutoffDay) };
+    },
+  );
+
   app.post(
     "/api/payroll/periods",
     { preHandler: [app.csrfProtection, authenticate, configurePermission] },
@@ -114,6 +124,25 @@ export async function registerPayrollRoutes(
     "/api/payroll/me",
     { preHandler: [authenticate, ownPermission] },
     async (request) => service.listOwn(request.auth!),
+  );
+
+  app.post(
+    "/api/payroll/payslips/:payslipId/acknowledge",
+    { preHandler: [app.csrfProtection, authenticate, ownPermission] },
+    async (request, reply) => {
+      const { payslipId } = payslipParams.parse(request.params);
+      try {
+        return { payslip: await service.acknowledgePayslip(request.auth!, payslipId) };
+      } catch (error) {
+        if (error instanceof PayrollNotFoundError) {
+          return reply.code(404).send({ error: "payslip_not_found", message: error.message });
+        }
+        if (error instanceof PayrollConflictError) {
+          return reply.code(409).send({ error: "payroll_conflict", message: error.message });
+        }
+        throw error;
+      }
+    },
   );
 
   app.post(

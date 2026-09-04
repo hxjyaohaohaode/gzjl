@@ -114,6 +114,7 @@ interface ProjectMember {
   joinedAt: string;
   displayName: string;
   avatarUrl: string | null;
+  lastActivityAt: string | null;
 }
 
 interface ProjectMemberCandidate {
@@ -614,6 +615,9 @@ function ProjectTeamPanel({
                     {member.publicActivityVisible
                       ? "公开项目活动"
                       : "项目活动仅本人"}
+                    {member.lastActivityAt
+                      ? ` · 最后工作 ${formatProjectWorkTime(member.lastActivityAt)}`
+                      : " · 暂无工作提交"}
                   </small>
                 </span>
                 <select

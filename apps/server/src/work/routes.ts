@@ -30,6 +30,17 @@ const updateWorkSessionSchema = z
   .object({ expectedVersion: z.number().int().positive() })
   .and(createWorkSessionSchema);
 const scheduleSchema = z.object({ expectedVersion: z.number().int().positive(), startAt: z.iso.datetime({ offset: true }), endAt: z.iso.datetime({ offset: true }) });
+const structuredBatchSchema = z.object({
+  entries: z
+    .array(
+      z.object({
+        recordKind: z.enum(["fact", "plan"]),
+        input: createWorkSessionSchema,
+      }),
+    )
+    .min(2, "批量录入至少需要两段工作。")
+    .max(24, "一次最多录入 24 段工作。"),
+});
 
 export async function registerWorkRoutes(
   app: FastifyInstance,
@@ -83,6 +94,39 @@ export async function registerWorkRoutes(
         }
         if (error instanceof WorkSessionConflictError) {
           return reply.code(409).send({ error: "work_session_overlap", message: error.message });
+        }
+        throw error;
+      }
+    },
+  );
+
+  app.post(
+    "/api/work-entries/batch",
+    { preHandler: [app.csrfProtection, authenticate, ownPermission] },
+    async (request, reply) => {
+      const { entries } = structuredBatchSchema.parse(request.body);
+      try {
+        const sessions = await service.createStructuredBatch(
+          request.auth!,
+          entries,
+          {
+            requestId: request.id,
+            ...(request.headers["user-agent"]
+              ? { userAgent: request.headers["user-agent"] }
+              : {}),
+          },
+        );
+        return reply.code(201).send({ sessions });
+      } catch (error) {
+        if (error instanceof WorkSessionValidationError) {
+          return reply
+            .code(400)
+            .send({ error: "invalid_work_batch", message: error.message });
+        }
+        if (error instanceof WorkSessionConflictError) {
+          return reply
+            .code(409)
+            .send({ error: "work_batch_overlap", message: error.message });
         }
         throw error;
       }

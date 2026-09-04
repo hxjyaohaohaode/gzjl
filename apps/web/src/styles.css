@@ -2031,6 +2031,341 @@ input[type="file"]::file-selector-button {
   }
 }
 
+/* Dense, borderless data-entry and mobile work surfaces. */
+.work-save-status,
+.work-plan-evidence-note {
+  margin-bottom: 0.8rem;
+  border-radius: 0.75rem;
+  background: var(--success-soft);
+  padding: 0.7rem 0.85rem;
+  color: var(--success);
+  font-size: 0.72rem;
+  line-height: 1.55;
+}
+
+.work-plan-evidence-note {
+  margin-bottom: 0;
+  background: var(--surface-subtle);
+  color: var(--text-muted);
+}
+
+.work-direct-evidence,
+.work-segment-batch {
+  display: grid;
+  gap: 0.75rem;
+  margin-top: 0.75rem;
+  border: 0;
+  border-radius: 1rem;
+  background: color-mix(in srgb, var(--surface-subtle) 58%, transparent);
+  padding: 0.85rem;
+}
+
+.work-direct-evidence-head,
+.work-segment-batch-head,
+.work-segment-card-head,
+.work-editor-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.work-direct-evidence-head strong,
+.work-segment-batch-head strong,
+.work-segment-card-head strong {
+  display: block;
+  font-size: 0.74rem;
+}
+
+.work-direct-evidence-head span,
+.work-segment-batch-head span {
+  display: block;
+  color: var(--text-subtle);
+  font-size: 0.64rem;
+  line-height: 1.45;
+}
+
+.work-direct-evidence-grid,
+.work-segment-fields {
+  display: grid;
+  gap: 0.7rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.work-direct-evidence-grid textarea {
+  grid-column: 1 / -1;
+}
+
+.work-direct-file,
+.work-parallel-toggle {
+  display: inline-flex;
+  min-height: 2.55rem;
+  align-items: center;
+  gap: 0.55rem;
+  border-radius: 0.75rem;
+  background: var(--surface);
+  padding: 0.55rem 0.75rem;
+  color: var(--text-muted);
+  font-size: 0.68rem;
+  font-weight: 680;
+  cursor: pointer;
+}
+
+.work-direct-file input[type="file"] {
+  min-width: 0;
+  max-width: 13rem;
+  font-size: 0.62rem;
+}
+
+.work-segment-card {
+  display: grid;
+  gap: 0.75rem;
+  border-radius: 0.9rem;
+  background: var(--canvas);
+  padding: 0.8rem;
+}
+
+.work-segment-card-head > div {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.work-segment-card-head > button {
+  color: var(--danger);
+  font-size: 0.66rem;
+  font-weight: 700;
+}
+
+.work-editor-actions {
+  align-items: flex-end;
+  flex-wrap: wrap;
+}
+
+.work-parallel-toggle {
+  min-height: 2.75rem;
+  background: var(--surface-subtle);
+}
+
+.analytics-filter-bar {
+  border-radius: 1rem;
+  background: color-mix(in srgb, var(--surface-subtle) 62%, transparent);
+  padding: 0.65rem;
+}
+
+.analytics-filter-controls {
+  display: grid;
+  gap: 0.45rem;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+}
+
+.analytics-filter-toggle {
+  display: none;
+}
+
+.ai-conversations-card {
+  overflow: hidden;
+}
+
+@media (max-width: 840px) {
+  .project-workbench,
+  .project-workbench.has-inspector {
+    min-height: 0;
+  }
+
+  .project-workbench-main {
+    padding: 0.65rem;
+  }
+
+  .project-workbench-toolbar {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 0.5rem;
+  }
+
+  .project-view-tabs {
+    min-width: 0;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .project-view-tabs::-webkit-scrollbar {
+    display: none;
+  }
+
+  .project-toolbar-controls {
+    display: grid;
+    min-width: 0;
+    grid-column: 1 / -1;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+    gap: 0.4rem;
+  }
+
+  .project-toolbar-controls select,
+  .project-toolbar-controls input {
+    width: 100%;
+    min-width: 0;
+    min-height: 2.45rem;
+    order: initial;
+  }
+
+  .project-toolbar-controls input {
+    grid-column: 1 / -1;
+  }
+
+  .project-view-surface {
+    margin-top: 0.55rem;
+  }
+
+  .project-view-surface .project-canvas,
+  .project-timeline,
+  .project-workbench-tree-list {
+    height: 56dvh;
+    min-height: 21rem;
+  }
+
+  .project-version-note {
+    display: none;
+  }
+
+  .analytics-filter-bar {
+    padding: 0.45rem;
+  }
+
+  .analytics-filter-toggle {
+    display: flex;
+    width: 100%;
+    min-height: 2.55rem;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.3rem 0.55rem;
+    color: var(--text);
+    font-size: 0.74rem;
+    font-weight: 750;
+  }
+
+  .analytics-filter-toggle svg {
+    transition: transform 160ms ease;
+  }
+
+  .analytics-filter-controls {
+    display: none;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    padding-top: 0.4rem;
+  }
+
+  .analytics-filter-bar.is-open .analytics-filter-controls {
+    display: grid;
+  }
+
+  .analytics-filter-controls select {
+    min-height: 2.5rem;
+    padding-inline: 0.55rem;
+    font-size: 0.7rem;
+  }
+
+  .analytics-chart-card [data-ui="card-header"] {
+    padding-bottom: 0.55rem;
+  }
+
+  .analytics-chart-card [role="img"] {
+    height: 14.5rem;
+  }
+
+  .ai-workspace {
+    grid-template-columns: 1fr;
+  }
+
+  .ai-history {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  .ai-history-list {
+    display: flex;
+    overflow-x: auto;
+    padding: 0.35rem;
+    scroll-snap-type: x proximity;
+  }
+
+  .ai-history-item {
+    width: min(15rem, 72vw);
+    flex: none;
+    scroll-snap-align: start;
+  }
+}
+
+@media (max-width: 640px) {
+  .work-direct-evidence-grid,
+  .work-segment-fields {
+    grid-template-columns: 1fr;
+  }
+
+  .work-direct-evidence-grid textarea,
+  .work-segment-fields > * {
+    grid-column: auto !important;
+  }
+
+  .work-direct-evidence,
+  .work-segment-batch,
+  .work-segment-card {
+    padding: 0.6rem;
+  }
+
+  .work-direct-evidence-head,
+  .work-segment-batch-head,
+  .work-editor-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .work-segment-batch-head [data-ui="button"] {
+    width: 100%;
+  }
+
+  .analytics-metrics-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.45rem;
+  }
+
+  .analytics-metrics-grid .metric-card {
+    min-height: 5.7rem;
+  }
+
+  .analytics-metrics-grid .metric-card [data-ui="card-content"] {
+    padding-block: 0.55rem;
+  }
+
+  .analytics-metrics-grid .metric-card p:first-child {
+    font-size: 0.68rem;
+  }
+
+  .analytics-metrics-grid .metric-card p:nth-child(2) {
+    font-size: 1.15rem;
+  }
+
+  .analytics-metrics-grid .metric-card p:last-child {
+    display: none;
+  }
+
+  .project-toolbar-controls {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .project-toolbar-controls input,
+  .project-toolbar-controls > [data-ui="button"]:last-child {
+    grid-column: 1 / -1;
+  }
+
+  .project-view-surface .project-canvas,
+  .project-timeline,
+  .project-workbench-tree-list {
+    height: 52dvh;
+    min-height: 19rem;
+  }
+}
+
 /* -------------------------------------------------------------------------- */
 /* Interaction refinement: quiet surfaces, exact color controls, useful drag. */
 /* -------------------------------------------------------------------------- */
@@ -5414,5 +5749,241 @@ body {
   .team-member-item,
   .team-activity-item {
     padding-inline: 0.55rem;
+  }
+}
+
+/* Final responsive overrides intentionally live last so legacy project rules
+ * cannot re-expand mobile controls or charts. */
+@media (max-width: 840px) {
+  .project-workbench-main {
+    padding: 0.65rem !important;
+  }
+
+  .project-workbench-toolbar {
+    display: grid !important;
+    align-items: center !important;
+    grid-template-columns: minmax(0, 1fr) auto !important;
+    gap: 0.45rem !important;
+  }
+
+  .project-toolbar-controls {
+    display: grid !important;
+    min-width: 0 !important;
+    grid-column: 1 / -1;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.4rem !important;
+  }
+
+  .project-toolbar-controls select,
+  .project-toolbar-controls input {
+    width: 100% !important;
+    min-width: 0;
+    min-height: 2.45rem;
+    order: initial !important;
+  }
+
+  .project-toolbar-controls input {
+    grid-column: 1 / -1;
+  }
+
+  .project-view-surface {
+    margin-top: 0.55rem;
+  }
+
+  .project-view-surface .project-canvas,
+  .project-timeline,
+  .project-workbench-tree-list {
+    height: 56dvh !important;
+    min-height: 21rem !important;
+  }
+
+  .project-version-note,
+  .project-workbench-guide {
+    display: none !important;
+  }
+
+  .analytics-filter-controls {
+    display: none;
+  }
+
+  .analytics-filter-bar.is-open .analytics-filter-controls {
+    display: grid;
+  }
+
+  .analytics-chart-card [role="img"] {
+    height: 14.5rem !important;
+  }
+
+  .ai-workspace {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+}
+
+@media (max-width: 640px) {
+  .analytics-metrics-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 0.45rem !important;
+  }
+
+  .analytics-metrics-grid .metric-card {
+    min-height: 5.7rem !important;
+  }
+
+  .project-view-surface .project-canvas,
+  .project-timeline,
+  .project-workbench-tree-list {
+    height: clamp(17rem, 42dvh, 24rem) !important;
+    min-height: 17rem !important;
+  }
+}
+
+/* Mobile containment is deliberately last. Dynamic work/progress content can
+ * contain long identifiers, links and action groups; none of them may change
+ * the responsive breakpoint by widening the document. Deliberate data tables
+ * and timelines retain their own local horizontal scrollers. */
+html,
+body,
+#root,
+.app-shell,
+.app-shell > div,
+.app-main {
+  max-width: 100%;
+}
+
+.app-shell,
+.app-shell > div,
+.app-main,
+[data-ui="card"],
+[data-ui="card-header"],
+[data-ui="card-content"],
+.work-list-card,
+.work-row,
+.work-row > *,
+.project-workbench,
+.project-workbench-main,
+.project-workbench-toolbar,
+.project-view-tabs,
+.project-toolbar-controls,
+.project-view-surface,
+.project-node-inspector,
+.project-node-inspector-scroll,
+.project-version-history,
+.project-version-history > div,
+.project-version-history > div > span {
+  min-width: 0;
+}
+
+.work-row p,
+.work-row span,
+.project-node-inspector p,
+.project-node-inspector small,
+.project-version-history strong,
+.project-version-history small {
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 1023px) {
+  html,
+  body {
+    overflow-x: clip;
+  }
+
+  .app-main {
+    min-width: 0;
+    overflow-x: clip;
+  }
+}
+
+@media (max-width: 840px) {
+  .project-workbench,
+  .project-workbench.has-inspector {
+    width: 100%;
+    max-width: 100%;
+  }
+
+  .project-workbench.is-mobile-fullscreen,
+  .project-workbench.is-mobile-fullscreen.has-inspector {
+    width: 100%;
+    max-width: 100%;
+    overscroll-behavior: contain;
+  }
+
+  .project-view-tabs {
+    width: 100%;
+    max-width: 100%;
+  }
+
+  .project-toolbar-controls {
+    grid-template-columns: minmax(0, 1fr) auto auto !important;
+  }
+
+  .project-toolbar-controls select {
+    grid-column: 1 / -1;
+  }
+
+  .project-toolbar-controls input {
+    grid-column: 1 / -1;
+  }
+
+  .project-toolbar-controls > [data-ui="button"] {
+    min-width: 0;
+    padding-inline: 0.65rem;
+  }
+
+  .project-view-surface .project-canvas {
+    height: clamp(18rem, 43dvh, 25rem) !important;
+    min-height: 18rem !important;
+  }
+
+  .project-timeline {
+    height: clamp(18rem, 46dvh, 27rem) !important;
+    min-height: 18rem !important;
+    overflow-x: auto;
+  }
+
+  .project-workbench-tree-list {
+    height: auto !important;
+    min-height: 0 !important;
+    max-height: 62dvh;
+    overflow-y: auto;
+  }
+
+  .project-workbench.is-mobile-fullscreen .project-view-surface .project-canvas,
+  .project-workbench.is-mobile-fullscreen .project-timeline,
+  .project-workbench.is-mobile-fullscreen .project-workbench-tree-list {
+    height: 100% !important;
+    min-height: 0 !important;
+    max-height: none;
+  }
+
+  .project-node-inspector-head > div:first-child,
+  .project-version-history > div > span {
+    min-width: 0;
+  }
+}
+
+@media (max-width: 420px) {
+  .project-workbench-main {
+    padding: 0.5rem !important;
+  }
+
+  .project-view-tabs [data-ui="button"],
+  .project-toolbar-controls > [data-ui="button"] {
+    min-height: 2.25rem;
+    padding-inline: 0.52rem;
+    font-size: 0.66rem;
+  }
+
+  .project-toolbar-controls select,
+  .project-toolbar-controls input {
+    min-height: 2.3rem;
+  }
+
+  .work-row {
+    padding-inline: 0 !important;
+  }
+
+  .work-row > div:last-child:not(:first-child) {
+    width: 100%;
   }
 }

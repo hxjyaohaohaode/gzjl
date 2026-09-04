@@ -1,0 +1,218 @@
+import { readdir, readFile } from "node:fs/promises";
+import { resolve } from "node:path";
+
+import { PGlite } from "@electric-sql/pglite";
+import { drizzle } from "drizzle-orm/pglite";
+import { afterEach, describe, expect, it } from "vitest";
+import type { Database } from "@workbench/db";
+import {
+  compensationPlans,
+  compensationPlanVersions,
+  organizationOwners,
+  organizations,
+  orgMemberships,
+  payPeriods,
+  payrollItems,
+  payrollRuns,
+  payslips,
+  users,
+  workSessions,
+} from "@workbench/db/schema";
+
+import { PayrollService } from "./service.js";
+
+const clients: PGlite[] = [];
+
+async function createTestDatabase(): Promise<Database> {
+  const client = new PGlite();
+  clients.push(client);
+  const migrationsDir = resolve(import.meta.dirname, "../../../../packages/db/drizzle");
+  const migrations = (await readdir(migrationsDir))
+    .filter((file) => /^\d+_.+\.sql$/.test(file))
+    .sort();
+  for (const file of migrations) {
+    const migration = await readFile(resolve(migrationsDir, file), "utf8");
+    for (const statement of migration
+      .split("--> statement-breakpoint")
+      .map((value) => value.trim())
+      .filter(Boolean)) {
+      await client.exec(statement);
+    }
+  }
+  return drizzle(client) as unknown as Database;
+}
+
+afterEach(async () => {
+  await Promise.all(clients.splice(0).map((client) => client.close()));
+});
+
+describe("employee payroll view and receipt acknowledgement", () => {
+  it("returns a live authorized estimate and records receipt exactly once", async () => {
+    const db = await createTestDatabase();
+    const [organization] = await db
+      .insert(organizations)
+      .values({ name: "薪资链路测试", timezone: "Asia/Shanghai", payrollCutoffDay: 10 })
+      .returning();
+    const [ownerUser] = await db.insert(users).values({ displayName: "Owner" }).returning();
+    const [ownerMembership] = await db
+      .insert(orgMemberships)
+      .values({
+        organizationId: organization!.id,
+        userId: ownerUser!.id,
+        status: "active",
+        joinedAt: new Date("2025-01-01T00:00:00.000Z"),
+      })
+      .returning();
+    await db.insert(organizationOwners).values({
+      organizationId: organization!.id,
+      membershipId: ownerMembership!.id,
+    });
+    const [user] = await db.insert(users).values({ displayName: "员工" }).returning();
+    const [membership] = await db
+      .insert(orgMemberships)
+      .values({
+        organizationId: organization!.id,
+        userId: user!.id,
+        status: "active",
+        joinedAt: new Date("2025-01-01T00:00:00.000Z"),
+      })
+      .returning();
+    const employeeActor = {
+      organizationId: organization!.id,
+      membershipId: membership!.id,
+    };
+    const ownerActor = {
+      organizationId: organization!.id,
+      membershipId: ownerMembership!.id,
+    };
+    const [plan] = await db
+      .insert(compensationPlans)
+      .values({
+        organizationId: organization!.id,
+        membershipId: membership!.id,
+        name: "标准时薪",
+        type: "hourly",
+        currency: "CNY",
+        activeVersion: 1,
+        createdBy: ownerMembership!.id,
+      })
+      .returning();
+    const [version] = await db
+      .insert(compensationPlanVersions)
+      .values({
+        compensationPlanId: plan!.id,
+        version: 1,
+        type: "hourly",
+        baseAmount: "100.000000",
+        baseUnit: "hour",
+        pendingReviewCountsInEstimate: true,
+        effectiveFrom: new Date("2025-01-01T00:00:00.000Z"),
+        createdBy: ownerMembership!.id,
+      })
+      .returning();
+    const now = Date.now();
+    await db.insert(workSessions).values({
+      organizationId: organization!.id,
+      membershipId: membership!.id,
+      startAt: new Date(now - 2 * 60 * 60_000),
+      endAt: new Date(now - 60 * 60_000),
+      timezone: "Asia/Shanghai",
+      grossSeconds: 3_600,
+      netSeconds: 3_600,
+      source: "manual",
+      content: "已批准工作",
+      result: "完成",
+      submissionStatus: "submitted",
+      approvalStatus: "approved",
+      visibility: "management_only",
+    });
+
+    const [period] = await db
+      .insert(payPeriods)
+      .values({
+        organizationId: organization!.id,
+        name: "历史周期",
+        timezone: "Asia/Shanghai",
+        startsAt: new Date("2026-07-01T00:00:00.000Z"),
+        endsAt: new Date("2026-08-01T00:00:00.000Z"),
+        cutoffAt: new Date("2026-08-10T10:00:00.000Z"),
+        status: "locked",
+        settledAt: new Date("2026-08-10T10:00:00.000Z"),
+        lockedAt: new Date("2026-08-10T10:00:00.000Z"),
+      })
+      .returning();
+    const [run] = await db
+      .insert(payrollRuns)
+      .values({
+        payPeriodId: period!.id,
+        runNumber: 1,
+        status: "settled",
+        calculationVersion: "test",
+        requestedBy: ownerMembership!.id,
+        inputHash: "receipt-test",
+        settledAt: new Date("2026-08-10T10:00:00.000Z"),
+      })
+      .returning();
+    const [item] = await db
+      .insert(payrollItems)
+      .values({
+        payrollRunId: run!.id,
+        membershipId: membership!.id,
+        compensationPlanVersionId: version!.id,
+        currency: "CNY",
+        approvedSeconds: 3_600,
+        pendingSeconds: 0,
+        grossAmount: "100.000000",
+        finalAmount: "100.000000",
+      })
+      .returning();
+    const [payslip] = await db
+      .insert(payslips)
+      .values({ payrollItemId: item!.id, documentHash: "receipt-document" })
+      .returning();
+
+    const service = new PayrollService(db);
+    const before = await service.listOwn(employeeActor);
+    expect(before.currentPlan?.version).toMatchObject({
+      type: "hourly",
+      baseAmount: "100.000000",
+    });
+    expect(before.livePreview).toMatchObject({
+      currency: "CNY",
+      approvedSeconds: 3_600,
+      estimatedAmount: "100.000000",
+    });
+    const ownerOverview = await service.managementOverview(ownerActor);
+    expect(ownerOverview.liveItems).toHaveLength(1);
+    expect(ownerOverview.liveItems[0]).toMatchObject({
+      membershipId: membership!.id,
+      displayName: "员工",
+      preview: {
+        approvedSeconds: 3_600,
+        estimatedAmount: "100.000000",
+      },
+    });
+    expect(
+      ownerOverview.liveItems.some(
+        (entry) => entry.membershipId === ownerMembership!.id,
+      ),
+    ).toBe(false);
+    expect(before.items[0]?.payslip?.acknowledgedAt).toBeNull();
+
+    const acknowledged = await service.acknowledgePayslip(employeeActor, payslip!.id);
+    expect(acknowledged.acknowledgedAt).toBeInstanceOf(Date);
+    const repeated = await service.acknowledgePayslip(employeeActor, payslip!.id);
+    expect(repeated.acknowledgedAt?.toISOString()).toBe(
+      acknowledged.acknowledgedAt?.toISOString(),
+    );
+
+    await service.updateSettings(ownerActor, 15);
+    const after = await service.listOwn(employeeActor);
+    expect(
+      new Intl.DateTimeFormat("en-CA", {
+        timeZone: "Asia/Shanghai",
+        day: "2-digit",
+      }).format(new Date(after.livePreview!.period.cutoffAt)),
+    ).toBe("15");
+  });
+});

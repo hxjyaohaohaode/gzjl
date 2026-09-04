@@ -2,7 +2,12 @@ import { expect, test, type Page } from "@playwright/test";
 
 async function mockAuthenticatedWorkspace(
   page: Page,
-  options: { isOwner?: boolean; canExport?: boolean; canViewPayroll?: boolean } = {},
+  options: {
+    isOwner?: boolean;
+    canExport?: boolean;
+    canViewPayroll?: boolean;
+    canConfigurePayroll?: boolean;
+  } = {},
 ): Promise<void> {
   let authenticated = false;
   await page.routeWebSocket("**/api/realtime", (socket) => {
@@ -45,16 +50,20 @@ async function mockAuthenticatedWorkspace(
                     },
                   ]
                 : []),
-              {
-                permission: "payroll.configure",
-                scopeKind: "organization",
-                scopeId: null,
-              },
-              {
-                permission: "payroll.settle",
-                scopeKind: "organization",
-                scopeId: null,
-              },
+              ...((options.canConfigurePayroll ?? options.isOwner ?? true)
+                ? [
+                    {
+                      permission: "payroll.configure",
+                      scopeKind: "organization",
+                      scopeId: null,
+                    },
+                    {
+                      permission: "payroll.settle",
+                      scopeKind: "organization",
+                      scopeId: null,
+                    },
+                  ]
+                : []),
               {
                 permission: "import.scope",
                 scopeKind: "organization",
@@ -645,11 +654,35 @@ test("Owner can configure a versioned hourly plan and create a pay period", asyn
             membershipId: memberId,
             displayName: "陈远航",
             status: "active",
+            isOwner: false,
             plan: null,
           },
         ],
         periods: [],
         runs: [],
+        latestItems: [],
+        liveItems: [
+          {
+            membershipId: memberId,
+            displayName: "陈远航",
+            preview: {
+              period: {
+                startsAt: "2026-09-01T00:00:00.000Z",
+                endsAt: "2026-10-01T00:00:00.000Z",
+                cutoffAt: "2026-10-15T10:00:00.000Z",
+              },
+              currency: "CNY",
+              planType: "hourly",
+              baseAmount: "88.500000",
+              approvedSeconds: 14_400,
+              pendingSeconds: 3_600,
+              estimatedAmount: "442.500000",
+              includesPending: true,
+              needsReview: false,
+            },
+          },
+        ],
+        settings: { timezone: "Asia/Shanghai", payrollCutoffDay: 15 },
       },
     }),
   );
@@ -670,9 +703,12 @@ test("Owner can configure a versioned hourly plan and create a pay period", asyn
   await page.getByRole("button", { name: "登录", exact: true }).click();
   await page.goto("/payroll");
   await expect(
-    page.getByRole("heading", { name: "薪资管理与我的薪资" }),
+    page.getByRole("heading", { name: "薪资管理" }),
   ).toBeVisible();
-  await page.getByLabel("成员").selectOption(memberId);
+  await expect(page.getByRole("img", { name: "团队成员薪资对比" })).toBeVisible();
+  await page
+    .getByRole("combobox", { name: "成员", exact: true })
+    .selectOption(memberId);
   await page.getByLabel("计薪类型").selectOption("hourly");
   await page.getByLabel("基础时薪").fill("88.50");
   await page.getByText("周末倍率", { exact: true }).click();
@@ -688,21 +724,58 @@ test("Owner can configure a versioned hourly plan and create a pay period", asyn
     { type: "weekend", priority: 100, multiplier: "2" },
   ]);
 
+  await expect(page.getByLabel("默认发薪日")).toHaveValue("15");
   await page.getByRole("button", { name: "创建薪资周期" }).click();
   await expect.poll(() => periodPayload).not.toBeNull();
   expect(periodPayload).toMatchObject({ timezone: "Asia/Shanghai" });
+  expect(
+    new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Asia/Shanghai",
+      day: "2-digit",
+    }).format(new Date(String(periodPayload?.cutoffAt))),
+  ).toBe("15");
 });
 
 test("personal payroll renders reconciled totals, daily pay, period trend, and components", async ({
   page,
 }) => {
-  await mockAuthenticatedWorkspace(page);
+  await mockAuthenticatedWorkspace(page, { isOwner: false });
   await page.route("**/api/payroll/management", (route) =>
     route.fulfill({ json: { members: [], periods: [], runs: [] } }),
   );
+  let acknowledgedPayslip = false;
+  await page.route("**/api/payroll/payslips/payslip-1/acknowledge", async (route) => {
+    acknowledgedPayslip = true;
+    await route.fulfill({
+      json: { payslip: { id: "payslip-1", acknowledgedAt: new Date().toISOString() } },
+    });
+  });
   await page.route("**/api/payroll/me", (route) =>
     route.fulfill({
       json: {
+        currentPlan: {
+          plan: { name: "标准时薪", type: "hourly", currency: "CNY" },
+          version: {
+            type: "hourly",
+            baseAmount: "100.000000",
+            effectiveFrom: "2026-01-01T00:00:00.000Z",
+          },
+        },
+        livePreview: {
+          period: {
+            startsAt: "2026-09-01T00:00:00.000Z",
+            endsAt: "2026-10-01T00:00:00.000Z",
+            cutoffAt: "2026-10-10T10:00:00.000Z",
+          },
+          currency: "CNY",
+          planType: "hourly",
+          baseAmount: "100.000000",
+          approvedSeconds: 28_800,
+          pendingSeconds: 3_600,
+          estimatedAmount: "900.000000",
+          includesPending: true,
+          needsReview: false,
+        },
         summary: [
           {
             currency: "CNY",
@@ -727,14 +800,19 @@ test("personal payroll renders reconciled totals, daily pay, period trend, and c
             run: {
               id: "run-1",
               runNumber: 2,
-              status: "ready",
+              status: "settled",
               calculationVersion: "payroll-engine-v2-daily-trace",
             },
             period: {
               name: "2026 年 9 月",
               startsAt: "2026-09-01T00:00:00.000Z",
               endsAt: "2026-10-01T00:00:00.000Z",
-              status: "pending_confirmation",
+              status: "locked",
+            },
+            payslip: {
+              id: "payslip-1",
+              issuedAt: "2026-10-10T10:00:00.000Z",
+              acknowledgedAt: null,
             },
             dailyBreakdown: [
               { date: "2026-09-03", amount: "400.000000", estimatedAmount: "0.000000" },
@@ -772,6 +850,9 @@ test("personal payroll renders reconciled totals, daily pay, period trend, and c
   await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
   await page.getByRole("button", { name: "登录", exact: true }).click();
   await page.goto("/payroll");
+  await expect(page.getByRole("heading", { name: "我的薪资" })).toBeVisible();
+  await expect(page.getByText("¥100.00 / 小时", { exact: true })).toBeVisible();
+  await expect(page.getByText("本月实时预估", { exact: true })).toBeVisible();
   await expect(page.getByText("当前应结")).toBeVisible();
   await expect(page.getByText("¥900.00", { exact: true }).first()).toBeVisible();
   await expect(page.getByRole("img", { name: "2026 年 9 月每日薪资" })).toBeVisible();
@@ -779,6 +860,8 @@ test("personal payroll renders reconciled totals, daily pay, period trend, and c
   await expect(page.getByRole("img", { name: "2026 年 9 月薪资构成瀑布图" })).toBeVisible();
   await expect(page.getByText("基础工时", { exact: true })).toBeVisible();
   await expect(page.getByText("补贴", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "确认已收到薪资" }).click();
+  await expect.poll(() => acknowledgedPayslip).toBe(true);
 });
 
 test("contact verification consumes a fragment capability without leaving it in the address bar", async ({
@@ -1229,6 +1312,76 @@ test("manual work recording persists primary and auxiliary project-node associat
     page.getByRole("button", { name: "保存真实工时草稿" }),
   ).toBeEnabled();
   await page.getByRole("button", { name: "保存真实工时草稿" }).click();
+});
+
+test("one manual submission persists multiple completed work segments atomically", async ({
+  page,
+}) => {
+  await mockAuthenticatedWorkspace(page);
+  let batchPayload: {
+    entries: Array<{
+      recordKind: string;
+      input: { content: string; result: string; startAt: string; endAt: string };
+    }>;
+  } | null = null;
+  await page.route("**/api/evidence/capabilities", (route) =>
+    route.fulfill({
+      json: {
+        fileUploads: { available: false, maxBytes: 104_857_600 },
+        references: { url: true, text: true },
+      },
+    }),
+  );
+  await page.route("**/api/work-entries/batch", async (route) => {
+    batchPayload = route.request().postDataJSON() as typeof batchPayload;
+    await route.fulfill({
+      status: 201,
+      json: {
+        sessions: batchPayload!.entries.map((entry, index) => ({
+          id: `batch-session-${index + 1}`,
+          ...entry.input,
+          recordKind: entry.recordKind,
+          timezone: "Asia/Shanghai",
+          netSeconds: 3_600,
+          source: "manual",
+          submissionStatus: "draft",
+          approvalStatus: "not_requested",
+          visibility: entry.recordKind === "plan" ? "private" : "management_only",
+          version: 1,
+          breaks: [],
+          projectLinks: [],
+        })),
+      },
+    });
+  });
+  await page.goto("/login");
+  await page.getByLabel("邮箱或手机号").fill("owner@example.test");
+  await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+  await page.goto("/work");
+  await page.getByRole("button", { name: "手工录入" }).click();
+  await page.getByLabel("开始时间").fill("2026-09-03T08:00");
+  await page.getByLabel("结束时间").fill("2026-09-03T12:00");
+  await page.getByLabel("工作内容").fill("上午交付工作");
+  await page.getByLabel("工作结果").fill("上午部分已完成");
+  await page.getByRole("button", { name: "添加一段" }).click();
+  await page.getByLabel("开始", { exact: true }).fill("2026-09-03T13:00");
+  await page.getByLabel("结束", { exact: true }).fill("2026-09-03T14:00");
+  await page.getByLabel("本段工作内容").fill("下午联调工作");
+  await page.getByLabel("本段结果（可选）").fill("联调通过");
+  await page.getByRole("button", { name: "保存真实工时草稿" }).click();
+
+  await expect.poll(() => batchPayload?.entries.length ?? 0).toBe(2);
+  expect(batchPayload!.entries).toMatchObject([
+    {
+      recordKind: "fact",
+      input: { content: "上午交付工作", result: "上午部分已完成" },
+    },
+    {
+      recordKind: "fact",
+      input: { content: "下午联调工作", result: "联调通过" },
+    },
+  ]);
 });
 
 test("evidence uploads arbitrary file formats one by one and completes every selected file", async (
@@ -1692,7 +1845,7 @@ test("calendar keeps project milestones opt-in and loads their permitted date ra
 
 test("analytics uses accessible, server-backed responsive chart containers", async ({
   page,
-}) => {
+}, testInfo) => {
   await mockAuthenticatedWorkspace(page);
   const analyticsUrls: string[] = [];
   page.on("request", (request) => {
@@ -1716,6 +1869,9 @@ test("analytics uses accessible, server-backed responsive chart containers", asy
   await expect(page.getByRole("img", { name: "项目与工作类型旭日图" })).toBeVisible();
   await expect(page.getByRole("img", { name: "项目工时与加权进度图" })).toBeVisible();
   await expect(page.getByRole("columnheader", { name: "阻塞节点" })).toBeVisible();
+  if (testInfo.project.name.startsWith("mobile")) {
+    await page.getByRole("button", { name: /^筛选/ }).click();
+  }
   await page.getByLabel("筛选项目").selectOption("00000000-0000-4000-8000-000000000004");
   await page.getByLabel("筛选审核状态").selectOption("approved");
   await expect.poll(() => analyticsUrls.some((url) => {
@@ -2244,6 +2400,73 @@ test("critical workspace widths do not introduce horizontal document overflow", 
         () => document.documentElement.scrollWidth <= window.innerWidth + 1,
       ),
     ).toBe(true);
+  }
+});
+
+test("many long work updates never force the mobile workspace into desktop width", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    !testInfo.project.name.startsWith("mobile"),
+    "mobile-only dynamic-content containment coverage",
+  );
+  await mockAuthenticatedWorkspace(page);
+  const projectId = "00000000-0000-4000-8000-000000000004";
+  const nodeId = "00000000-0000-4000-8000-000000000006";
+  const longContent = `移动端进度-${"LONG_UNBROKEN_TOKEN_".repeat(24)}`;
+  const workItems = Array.from({ length: 14 }, (_, index) => ({
+    id: `00000000-0000-4000-8000-${String(index + 200).padStart(12, "0")}`,
+    startAt: `2026-09-03T${String(8 + (index % 8)).padStart(2, "0")}:00:00.000Z`,
+    endAt: `2026-09-03T${String(9 + (index % 8)).padStart(2, "0")}:00:00.000Z`,
+    activityAt: `2026-09-03T${String(9 + (index % 8)).padStart(2, "0")}:00:00.000Z`,
+    timezone: "Asia/Shanghai",
+    netSeconds: 3_600,
+    content: `${longContent}-${index}`,
+    result: "已完成",
+    blockers: "",
+    nextStep: "",
+    parallelWork: false,
+    primaryProjectNodeId: nodeId,
+    projectLinks: [],
+    source: "manual",
+    recordKind: "fact",
+    submissionStatus: "draft",
+    approvalStatus: "not_requested",
+    visibility: "management_only",
+    version: 1,
+    breaks: [],
+    displayName: "林知夏",
+    hasFullTiming: true,
+    isPrimary: true,
+  }));
+  await page.route("**/api/work-sessions?**", (route) =>
+    route.fulfill({ json: { items: workItems, nextCursor: null } }),
+  );
+  await page.route(
+    `**/api/projects/${projectId}/nodes/${nodeId}/work-sessions`,
+    (route) => route.fulfill({ json: { items: workItems } }),
+  );
+  await page.goto("/login");
+  await page.getByLabel("邮箱或手机号").fill("owner@example.test");
+  await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+
+  for (const route of ["/work", `/projects/${projectId}`]) {
+    await page.goto(route);
+    if (route.startsWith("/projects/")) {
+      await page
+        .locator(".react-flow")
+        .getByText("工作台正式版", { exact: true })
+        .click();
+      await expect(page.getByText("关联工作记录", { exact: true })).toBeVisible();
+    }
+    const dimensions = await page.evaluate(() => ({
+      documentWidth: document.documentElement.scrollWidth,
+      viewportWidth: window.innerWidth,
+      mainWidth: document.querySelector(".app-main")?.getBoundingClientRect().width ?? 0,
+    }));
+    expect(dimensions.documentWidth).toBeLessThanOrEqual(dimensions.viewportWidth + 1);
+    expect(dimensions.mainWidth).toBeLessThanOrEqual(dimensions.viewportWidth + 1);
   }
 });
 

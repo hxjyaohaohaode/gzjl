@@ -466,7 +466,7 @@ export class ProjectService {
     if (!(await this.canAccess(actor, projectId, canViewAll))) {
       throw new ProjectNotFoundError();
     }
-    return this.db
+    const members = await this.db
       .select({
         membershipId: projectMembers.membershipId,
         role: projectMembers.role,
@@ -488,6 +488,58 @@ export class ProjectService {
         ),
       )
       .orderBy(asc(projectMembers.joinedAt), asc(users.displayName));
+    if (!members.length) {
+      return members.map((member) => ({ ...member, lastActivityAt: null }));
+    }
+
+    const activityRows = await this.db
+      .select({
+        membershipId: workSessions.membershipId,
+        activityAt: workSessions.endAt,
+        visibility: workSessions.visibility,
+      })
+      .from(workSessionProjectLinks)
+      .innerJoin(
+        workSessions,
+        eq(workSessions.id, workSessionProjectLinks.workSessionId),
+      )
+      .where(
+        and(
+          eq(workSessionProjectLinks.projectId, projectId),
+          eq(workSessions.organizationId, actor.organizationId),
+          eq(workSessions.recordKind, "fact"),
+          isNull(workSessions.deletedAt),
+          inArray(
+            workSessions.membershipId,
+            members.map((member) => member.membershipId),
+          ),
+          canViewAll
+            ? undefined
+            : or(
+                eq(workSessions.membershipId, actor.membershipId),
+                eq(workSessions.visibility, "project_visible"),
+              ),
+        ),
+      )
+      .orderBy(desc(workSessions.endAt), desc(workSessions.id));
+    const memberById = new Map(
+      members.map((member) => [member.membershipId, member] as const),
+    );
+    const latestByMember = new Map<string, Date>();
+    for (const activity of activityRows) {
+      if (latestByMember.has(activity.membershipId)) continue;
+      const member = memberById.get(activity.membershipId);
+      const maySee =
+        canViewAll ||
+        activity.membershipId === actor.membershipId ||
+        (member?.publicActivityVisible === true &&
+          activity.visibility === "project_visible");
+      if (maySee) latestByMember.set(activity.membershipId, activity.activityAt);
+    }
+    return members.map((member) => ({
+      ...member,
+      lastActivityAt: latestByMember.get(member.membershipId) ?? null,
+    }));
   }
 
   async candidateMembers(

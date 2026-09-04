@@ -584,6 +584,7 @@ export function AppShell({
   const location = useLocation();
   const navigate = useNavigate();
   const utilityMenuRef = useRef<HTMLDivElement>(null);
+  const sidebarTouchStartX = useRef<number | null>(null);
   const contextPanelRef = useRef<HTMLElement>(null);
   const contextScrollRef = useRef<HTMLDivElement>(null);
   const pageCopilot = useMemo(
@@ -843,6 +844,17 @@ export function AppShell({
           sidebarCollapsed && "lg:w-[76px]",
           sidebarOpen ? "translate-x-0" : "-translate-x-full",
         )}
+        onTouchEnd={(event) => {
+          const start = sidebarTouchStartX.current;
+          const end = event.changedTouches[0]?.clientX;
+          sidebarTouchStartX.current = null;
+          if (start !== null && end !== undefined && start - end > 72) {
+            setSidebarOpen(false);
+          }
+        }}
+        onTouchStart={(event) => {
+          sidebarTouchStartX.current = event.touches[0]?.clientX ?? null;
+        }}
       >
         <div className="app-sidebar-brand flex h-[76px] items-center gap-3 px-5">
           <div className="app-brand-mark grid size-10 place-items-center rounded-[14px] bg-[var(--accent)] text-[var(--accent-foreground)]">
@@ -1024,7 +1036,7 @@ export function AppShell({
       ) : null}
       <div
         className={cn(
-          "min-h-dvh lg:pl-[var(--sidebar-width)]",
+          "min-h-dvh min-w-0 w-full lg:pl-[var(--sidebar-width)]",
           sidebarCollapsed && "lg:pl-[76px]",
         )}
       >

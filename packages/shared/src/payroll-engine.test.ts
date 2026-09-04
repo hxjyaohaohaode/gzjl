@@ -59,6 +59,26 @@ describe("calculateHourlyPayroll", () => {
     expect(result.estimate).toBe(false);
   });
 
+  it("keeps a full hour when timer timestamps include milliseconds", () => {
+    const startAt = new Date("2026-09-01T01:00:30.527Z");
+    const result = calculateHourlyPayroll({
+      hourlyRate: "100.00",
+      timezone: "Asia/Shanghai",
+      intervals: [
+        {
+          sourceId: "timer-with-milliseconds",
+          startAt,
+          endAt: new Date(startAt.getTime() + 3_600_000),
+          approvalStatus: "approved",
+        },
+      ],
+      rules: [],
+      includePendingAsEstimate: false,
+    });
+    expect(result.approvedSeconds).toBe(3_600);
+    expect(result.grossAmount).toBe("100.000000");
+  });
+
   it("uses holiday priority and stacks a night multiplier", () => {
     const result = calculateHourlyPayroll({
       hourlyRate: "80",

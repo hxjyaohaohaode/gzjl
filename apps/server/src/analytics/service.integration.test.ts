@@ -352,6 +352,24 @@ describe("analytics and project work visibility", () => {
     expect(JSON.stringify(employeeRows)).not.toContain("协作者私密记录");
     expect(JSON.stringify(employeeRows)).not.toContain("关闭公开动态后的记录");
 
+    const employeeMembers = await service.members(
+      seeded.employeeActor,
+      seeded.project.id,
+      false,
+    );
+    expect(
+      employeeMembers.find((member) => member.membershipId === seeded.actor.id)
+        ?.lastActivityAt,
+    ).toEqual(new Date("2026-09-04T02:30:00.000Z"));
+    expect(
+      employeeMembers.find((member) => member.membershipId === seeded.coworker.id)
+        ?.lastActivityAt,
+    ).toEqual(new Date("2026-09-04T05:00:00.000Z"));
+    expect(
+      employeeMembers.find((member) => member.membershipId === seeded.hidden.id)
+        ?.lastActivityAt,
+    ).toBeNull();
+
     const ownerRows = await service.nodeWorkSessions(
       seeded.ownerActor,
       seeded.project.id,
@@ -360,5 +378,14 @@ describe("analytics and project work visibility", () => {
     );
     expect(ownerRows).toHaveLength(5);
     expect(ownerRows.every((row) => row.hasFullTiming)).toBe(true);
+    const ownerMembers = await service.members(
+      seeded.ownerActor,
+      seeded.project.id,
+      true,
+    );
+    expect(
+      ownerMembers.find((member) => member.membershipId === seeded.hidden.id)
+        ?.lastActivityAt,
+    ).toEqual(new Date("2026-09-04T09:00:00.000Z"));
   });
 });
