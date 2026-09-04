@@ -34,6 +34,7 @@ import {
 } from "@workbench/db/schema";
 
 import { createExportJobRuntime } from "./export-jobs.js";
+import { buildAiSystemPrompt } from "./ai-prompt.js";
 import {
   isPermanentWebPushFailure,
   isWithinQuietHours,
@@ -297,10 +298,7 @@ async function processAiJob(jobId: string): Promise<void> {
           messages: [
             {
               role: "system",
-              content:
-                job.taskType === "assistant_chat"
-                  ? "你是工作事实对话助手。先直接回答 question，再用当前 JSON 中已授权的成员、工时、审批、项目、节点与 recentRecords 工作记录事实解释依据；conversationHistory 仅用于理解上下文，最新事实优先。不能编造数据、泄露范围外信息、推测人格，也不能把建议写成事实。只输出一个可解析 JSON 对象，不能输出 Markdown、代码围栏或对象外文字。对象必须且只能包含 title、summary、highlights、risks、suggestions；summary 是自然、完整、简洁的对话回答，其他数组只放有事实支撑且确有价值的补充。"
-                  : "你是工作事实分析助手。只能依据输入 JSON 的已授权聚合数据与 recentRecords 工作记录事实，不能编造数据、推测人格或把建议表述成事实。只输出一个可解析的 JSON 对象，不能输出 Markdown、代码围栏或对象外文字。对象必须且只能包含 title、summary、highlights、risks、suggestions；每一条风险和建议都应说明所依据的可见事实；内容简洁、可执行、避免重复。",
+              content: buildAiSystemPrompt(job.taskType),
             },
             { role: "user", content: JSON.stringify(job.sourceSummary) },
           ],

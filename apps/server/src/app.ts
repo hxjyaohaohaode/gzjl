@@ -263,11 +263,8 @@ export async function buildApp({
       new ApprovalService(database),
       authenticate,
     );
-    await registerPayrollRoutes(
-      app,
-      new PayrollService(database),
-      authenticate,
-    );
+    const payrollService = new PayrollService(database);
+    await registerPayrollRoutes(app, payrollService, authenticate);
     const analyticsService = new AnalyticsService(database);
     await registerAnalyticsRoutes(
       app,
@@ -288,7 +285,12 @@ export async function buildApp({
     const aiConfigurationService = new AiConfigurationService(database, config);
     await registerAiRoutes(
       app,
-      new AiService(database, analyticsService, aiConfigurationService),
+      new AiService(
+        database,
+        analyticsService,
+        aiConfigurationService,
+        payrollService,
+      ),
       aiConfigurationService,
       authService,
       authenticate,

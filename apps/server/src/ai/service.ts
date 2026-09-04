@@ -17,7 +17,9 @@ import {
   workTypes,
 } from "@workbench/db/schema";
 
+import { isAuthorized } from "../auth/authorization.js";
 import type { AnalyticsActor, AnalyticsService } from "../analytics/service.js";
+import type { PayrollService } from "../payroll/service.js";
 import type { AiConfigurationService } from "./configuration.js";
 
 export const aiTaskTypes = [
@@ -28,6 +30,7 @@ export const aiTaskTypes = [
   "project_progress",
   "project_blockers",
   "organization_summary",
+  "salary_explanation",
   "assistant_chat",
 ] as const;
 export type AiTaskType = (typeof aiTaskTypes)[number];
@@ -40,6 +43,7 @@ const taskGoals: Record<AiTaskType, string> = {
   project_progress: "按项目汇总投入和进展证据；工时不能被直接解释为完成度。",
   project_blockers: "仅根据工作记录中的阻塞与项目事实定位风险，并给出可验证的处理建议。",
   organization_summary: "汇总授权范围内的组织工作事实，不做员工排名、处罚或绩效结论。",
+  salary_explanation: "解释本人可见的工资周期、计薪分项、调整与预估状态；逐字使用既有金额，不重新计薪或猜测税费。",
   assistant_chat: "回答用户关于工作、成员状态和项目状态的问题；结论必须能回溯到当前授权范围内的事实。",
 };
 
@@ -60,17 +64,59 @@ export class AiJobConflictError extends Error {
   constructor(message: string) { super(message); this.name = "AiJobConflictError"; }
 }
 
+export class AiPayrollAccessError extends Error {
+  constructor() {
+    super("薪资解释只支持本人范围，并要求当前账号具备查看本人薪资的权限。");
+    this.name = "AiPayrollAccessError";
+  }
+}
+
+function compactPayrollTrace(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const trace = value as Record<string, unknown>;
+  const takeStrings = (candidate: unknown, maximum: number) =>
+    Array.isArray(candidate)
+      ? candidate
+          .filter((item): item is string => typeof item === "string")
+          .slice(0, maximum)
+      : undefined;
+  return {
+    ...(typeof trace.date === "string" ? { date: trace.date } : {}),
+    ...(typeof trace.timezone === "string" ? { timezone: trace.timezone } : {}),
+    ...(typeof trace.estimate === "boolean" ? { estimate: trace.estimate } : {}),
+    ...(typeof trace.effectiveFrom === "string" || trace.effectiveFrom instanceof Date
+      ? { effectiveFrom: trace.effectiveFrom }
+      : {}),
+    ...(typeof trace.effectiveTo === "string" || trace.effectiveTo instanceof Date
+      ? { effectiveTo: trace.effectiveTo }
+      : {}),
+    ...(takeStrings(trace.dates, 93) ? { dates: takeStrings(trace.dates, 93) } : {}),
+    ...(takeStrings(trace.ruleIds, 32) ? { ruleIds: takeStrings(trace.ruleIds, 32) } : {}),
+    ...(takeStrings(trace.sourceIds, 60) ? { sourceIds: takeStrings(trace.sourceIds, 60) } : {}),
+  };
+}
+
 export class AiService {
   constructor(
     private readonly db: Database,
     private readonly analytics: AnalyticsService,
     private readonly configuration: AiConfigurationService,
+    private readonly payroll: PayrollService,
   ) {}
 
   async requestReport(actor: AnalyticsActor, input: AiReportRequest) {
     const { taskType, scope, from, to } = input;
     const question = input.question?.trim();
     const conversationId = input.conversationId?.trim() || "primary";
+    const canViewOwnPayroll =
+      scope === "self" &&
+      isAuthorized(actor.grants, "payroll.view_own", {
+        scopeKind: "self",
+        scopeId: actor.membershipId,
+      });
+    if (taskType === "salary_explanation" && !canViewOwnPayroll) {
+      throw new AiPayrollAccessError();
+    }
     const provider = await this.configuration.resolveEffective(actor.organizationId);
     if (!provider) throw new AiUnavailableError();
     const analysisActor =
@@ -98,7 +144,10 @@ export class AiService {
         ),
       )
       .limit(200);
-    const [memberProjects, access] = await Promise.all([
+    const includePayroll =
+      canViewOwnPayroll &&
+      (taskType === "salary_explanation" || taskType === "assistant_chat");
+    const [memberProjects, access, ownPayroll] = await Promise.all([
       scope === "self"
         ? this.db
             .select({ projectId: projectMembers.projectId })
@@ -111,6 +160,9 @@ export class AiService {
             )
         : Promise.resolve([]),
       this.analytics.buildAccessCondition(analysisActor),
+      includePayroll
+        ? this.payroll.listOwn(actor, { from, to })
+        : Promise.resolve(null),
     ]);
     const accessibleProjectIds = [
       ...new Set([
@@ -260,6 +312,70 @@ export class AiService {
         question: String((entry.job.scope as { question?: unknown }).question ?? ""),
         answer: entry.report?.summary ?? null,
       }));
+    const payrollItems = (ownPayroll?.items ?? []).slice(0, 12).map((record) => ({
+      period: {
+        id: record.period.id,
+        name: record.period.name,
+        timezone: record.period.timezone,
+        startsAt: record.period.startsAt,
+        endsAt: record.period.endsAt,
+        status: record.period.status,
+        settledAt: record.period.settledAt,
+      },
+      run: {
+        id: record.run.id,
+        runNumber: record.run.runNumber,
+        status: record.run.status,
+        calculationVersion: record.run.calculationVersion,
+        settledAt: record.run.settledAt,
+      },
+      item: {
+        id: record.item.id,
+        currency: record.item.currency,
+        approvedSeconds: record.item.approvedSeconds,
+        pendingSeconds: record.item.pendingSeconds,
+        grossAmount: record.item.grossAmount,
+        adjustmentAmount: record.item.adjustmentAmount,
+        finalAmount: record.item.finalAmount,
+        estimate: record.item.estimate,
+        needsReview: record.item.needsReview,
+      },
+      components: record.components.slice(0, 32).map((component) => ({
+        id: component.id,
+        type: component.type,
+        label: component.label,
+        sourceEntityType: component.sourceEntityType,
+        sourceEntityId: component.sourceEntityId,
+        sourceVersion: component.sourceVersion,
+        quantity: component.quantity,
+        unit: component.unit,
+        rate: component.rate,
+        multiplier: component.multiplier,
+        amount: component.amount,
+        calculationTrace: compactPayrollTrace(component.calculationTrace),
+      })),
+      componentsTruncated: record.components.length > 32,
+      dailyBreakdown: record.dailyBreakdown.slice(0, 93),
+      dailyBreakdownTruncated: record.dailyBreakdown.length > 93,
+    }));
+    const payrollSources = payrollItems.flatMap((record) => [
+      {
+        entityType: "payroll_item",
+        entityId: record.item.id,
+        label: `工资事实 · ${record.period.name}`,
+      },
+      {
+        entityType: "pay_period",
+        entityId: record.period.id,
+        label: `薪资周期 · ${record.period.name}`,
+      },
+      ...record.components.map((component) => ({
+        entityType: "payroll_component",
+        entityId: component.id,
+        entityVersion: component.sourceVersion ?? undefined,
+        label: `${record.period.name} · ${component.label}`,
+      })),
+    ]);
     const sourceSummary = this.limitSourceSummary({
       taskType,
       taskGoal: taskGoals[taskType],
@@ -274,6 +390,17 @@ export class AiService {
       byApproval: facts.byApproval,
       byHour: facts.byHour,
       funnel: facts.funnel,
+      ...(includePayroll
+        ? {
+            payroll: {
+              privacyScope: "self_only",
+              range: { from, to },
+              summary: ownPayroll?.summary ?? [],
+              items: payrollItems,
+              itemsTruncated: (ownPayroll?.items.length ?? 0) > payrollItems.length,
+            },
+          }
+        : {}),
       members: memberRows.map((member) => ({
         ...member,
         recordedSeconds:
@@ -295,6 +422,7 @@ export class AiService {
         nextStep: record.nextStep.slice(0, 1_000),
       })),
       sources: [
+        ...(taskType === "salary_explanation" ? payrollSources : []),
         // Keep record-level provenance first so a large organization cannot
         // crowd it out of the bounded source list with roster entries.
         ...recentRecords.map((record) => ({
@@ -313,6 +441,7 @@ export class AiService {
               label: member.displayName,
             }))
           : []),
+        ...(taskType === "salary_explanation" ? [] : payrollSources),
       ],
     });
     const inputHash = createHash("sha256")
@@ -334,7 +463,7 @@ export class AiService {
             model: provider.model,
             maxOutputTokens: provider.maxOutputTokens,
           },
-          template: "structured-work-intelligence-v4-chat",
+          template: "structured-work-intelligence-v5-payroll",
         }),
       )
       .digest("hex");
@@ -358,7 +487,7 @@ export class AiService {
         .limit(1);
       if (existing) return existing;
       await this.configuration.assertQuota(actor.organizationId, tx);
-      const [job] = await tx.insert(aiJobs).values({ organizationId: actor.organizationId, requestedBy: actor.membershipId, scope: { scope, from, to, ...(question ? { question, conversationId } : {}) }, taskType, provider: "openai_compatible", model: provider.model, promptTemplateVersion: "structured-work-intelligence-v4-chat", inputHash, sourceSummary, maxAttempts: provider.maxAttempts, maxOutputTokens: provider.maxOutputTokens }).returning();
+      const [job] = await tx.insert(aiJobs).values({ organizationId: actor.organizationId, requestedBy: actor.membershipId, scope: { scope, from, to, ...(question ? { question, conversationId } : {}) }, taskType, provider: "openai_compatible", model: provider.model, promptTemplateVersion: "structured-work-intelligence-v5-payroll", inputHash, sourceSummary, maxAttempts: provider.maxAttempts, maxOutputTokens: provider.maxOutputTokens }).returning();
       if (!job) throw new Error("Failed to create AI job");
       await tx.insert(outboxEvents).values({ organizationId: actor.organizationId, eventType: "ai.job.queued", entityType: "ai_job", entityId: job.id, entityVersion: 1, payload: { jobId: job.id } });
       return job;
@@ -409,6 +538,41 @@ export class AiService {
       Array.isArray(value) && value.length > maximum
         ? (value.slice(0, maximum) as V)
         : value;
+    const capPayroll = (
+      value: unknown,
+      maximumItems: number,
+      maximumComponents: number,
+      maximumDailyRows: number,
+    ) => {
+      if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+      const payroll = value as Record<string, unknown>;
+      const items = Array.isArray(payroll.items)
+        ? payroll.items.slice(0, maximumItems).map((item) => {
+            if (!item || typeof item !== "object" || Array.isArray(item)) return item;
+            const record = item as Record<string, unknown>;
+            return {
+              ...record,
+              components: cap(record.components, maximumComponents),
+              dailyBreakdown: cap(record.dailyBreakdown, maximumDailyRows),
+              componentsTruncated:
+                record.componentsTruncated === true ||
+                (Array.isArray(record.components) &&
+                  record.components.length > maximumComponents),
+              dailyBreakdownTruncated:
+                record.dailyBreakdownTruncated === true ||
+                (Array.isArray(record.dailyBreakdown) &&
+                  record.dailyBreakdown.length > maximumDailyRows),
+            };
+          })
+        : payroll.items;
+      return {
+        ...payroll,
+        items,
+        itemsTruncated:
+          payroll.itemsTruncated === true ||
+          (Array.isArray(payroll.items) && payroll.items.length > maximumItems),
+      };
+    };
     let bounded = {
       ...summary,
       byDay: cap(summary.byDay, 366),
@@ -417,6 +581,7 @@ export class AiService {
       members: cap(summary.members, 200),
       projects: cap(summary.projects, 200),
       recentRecords: cap(summary.recentRecords, 60),
+      payroll: capPayroll(summary.payroll, 12, 32, 93),
       conversationHistory: cap(summary.conversationHistory, 10),
       sources: cap(summary.sources, 200),
     } as T;
@@ -429,6 +594,7 @@ export class AiService {
       members: cap(summary.members, 80),
       projects: cap(summary.projects, 80),
       recentRecords: cap(summary.recentRecords, 24),
+      payroll: capPayroll(summary.payroll, 6, 20, 45),
       conversationHistory: cap(summary.conversationHistory, 6),
       sources: cap(summary.sources, 80),
       inputTruncated: true,
@@ -453,6 +619,7 @@ export class AiService {
       members: cap(summary.members, 50),
       projects: compactProjects,
       recentRecords: cap(summary.recentRecords, 10),
+      payroll: capPayroll(summary.payroll, 3, 8, 31),
       conversationHistory: cap(summary.conversationHistory, 4),
       sources: cap(summary.sources, 48),
       inputTruncated: true,

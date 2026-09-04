@@ -15,6 +15,7 @@ import {
 import type { AiConfigurationService } from "./configuration.js";
 import {
   AiJobConflictError,
+  AiPayrollAccessError,
   AiUnavailableError,
   aiTaskTypes,
   type AiService,
@@ -161,6 +162,20 @@ export async function registerAiRoutes(
           message: "当前账号没有组织级团队 AI 分析权限。",
         });
       }
+      if (
+        input.taskType === "salary_explanation" &&
+        (input.scope !== "self" ||
+          !request.auth ||
+          !isAuthorized(request.auth.grants, "payroll.view_own", {
+            scopeKind: "self",
+            scopeId: request.auth.membershipId,
+          }))
+      ) {
+        return reply.code(403).send({
+          error: "payroll_ai_forbidden",
+          message: "薪资解释只支持本人范围，并要求查看本人薪资权限。",
+        });
+      }
       try {
         const job = await service.requestReport(request.auth!, {
           taskType: input.taskType,
@@ -181,6 +196,12 @@ export async function registerAiRoutes(
         if (error instanceof AiQuotaExceededError) {
           return reply.code(429).send({
             error: "ai_quota_exceeded",
+            message: error.message,
+          });
+        }
+        if (error instanceof AiPayrollAccessError) {
+          return reply.code(403).send({
+            error: "payroll_ai_forbidden",
             message: error.message,
           });
         }

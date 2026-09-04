@@ -2,7 +2,7 @@ import { expect, test, type Page } from "@playwright/test";
 
 async function mockAuthenticatedWorkspace(
   page: Page,
-  options: { isOwner?: boolean; canExport?: boolean } = {},
+  options: { isOwner?: boolean; canExport?: boolean; canViewPayroll?: boolean } = {},
 ): Promise<void> {
   let authenticated = false;
   await page.route("**/api/auth/csrf", (route) =>
@@ -33,11 +33,15 @@ async function mockAuthenticatedWorkspace(
                 scopeKind: "self",
                 scopeId: "00000000-0000-4000-8000-000000000002",
               },
-              {
-                permission: "payroll.view_own",
-                scopeKind: "self",
-                scopeId: "00000000-0000-4000-8000-000000000002",
-              },
+              ...((options.canViewPayroll ?? true)
+                ? [
+                    {
+                      permission: "payroll.view_own",
+                      scopeKind: "self",
+                      scopeId: "00000000-0000-4000-8000-000000000002",
+                    },
+                  ]
+                : []),
               {
                 permission: "payroll.configure",
                 scopeKind: "organization",
@@ -1987,6 +1991,135 @@ test("AI report requests keep a stable five-minute range for cost-safe deduplica
   expect(to.getUTCMilliseconds()).toBe(0);
   expect(to.getUTCMinutes() % 5).toBe(0);
   expect(to.getTime() - from.getTime()).toBe(7 * 86_400_000);
+});
+
+test("AI salary explanation is explicitly self-scoped and uses a bounded payroll range", async ({
+  page,
+}) => {
+  await mockAuthenticatedWorkspace(page);
+  let request: {
+    taskType: string;
+    scope: string;
+    from: string;
+    to: string;
+  } | null = null;
+  await page.route("**/api/ai/reports", async (route) => {
+    if (route.request().method() === "GET") {
+      await route.fulfill({ json: { items: [] } });
+      return;
+    }
+    request = route.request().postDataJSON() as typeof request;
+    await route.fulfill({
+      status: 202,
+      json: { job: { id: "salary-job", status: "queued" } },
+    });
+  });
+
+  await page.goto("/login");
+  await page.getByLabel("邮箱或手机号").fill("owner@example.test");
+  await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+  await page.goto("/ai");
+  await page.getByRole("button", { name: "解释我的薪资", exact: true }).click();
+  await page.getByRole("button", { name: "生成所选洞察", exact: true }).click();
+
+  await expect.poll(() => request).not.toBeNull();
+  expect(request).toMatchObject({
+    taskType: "salary_explanation",
+    scope: "self",
+  });
+  expect(
+    new Date(String(request?.to)).getTime() - new Date(String(request?.from)).getTime(),
+  ).toBe(93 * 86_400_000);
+});
+
+test("AI salary explanation is hidden when the account cannot view its own payroll", async ({
+  page,
+}) => {
+  await mockAuthenticatedWorkspace(page, { canViewPayroll: false });
+  await page.route("**/api/ai/reports", (route) =>
+    route.fulfill({ json: { items: [] } }),
+  );
+
+  await page.goto("/login");
+  await page.getByLabel("邮箱或手机号").fill("member@example.test");
+  await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+  await page.goto("/ai");
+
+  await expect(
+    page.getByRole("button", { name: "解释我的薪资", exact: true }),
+  ).toHaveCount(0);
+});
+
+test("AI salary report exposes its authorized payroll provenance without exposing raw identifiers", async ({
+  page,
+}) => {
+  await mockAuthenticatedWorkspace(page);
+  const jobId = "00000000-0000-4000-8000-000000000091";
+  const reportId = "00000000-0000-4000-8000-000000000092";
+  const reportRecord = {
+    job: {
+      id: jobId,
+      taskType: "salary_explanation",
+      status: "completed",
+      errorSummary: null,
+      queuedAt: "2026-09-04T01:00:00.000Z",
+      scope: { scope: "self", from: "2026-06-03T00:00:00.000Z", to: "2026-09-04T00:00:00.000Z" },
+    },
+    report: {
+      id: reportId,
+      title: "2026 年 9 月本人薪资解释",
+      summary: "本期最终金额为 CNY 1280.000000，当前仍为预估状态。",
+      structuredOutput: {
+        highlights: ["基础计薪分项为 CNY 1200.000000。"],
+        risks: ["仍有 3600 秒待审核工时。"],
+        suggestions: ["先核对待审工时，再确认最终工资。"],
+      },
+      sourceCount: 2,
+      generatedAt: "2026-09-04T01:01:00.000Z",
+    },
+  };
+  await page.route("**/api/ai/reports", (route) =>
+    route.fulfill({ json: { items: [reportRecord] } }),
+  );
+  await page.route(`**/api/ai/reports/${reportId}`, (route) =>
+    route.fulfill({
+      json: {
+        ...reportRecord,
+        sources: [
+          {
+            id: "00000000-0000-4000-8000-000000000093",
+            entityType: "payroll_item",
+            entityId: "00000000-0000-4000-8000-000000000094",
+            entityVersion: null,
+            label: "工资事实 · 2026 年 9 月",
+          },
+          {
+            id: "00000000-0000-4000-8000-000000000095",
+            entityType: "pay_period",
+            entityId: "00000000-0000-4000-8000-000000000096",
+            entityVersion: null,
+            label: "薪资周期 · 2026 年 9 月",
+          },
+        ],
+      },
+    }),
+  );
+
+  await page.goto("/login");
+  await page.getByLabel("邮箱或手机号").fill("owner@example.test");
+  await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+  await page.goto("/ai");
+
+  await expect(page.getByRole("heading", { name: "2026 年 9 月本人薪资解释" })).toBeVisible();
+  await expect(page.getByText("工资事实 · 2026 年 9 月", { exact: true })).toBeVisible();
+  await expect(page.getByText("薪资周期 · 2026 年 9 月", { exact: true })).toBeVisible();
+  await expect(page.getByText("工资事实", { exact: true })).toBeVisible();
+  await expect(page.getByText("待确认项", { exact: true })).toBeVisible();
+  await expect(page.getByText("核对建议", { exact: true })).toBeVisible();
+  await expect(page.getByText("00000000-0000-4000-8000-000000000094")).toHaveCount(0);
 });
 
 test("AI workspace sends a persistent fact-scoped conversation turn", async ({ page }) => {

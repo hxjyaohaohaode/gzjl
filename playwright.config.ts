@@ -25,7 +25,9 @@ export default defineConfig({
   fullyParallel: true,
   // Dynamic chart modules are intentionally exercised in both viewports. Keep
   // local fallback Chromium from saturating a Windows development machine.
-  workers: process.env.CI ? 2 : 4,
+  // Two workers keep the local API/Vite pair stable while still exercising concurrency;
+  // the previous four-worker default could terminate the Vite process mid-suite.
+  workers: 2,
   retries: process.env.CI ? 2 : 0,
   reporter: process.env.CI ? "github" : "list",
   use: {

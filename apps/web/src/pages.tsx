@@ -8752,6 +8752,16 @@ interface AiReportRecord {
   } | null;
 }
 
+interface AiReportDetail extends AiReportRecord {
+  sources: Array<{
+    id: string;
+    entityType: string;
+    entityId: string;
+    entityVersion: string | null;
+    label: string;
+  }>;
+}
+
 type AiTaskType =
   | "daily_summary"
   | "weekly_summary"
@@ -8760,6 +8770,7 @@ type AiTaskType =
   | "project_progress"
   | "project_blockers"
   | "organization_summary"
+  | "salary_explanation"
   | "assistant_chat";
 
 const aiTaskPresets: Array<{
@@ -8767,6 +8778,8 @@ const aiTaskPresets: Array<{
   label: string;
   rangeDays: number;
   teamOnly?: boolean;
+  selfOnly?: boolean;
+  requiresOwnPayroll?: boolean;
 }> = [
   { type: "daily_summary", label: "总结今日", rangeDays: 1 },
   { type: "weekly_summary", label: "生成周报", rangeDays: 7 },
@@ -8775,6 +8788,13 @@ const aiTaskPresets: Array<{
   { type: "project_progress", label: "项目进展", rangeDays: 31 },
   { type: "project_blockers", label: "项目阻塞", rangeDays: 31 },
   { type: "organization_summary", label: "团队总结", rangeDays: 7, teamOnly: true },
+  {
+    type: "salary_explanation",
+    label: "解释我的薪资",
+    rangeDays: 93,
+    selfOnly: true,
+    requiresOwnPayroll: true,
+  },
 ];
 
 interface AiSettings {
@@ -9242,6 +9262,7 @@ export function AiPage({ me }: { me: Me }) {
       grant.permission === "ai.team_analysis" &&
       grant.scopeKind === "organization",
   );
+  const canViewOwnPayroll = hasGrant(me, "payroll.view_own");
   const allItems = reports.data?.items ?? [];
   const reportItems = allItems.filter((item) => item.job.taskType !== "assistant_chat");
   const chatItems = allItems
@@ -9264,6 +9285,12 @@ export function AiPage({ me }: { me: Me }) {
     reportItems[0] ??
     null;
   const selectedReport = selected?.report ?? null;
+  const selectedDetail = useQuery({
+    queryKey: ["ai-report-detail", selectedReport?.id],
+    queryFn: () => api<AiReportDetail>(`/api/ai/reports/${selectedReport!.id}`),
+    enabled: Boolean(selectedReport?.id),
+  });
+  const isSalaryReport = selected?.job.taskType === "salary_explanation";
 
   return (
     <>
@@ -9275,7 +9302,13 @@ export function AiPage({ me }: { me: Me }) {
             <select
               className={`${fieldClass} min-h-10 w-auto min-w-32`}
               id="ai-scope"
-              onChange={(event) => setScope(event.target.value as "self" | "team")}
+              onChange={(event) => {
+                const nextScope = event.target.value as "self" | "team";
+                setScope(nextScope);
+                if (nextScope === "team" && taskType === "salary_explanation") {
+                  setTaskType("weekly_summary");
+                }
+              }}
               value={scope}
             >
               <option value="self">本人范围</option>
@@ -9424,7 +9457,11 @@ export function AiPage({ me }: { me: Me }) {
                 </div>
                 <div className="mt-5 flex flex-wrap items-center gap-3">
                   {aiTaskPresets
-                    .filter((preset) => !preset.teamOnly || canAnalyzeTeam)
+                    .filter(
+                      (preset) =>
+                        (!preset.teamOnly || canAnalyzeTeam) &&
+                        (!preset.requiresOwnPayroll || canViewOwnPayroll),
+                    )
                     .map((preset) => (
                       <Button
                         aria-pressed={taskType === preset.type}
@@ -9432,6 +9469,7 @@ export function AiPage({ me }: { me: Me }) {
                         onClick={() => {
                           setTaskType(preset.type);
                           if (preset.teamOnly) setScope("team");
+                          if (preset.selfOnly) setScope("self");
                         }}
                         size="compact"
                         variant={taskType === preset.type ? "primary" : "secondary"}
@@ -9505,22 +9543,50 @@ export function AiPage({ me }: { me: Me }) {
                           items={
                             selectedReport.structuredOutput.highlights ?? []
                           }
-                          title="进展亮点"
+                          title={isSalaryReport ? "工资事实" : "进展亮点"}
                           tone="positive"
                         />
                         <InsightList
                           items={selectedReport.structuredOutput.risks ?? []}
-                          title="风险提示"
+                          title={isSalaryReport ? "待确认项" : "风险提示"}
                           tone="danger"
                         />
                         <InsightList
                           items={
                             selectedReport.structuredOutput.suggestions ?? []
                           }
-                          title="建议"
+                          title={isSalaryReport ? "核对建议" : "建议"}
                           tone="info"
                         />
                       </div>
+                      <section className="mt-5" aria-label="报告事实来源">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <h3 className="text-sm font-bold">事实来源</h3>
+                          <Badge>
+                            {selectedDetail.data?.sources.length ?? selectedReport.sourceCount} 项
+                          </Badge>
+                        </div>
+                        {selectedDetail.isPending ? (
+                          <div className="mt-3"><LoadingBlock /></div>
+                        ) : selectedDetail.data?.sources.length ? (
+                          <div className="mt-3 flex flex-wrap gap-2">
+                            {selectedDetail.data.sources.map((source) => (
+                              <span
+                                className="rounded-lg bg-[var(--surface-subtle)] px-3 py-2 text-xs leading-5 text-[var(--text-muted)]"
+                                key={source.id}
+                                title={`${source.entityType}${source.entityVersion ? ` · v${source.entityVersion}` : ""}`}
+                              >
+                                {source.label}
+                              </span>
+                            ))}
+                          </div>
+                        ) : (
+                          <p className="mt-3 text-sm text-[var(--text-muted)]">
+                            本报告没有可展示的实体来源；请仅将摘要作为辅助说明。
+                          </p>
+                        )}
+                        <ErrorMessage error={selectedDetail.error} />
+                      </section>
                     </>
                   ) : (
                     <div className="min-h-48">

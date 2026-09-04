@@ -1055,7 +1055,10 @@ export class PayrollService {
     });
   }
 
-  async listOwn(actor: PayrollActor) {
+  async listOwn(
+    actor: PayrollActor,
+    range?: { from: Date; to: Date },
+  ) {
     const records = await this.db
       .select({ item: payrollItems, run: payrollRuns, period: payPeriods })
       .from(payrollItems)
@@ -1065,6 +1068,8 @@ export class PayrollService {
         and(
           eq(payrollItems.membershipId, actor.membershipId),
           eq(payPeriods.organizationId, actor.organizationId),
+          range ? lt(payPeriods.startsAt, range.to) : undefined,
+          range ? gt(payPeriods.endsAt, range.from) : undefined,
         ),
       )
       .orderBy(desc(payPeriods.endsAt), desc(payrollRuns.runNumber));
