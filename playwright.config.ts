@@ -27,9 +27,18 @@ export default defineConfig({
   // local fallback Chromium from saturating a Windows development machine.
   // Two workers keep the local API/Vite pair stable while still exercising concurrency;
   // the previous four-worker default could terminate the Vite process mid-suite.
-  workers: 2,
+  // GitHub's shared runner can become CPU-bound when two Chromium contexts
+  // render the chart-heavy desktop and mobile workspaces at the same time.
+  // That produced unrelated navigation timeouts across otherwise stable
+  // features. Serialize CI browsers for a deterministic deployment gate while
+  // retaining two workers on a developer machine.
+  workers: process.env.CI ? 1 : 2,
   retries: process.env.CI ? 2 : 0,
   reporter: process.env.CI ? "github" : "list",
+  timeout: process.env.CI ? 45_000 : 30_000,
+  expect: {
+    timeout: process.env.CI ? 10_000 : 5_000,
+  },
   use: {
     baseURL: "http://127.0.0.1:5173",
     timezoneId: e2eTimezone,
