@@ -6632,7 +6632,7 @@ function PayrollManagementPanel() {
           <Badge tone="info">版本化 · 生效日期 · 审计</Badge>
         </CardHeader>
         <CardContent>
-          <div className="mb-5 grid gap-2 sm:grid-cols-2 xl:grid-cols-4" aria-label="选择要配置薪资的成员">
+          <div className="mb-5 grid gap-2 sm:grid-cols-2 xl:grid-cols-4" aria-label="薪资对象列表">
             {activeMembers.map((member) => (
               <button
                 aria-pressed={selectedMemberId === member.membershipId}
