@@ -225,6 +225,9 @@ describe("employee payroll view and receipt acknowledgement", () => {
       .from(payPeriods)
       .where(eq(payPeriods.id, period!.id));
     expect(reopenedPeriod).toMatchObject({ status: "open", settledAt: null, lockedAt: null });
+    await expect(
+      service.deleteUncommittedPeriod(ownerActor, period!.id),
+    ).rejects.toThrow("该周期曾经导出锁定");
 
     await service.updateSettings(ownerActor, 15, 9 * 60 + 30);
     const after = await service.listOwn(employeeActor);
@@ -367,5 +370,76 @@ describe("employee payroll view and receipt acknowledgement", () => {
       .from(payrollItemComponents)
       .where(eq(payrollItemComponents.payrollItemId, item!.id));
     expect(components.filter((component) => component.type === "bonus")).toHaveLength(0);
+
+    const cancelled = await service.cancelCalculation(ownerActor, run.id);
+    expect(cancelled.status).toBe("cancelled");
+    const [openedPeriod] = await db
+      .select()
+      .from(payPeriods)
+      .where(eq(payPeriods.id, period!.id));
+    expect(openedPeriod?.status).toBe("open");
+
+    const restored = await service.calculate(ownerActor, period!.id);
+    expect(restored).toMatchObject({ id: run.id, status: "ready" });
+    await service.cancelCalculation(ownerActor, restored.id);
+    await expect(
+      service.deleteUncommittedPeriod(ownerActor, period!.id),
+    ).resolves.toEqual({ id: period!.id, deleted: true });
+    expect(
+      await db.select().from(payPeriods).where(eq(payPeriods.id, period!.id)),
+    ).toHaveLength(0);
+    expect(
+      await db.select().from(payrollRuns).where(eq(payrollRuns.payPeriodId, period!.id)),
+    ).toHaveLength(0);
+
+    await db.insert(workSessions).values({
+      organizationId: organization!.id,
+      membershipId: employeeMembership!.id,
+      startAt: new Date("2026-09-02T00:00:00.000Z"),
+      endAt: new Date("2026-09-02T23:00:00.000Z"),
+      timezone: "UTC",
+      grossSeconds: 23 * 3_600,
+      netSeconds: 23 * 3_600,
+      source: "manual",
+      content: "达到周奖励阈值",
+      result: "完成",
+      submissionStatus: "submitted",
+      approvalStatus: "approved",
+      visibility: "management_only",
+    });
+    const liveOverview = await service.managementOverview(ownerActor);
+    const livePreview = liveOverview.liveItems.find(
+      (entry) => entry.membershipId === employeeMembership!.id,
+    )?.preview;
+    expect(livePreview).toMatchObject({
+      approvedSeconds: 108_000,
+      pendingSeconds: 0,
+      weeklyBonusSeconds: 18_000,
+      weeklyBonusEstimatedSeconds: 0,
+      weeklyBonusRule: {
+        thresholdSeconds: 108_000,
+        rewardSeconds: 18_000,
+      },
+      estimatedAmount: "3500.000000",
+      calculationBreakdown: {
+        confirmedWorkAmount: "3000.000000",
+        pendingWorkAmount: "0.000000",
+        confirmedBonusAmount: "500.000000",
+        estimatedBonusAmount: "0.000000",
+      },
+      currentWeek: {
+        approvedSeconds: 108_000,
+        pendingSeconds: 0,
+        totalSeconds: 108_000,
+        weeklyBonusSeconds: 18_000,
+      },
+    });
+    expect(livePreview?.weeklyBreakdown).toContainEqual(
+      expect.objectContaining({
+        approvedSeconds: 108_000,
+        pendingSeconds: 0,
+        weeklyBonusSeconds: 18_000,
+      }),
+    );
   });
 });

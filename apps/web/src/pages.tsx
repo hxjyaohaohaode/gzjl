@@ -3173,13 +3173,48 @@ function evidenceUploadStateLabel(state: EvidenceUploadState): string {
   }
 }
 
+function currentOrganizationWeekRange(): { from: string; to: string } {
+  const timezone = getOrganizationTimezone();
+  const today = toZonedInputValue(new Date(), timezone).slice(0, 10);
+  const calendarDate = new Date(`${today}T00:00:00.000Z`);
+  const daysSinceMonday = (calendarDate.getUTCDay() + 6) % 7;
+  calendarDate.setUTCDate(calendarDate.getUTCDate() - daysSinceMonday);
+  const monday = calendarDate.toISOString().slice(0, 10);
+  return {
+    from: zonedInputToDate(`${monday}T00:00:00`, timezone).toISOString(),
+    to: new Date().toISOString(),
+  };
+}
+
 export function HomePage({ me }: { me: Me }) {
+  const currentWeek = useMemo(() => currentOrganizationWeekRange(), []);
   const work = useQuery({
     queryKey: ["work-sessions", "home", "fact", 5],
     queryFn: () =>
       api<{ items: WorkSession[] }>(
         "/api/work-sessions?limit=5&recordKind=fact",
       ),
+  });
+  const weeklyWork = useQuery({
+    queryKey: [
+      "analytics-summary",
+      "home-current-week",
+      currentWeek.from,
+      currentWeek.to,
+      me.user.membershipId,
+    ],
+    queryFn: () => {
+      const query = new URLSearchParams({
+        from: currentWeek.from,
+        to: currentWeek.to,
+        memberIds: me.user.membershipId,
+      });
+      return api<{ totals: { totalSeconds: number } }>(
+        `/api/analytics/summary?${query.toString()}`,
+      );
+    },
+    staleTime: 15_000,
+    refetchOnWindowFocus: false,
   });
   const timer = useQuery({
     queryKey: ["timer"],
@@ -3188,8 +3223,6 @@ export function HomePage({ me }: { me: Me }) {
   const factualWork = (work.data?.items ?? []).filter(
     (item) => item.recordKind !== "plan",
   );
-  const total =
-    factualWork.reduce((sum, item) => sum + item.netSeconds, 0);
   const pendingCount =
     factualWork.filter((item) => item.approvalStatus === "pending_review")
       .length;
@@ -3281,17 +3314,20 @@ export function HomePage({ me }: { me: Me }) {
             <Card className="home-stat-card">
               <CardContent>
                 <p className="text-xs font-semibold text-[var(--text-muted)]">
-                  最近记录时长
+                  本周已记录工时
                 </p>
                 <p className="text-2xl font-extrabold tracking-[-0.04em] tabular-nums">
-                  {formatDuration(total)}
+                  {weeklyWork.isPending
+                    ? "—"
+                    : formatDuration(weeklyWork.data?.totals.totalSeconds ?? 0)}
                 </p>
+                <p className="mt-1 text-xs text-[var(--text-muted)]">周一至现在 · 仅本人事实记录</p>
               </CardContent>
             </Card>
             <Card className="home-stat-card">
               <CardContent>
                 <p className="text-xs font-semibold text-[var(--text-muted)]">
-                  待处理审核
+                  最近 5 条待审核
                 </p>
                 <p className="text-2xl font-extrabold tracking-[-0.04em] tabular-nums">
                   {pendingCount}
@@ -6884,15 +6920,48 @@ interface PayrollOwnResponse {
     pendingSeconds: number;
     weeklyBonusSeconds: number;
     weeklyBonusEstimatedSeconds: number;
+    weeklyBonusRule: null | {
+      thresholdSeconds: number;
+      rewardSeconds: number;
+    };
     estimatedAmount: string;
     projectedPeriodAmount: string;
+    calculationBreakdown: {
+      confirmedWorkAmount: string;
+      pendingWorkAmount: string;
+      confirmedBonusAmount: string;
+      estimatedBonusAmount: string;
+    };
+    currentWeek: null | {
+      weekStartDate: string;
+      startsOn: string;
+      endsOn: string;
+      approvedSeconds: number;
+      pendingSeconds: number;
+      totalSeconds: number;
+      weeklyBonusSeconds: number;
+      weeklyBonusEstimatedSeconds: number;
+    };
+    weeklyBreakdown: Array<{
+      weekStartDate: string;
+      startsOn: string;
+      endsOn: string;
+      approvedSeconds: number;
+      pendingSeconds: number;
+      weeklyBonusSeconds: number;
+      weeklyBonusEstimatedSeconds: number;
+    }>;
     salaryTimeline: Array<{
       date: string;
       approvedAmount: string;
       pendingAmount: string;
       totalAmount: string;
+      approvedSeconds: number;
+      pendingSeconds: number;
       workedSeconds: number;
       bonusSeconds: number;
+      weeklyBonusSeconds: number;
+      weeklyBonusEstimatedSeconds: number;
       actualCumulativeAmount: string | null;
       projectedCumulativeAmount: string;
       forecast: boolean;
@@ -7338,6 +7407,16 @@ function PayrollManagementPanel() {
       api(`/api/payroll-runs/${runId}/reopen`, { method: "POST" }),
     onSuccess: refresh,
   });
+  const cancelRun = useMutation({
+    mutationFn: (runId: string) =>
+      api(`/api/payroll-runs/${runId}/cancel-calculation`, { method: "POST" }),
+    onSuccess: refresh,
+  });
+  const deletePeriod = useMutation({
+    mutationFn: (periodId: string) =>
+      api(`/api/payroll/periods/${periodId}`, { method: "DELETE" }),
+    onSuccess: refresh,
+  });
   const downloadFinanceExport = (runId: string) => {
     const anchor = document.createElement("a");
     anchor.href = `/api/payroll-runs/${runId}/finance-export.csv`;
@@ -7540,7 +7619,7 @@ function PayrollManagementPanel() {
               saveSettings.mutate();
             }}
           >
-            <Field hint="每月该日发放上一个自然月薪资，默认 10 日。" label="默认发薪日">
+            <Field hint="由所有者设置：每月该日预计发放上一个自然月薪资。" label="预计发薪日（每月）">
               <input
                 className={`${fieldClass} w-32`}
                 max="28"
@@ -7555,8 +7634,9 @@ function PayrollManagementPanel() {
                 value={cutoffDay}
               />
             </Field>
-            <Field hint="到达该时刻前完成核对与财务导出。" label="默认发薪截止时间">
+            <Field hint="该时间会同步显示在员工的本月薪资中。" label="预计发薪时间">
               <input
+                aria-label="预计发薪时间"
                 className={`${fieldClass} w-36`}
                 onChange={(event) => {
                   setCutoffMinuteOverride(cutoffTimeMinutes(event.target.value));
@@ -7568,40 +7648,83 @@ function PayrollManagementPanel() {
               />
             </Field>
             <Button disabled={saveSettings.isPending} size="compact" type="submit" variant="secondary">
-              {saveSettings.isPending ? "保存中…" : "保存默认周期"}
+              {saveSettings.isPending ? "保存中…" : "保存预计发薪时间"}
             </Button>
           </form>
           <form className="grid gap-4 lg:grid-cols-4" onSubmit={(event) => { event.preventDefault(); createPeriod.mutate(); }}>
             <Field label="周期名称"><input className={fieldClass} onChange={(event) => setPeriodForm({ ...periodForm, name: event.target.value })} required value={periodForm.name} /></Field>
             <Field label="开始"><input className={fieldClass} onChange={(event) => setPeriodForm({ ...periodForm, startsAt: event.target.value })} required type="datetime-local" value={periodForm.startsAt} /></Field>
             <Field label="结束（不含）"><input className={fieldClass} onChange={(event) => setPeriodForm({ ...periodForm, endsAt: event.target.value })} required type="datetime-local" value={periodForm.endsAt} /></Field>
-            <Field label="确认截止"><input className={fieldClass} onChange={(event) => { setPeriodCutoffTouched(true); setPeriodForm({ ...periodForm, cutoffAt: event.target.value }); }} required type="datetime-local" value={effectivePeriodCutoffAt} /></Field>
+            <Field label="本周期预计发薪时间"><input aria-label="本周期预计发薪时间" className={fieldClass} onChange={(event) => { setPeriodCutoffTouched(true); setPeriodForm({ ...periodForm, cutoffAt: event.target.value }); }} required type="datetime-local" value={effectivePeriodCutoffAt} /></Field>
             <div className="lg:col-span-4"><Button disabled={createPeriod.isPending} type="submit">创建薪资周期</Button></div>
           </form>
           <div className="mt-5 space-y-2">
             {management.data?.periods.map((period) => (
               <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl bg-[var(--surface-subtle)] px-4 py-3" key={period.id}>
-                <div><p className="font-semibold">{period.name}</p><p className="text-xs text-[var(--text-muted)]">{formatDateTime(period.startsAt)} – {formatDateTime(period.endsAt)} · {payPeriodStatusLabels[period.status] ?? period.status} · 截止 {formatDateTime(period.cutoffAt)}</p></div>
-                <Button disabled={period.status !== "open" || calculatePeriod.isPending} onClick={() => calculatePeriod.mutate(period.id)} type="button" variant="secondary">计算本周期</Button>
+                <div><p className="font-semibold">{period.name}</p><p className="text-xs text-[var(--text-muted)]">{formatDateTime(period.startsAt)} – {formatDateTime(period.endsAt)} · {payPeriodStatusLabels[period.status] ?? period.status} · 预计发薪 {formatDateTime(period.cutoffAt)}</p></div>
+                {period.status === "open" ? (
+                  <div className="flex flex-wrap gap-2">
+                    <Button disabled={calculatePeriod.isPending} onClick={() => calculatePeriod.mutate(period.id)} type="button" variant="secondary">计算本周期</Button>
+                    <Button
+                      disabled={deletePeriod.isPending}
+                      onClick={() => {
+                        if (window.confirm("撤销这个误建周期？只会移除尚未导出、尚未锁定的周期和已撤销计算，不会删除任何工作记录；曾锁定的历史周期不能删除。")) deletePeriod.mutate(period.id);
+                      }}
+                      type="button"
+                      variant="ghost"
+                    >
+                      撤销误建周期
+                    </Button>
+                  </div>
+                ) : null}
               </div>
             ))}
           </div>
-          {management.data?.runs.some((entry) => ["ready", "settled"].includes(entry.run.status)) ? (
+          {management.data?.runs.some((entry) => ["ready", "review_required", "settled"].includes(entry.run.status)) ? (
             <div className="mt-5 space-y-2">
-              {management.data.runs.filter((entry) => ["ready", "settled"].includes(entry.run.status)).map((entry) => (
-                <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl bg-[var(--success-soft)] px-4 py-3" key={entry.run.id}>
-                  <span className="text-sm font-semibold">{entry.period.name} · 批次 #{entry.run.runNumber} · {payrollRunStatusLabels[entry.run.status] ?? entry.run.status}</span>
+              {management.data.runs.filter((entry) => ["ready", "review_required", "settled"].includes(entry.run.status)).map((entry) => (
+                <div className={`flex flex-wrap items-center justify-between gap-3 rounded-xl px-4 py-3 ${entry.run.status === "settled" ? "bg-[var(--success-soft)]" : "bg-[var(--warning-soft)]"}`} key={entry.run.id}>
+                  <div>
+                    <p className="text-sm font-semibold">{entry.period.name} · 批次 #{entry.run.runNumber} · {payrollRunStatusLabels[entry.run.status] ?? entry.run.status}</p>
+                    {entry.run.status !== "settled" ? <p className="mt-1 text-xs text-[var(--text-muted)]">尚未导出、尚未锁定；只有点击“确认导出并锁定”后才会生效。</p> : null}
+                  </div>
                   <div className="flex flex-wrap gap-2">
                     {entry.run.status === "ready" ? (
-                      <Button
-                        disabled={settleRun.isPending}
-                        onClick={() => {
-                          if (window.confirm("将导出财务账单并锁定本周期工时。确认继续？")) settleRun.mutate(entry.run.id);
-                        }}
-                        type="button"
-                      >
-                        确认导出并锁定
-                      </Button>
+                      <>
+                        <Button
+                          disabled={settleRun.isPending}
+                          onClick={() => {
+                            if (window.confirm("将导出财务账单并锁定本周期工时。锁定前请核对金额；确认继续？")) settleRun.mutate(entry.run.id);
+                          }}
+                          type="button"
+                        >
+                          确认导出并锁定
+                        </Button>
+                        <Button
+                          disabled={cancelRun.isPending}
+                          onClick={() => {
+                            if (window.confirm("撤销这次尚未导出、尚未锁定的计算？周期会恢复为可计算，工作记录不会删除，计算快照仍保留审计。")) cancelRun.mutate(entry.run.id);
+                          }}
+                          type="button"
+                          variant="ghost"
+                        >
+                          撤销本次计算
+                        </Button>
+                      </>
+                    ) : entry.run.status === "review_required" ? (
+                      <>
+                        <Badge tone="warning">需先复核，不能锁定</Badge>
+                        <Button
+                          disabled={cancelRun.isPending}
+                          onClick={() => {
+                            if (window.confirm("撤销这次待复核计算？周期会恢复为可计算，工作记录不会删除，计算快照仍保留审计。")) cancelRun.mutate(entry.run.id);
+                          }}
+                          type="button"
+                          variant="ghost"
+                        >
+                          撤销本次计算
+                        </Button>
+                      </>
                     ) : (
                       <>
                         <Button onClick={() => downloadFinanceExport(entry.run.id)} type="button" variant="secondary">重新导出账单</Button>
@@ -7622,7 +7745,7 @@ function PayrollManagementPanel() {
               ))}
             </div>
           ) : null}
-          <ErrorMessage error={saveSettings.error ?? createPeriod.error ?? calculatePeriod.error ?? settleRun.error ?? reopenRun.error} />
+          <ErrorMessage error={saveSettings.error ?? createPeriod.error ?? calculatePeriod.error ?? settleRun.error ?? reopenRun.error ?? cancelRun.error ?? deletePeriod.error} />
         </CardContent>
       </Card>
     </section>
@@ -7794,7 +7917,7 @@ export function PayrollPage({ me }: { me: Me }) {
         textStyle: { color: chartPalette.text },
         formatter: (items: Array<{ axisValue?: string; seriesName?: string; value?: number }>) => [
           items[0]?.axisValue ?? "",
-          ...items.map((item) => `${item.seriesName ?? ""}：${item.seriesName === "周奖励工时" ? `${Number(item.value ?? 0).toFixed(2)} 小时` : formatPayrollMoney(currency, String(item.value ?? 0))}`),
+          ...items.map((item) => `${item.seriesName ?? ""}：${item.seriesName?.includes("工时") ? `${Number(item.value ?? 0).toFixed(2)} 小时` : formatPayrollMoney(currency, String(item.value ?? 0))}`),
         ].join("<br/>"),
       },
       xAxis: {
@@ -7816,7 +7939,7 @@ export function PayrollPage({ me }: { me: Me }) {
         },
         {
           type: "value",
-          name: "奖励小时",
+          name: "工时",
           min: 0,
           axisLabel: { formatter: "{value}h", color: chartPalette.textSubtle },
           splitLine: { show: false },
@@ -7837,6 +7960,16 @@ export function PayrollPage({ me }: { me: Me }) {
           stack: "daily-pay",
           data: timeline.map((item) => Number(item.pendingAmount)),
           itemStyle: { color: hexWithAlpha(chartPalette.warning, 0.62), borderRadius: [5, 5, 0, 0] },
+        },
+        {
+          type: "line",
+          name: "每日有效工时",
+          yAxisIndex: 1,
+          smooth: 0.2,
+          showSymbol: false,
+          data: timeline.map((item) => item.workedSeconds / 3_600),
+          lineStyle: { color: chartPalette.textMuted, width: 2 },
+          itemStyle: { color: chartPalette.textMuted },
         },
         {
           type: "line",
@@ -7919,21 +8052,61 @@ export function PayrollPage({ me }: { me: Me }) {
       ],
     };
   }, [chartPalette, payroll.data?.livePreview]);
+  const livePreview = payroll.data?.livePreview ?? null;
+  const activeSalaryWeeks = (livePreview?.weeklyBreakdown ?? []).filter(
+    (week) =>
+      week.approvedSeconds +
+        week.pendingSeconds +
+        week.weeklyBonusSeconds +
+        week.weeklyBonusEstimatedSeconds >
+      0,
+  );
+  const activeSalaryDays = (livePreview?.salaryTimeline ?? []).filter(
+    (day) => day.workedSeconds + day.bonusSeconds > 0,
+  );
   return (
     <>
       <PageHeader
         title={isPayrollManager ? "薪资管理" : "我的薪资"}
       />
       {isPayrollManager ? <PayrollManagementPanel /> : null}
-      {!isPayrollManager && payroll.data?.livePreview ? (
-        <section className="mb-4 grid gap-2.5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6" aria-label="本月实时薪资">
-          <Card><CardContent><StatusLine label={compensationTypeLabels[payroll.data.livePreview.planType]} value={`${money(payroll.data.livePreview.currency, payroll.data.livePreview.baseAmount)}${payroll.data.livePreview.planType === "hourly" || payroll.data.livePreview.planType === "hybrid" ? " / 小时" : ""}`} /></CardContent></Card>
-          <Card><CardContent><StatusLine label="本月有效工时" value={formatDuration(payroll.data.livePreview.approvedSeconds + payroll.data.livePreview.pendingSeconds)} /></CardContent></Card>
-          <Card><CardContent><StatusLine label={payroll.data.livePreview.weeklyBonusEstimatedSeconds ? "周奖励工时（含预估）" : "周奖励工时"} value={formatDuration((payroll.data.livePreview.weeklyBonusSeconds ?? 0) + (payroll.data.livePreview.weeklyBonusEstimatedSeconds ?? 0))} /></CardContent></Card>
-          <Card><CardContent><StatusLine label="本月实时预估" value={money(payroll.data.livePreview.currency, payroll.data.livePreview.estimatedAmount)} /></CardContent></Card>
-          <Card><CardContent><StatusLine label="月末趋势预测" value={money(payroll.data.livePreview.currency, payroll.data.livePreview.projectedPeriodAmount)} /></CardContent></Card>
-          <Card><CardContent><StatusLine label="预计发薪" value={formatDateTime(payroll.data.livePreview.period.cutoffAt)} /></CardContent></Card>
+      {!isPayrollManager && livePreview ? (
+        <section className="mb-4 grid gap-2.5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4" aria-label="本月实时薪资">
+          <Card><CardContent><StatusLine label={livePreview.planType === "hourly" || livePreview.planType === "hybrid" ? "基础时薪" : compensationTypeLabels[livePreview.planType]} value={`${money(livePreview.currency, livePreview.baseAmount)}${livePreview.planType === "hourly" || livePreview.planType === "hybrid" ? " / 小时" : ""}`} /></CardContent></Card>
+          <Card><CardContent><StatusLine label="本周已记录工时" value={formatDuration(livePreview.currentWeek?.totalSeconds ?? 0)} /><p className="mt-1 text-xs text-[var(--text-muted)]">已批准 {formatDuration(livePreview.currentWeek?.approvedSeconds ?? 0)}{livePreview.currentWeek?.pendingSeconds ? ` · 待审核 ${formatDuration(livePreview.currentWeek.pendingSeconds)}` : ""}</p></CardContent></Card>
+          <Card><CardContent><StatusLine label="本月总工时" value={formatDuration(livePreview.approvedSeconds + livePreview.pendingSeconds)} /><p className="mt-1 text-xs text-[var(--text-muted)]">已批准 {formatDuration(livePreview.approvedSeconds)}{livePreview.pendingSeconds ? ` · 待审核 ${formatDuration(livePreview.pendingSeconds)}` : ""}</p></CardContent></Card>
+          <Card><CardContent><StatusLine label="周奖励工时" value={formatDuration(livePreview.weeklyBonusSeconds)} /><p className="mt-1 text-xs text-[var(--text-muted)]">{livePreview.weeklyBonusEstimatedSeconds ? `另有 ${formatDuration(livePreview.weeklyBonusEstimatedSeconds)} 待审核预估` : "仅显示已达到阈值的确认奖励"}</p></CardContent></Card>
+          <Card><CardContent><StatusLine label="本月实时预估" value={money(livePreview.currency, livePreview.estimatedAmount)} /></CardContent></Card>
+          <Card><CardContent><StatusLine label="月末趋势预测" value={money(livePreview.currency, livePreview.projectedPeriodAmount)} /></CardContent></Card>
+          <Card><CardContent><StatusLine label="预计发薪" value={formatDateTime(livePreview.period.cutoffAt)} /></CardContent></Card>
         </section>
+      ) : null}
+      {!isPayrollManager && livePreview ? (
+        <Card className="mb-4">
+          <CardHeader>
+            <div><p className="app-page-kicker">实时口径</p><h2 className="mt-1 font-bold">本月实时预估怎样计算</h2></div>
+            <Badge tone={livePreview.pendingSeconds || livePreview.weeklyBonusEstimatedSeconds ? "warning" : "positive"}>{livePreview.includesPending ? "含待审核预估" : "仅已批准"}</Badge>
+          </CardHeader>
+          <CardContent>
+            <p className="text-sm font-semibold leading-6">
+              {money(livePreview.currency, livePreview.calculationBreakdown.confirmedWorkAmount)} 已批准工作计薪
+              {` + ${money(livePreview.currency, livePreview.calculationBreakdown.pendingWorkAmount)} 待审核工作预估`}
+              {` + ${money(livePreview.currency, livePreview.calculationBreakdown.confirmedBonusAmount)} 已触发周奖励`}
+              {` + ${money(livePreview.currency, livePreview.calculationBreakdown.estimatedBonusAmount)} 待审核奖励预估`}
+              {` = ${money(livePreview.currency, livePreview.estimatedAmount)}`}
+            </p>
+            {(livePreview.planType === "hourly" || livePreview.planType === "hybrid") ? (
+              <p className="mt-2 text-xs leading-5 text-[var(--text-muted)]">
+                工作计薪以 {money(livePreview.currency, livePreview.baseAmount)} / 小时 × 本月有效工时为基础；若启用了周末、节假日、夜间或超时倍率，上述金额已经逐段包含对应倍率。
+              </p>
+            ) : null}
+            {livePreview.weeklyBonusRule ? (
+              <p className="mt-1 text-xs leading-5 text-[var(--text-muted)]">
+                每个自然月内的周段达到 ≥ {formatDuration(livePreview.weeklyBonusRule.thresholdSeconds)} 时，立即增加 {formatDuration(livePreview.weeklyBonusRule.rewardSeconds)} 计薪时长；刚好达到即触发，少 1 秒不触发，跨月周段分别重新累计。已批准工时达到阈值计入确认金额；待审核工时只进入预估。
+              </p>
+            ) : null}
+          </CardContent>
+        </Card>
       ) : null}
       {!isPayrollManager && payroll.data?.livePreview?.salaryTimeline?.length ? (
         <section className="mb-4 grid gap-4 xl:grid-cols-2" aria-label="实时薪资与预测图表">
@@ -7944,6 +8117,32 @@ export function PayrollPage({ me }: { me: Me }) {
           <Card className="analytics-chart-card">
             <CardHeader><h2 className="font-bold">薪资发展与月末预测</h2><Badge tone="warning">预测不锁定</Badge></CardHeader>
             <CardContent><AnalyticsChart ariaLabel="本月薪资累计与未来预测" option={liveForecastOption} /></CardContent>
+          </Card>
+        </section>
+      ) : null}
+      {!isPayrollManager && livePreview && (activeSalaryWeeks.length || activeSalaryDays.length) ? (
+        <section className="mb-4 grid gap-4 xl:grid-cols-2" aria-label="每日与每周工时明细">
+          <Card>
+            <CardHeader><h2 className="font-bold">每周工时</h2><Badge>{activeSalaryWeeks.length} 个周段</Badge></CardHeader>
+            <CardContent className="divide-y divide-[var(--border)]">
+              {activeSalaryWeeks.map((week) => (
+                <div className="grid gap-1 py-3 text-sm sm:grid-cols-[1fr_auto] sm:items-center" key={`${week.weekStartDate}-${week.startsOn}`}>
+                  <div><p className="font-semibold">{week.startsOn.slice(5)} 至 {week.endsOn.slice(5)}</p><p className="text-xs text-[var(--text-muted)]">已批准 {formatDuration(week.approvedSeconds)}{week.pendingSeconds ? ` · 待审核 ${formatDuration(week.pendingSeconds)}` : ""}</p></div>
+                  <p className="font-semibold tabular-nums">总工时 {formatDuration(week.approvedSeconds + week.pendingSeconds)}{week.weeklyBonusSeconds ? ` · 奖励 ${formatDuration(week.weeklyBonusSeconds)}` : week.weeklyBonusEstimatedSeconds ? ` · 可能奖励 ${formatDuration(week.weeklyBonusEstimatedSeconds)}` : ""}</p>
+                </div>
+              ))}
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader><h2 className="font-bold">每日工时</h2><Badge>{activeSalaryDays.length} 天</Badge></CardHeader>
+            <CardContent className="max-h-80 divide-y divide-[var(--border)] overflow-y-auto">
+              {activeSalaryDays.map((day) => (
+                <div className="grid gap-1 py-3 text-sm sm:grid-cols-[1fr_auto] sm:items-center" key={day.date}>
+                  <div><p className="font-semibold">{day.date}</p><p className="text-xs text-[var(--text-muted)]">已批准 {formatDuration(day.approvedSeconds)}{day.pendingSeconds ? ` · 待审核 ${formatDuration(day.pendingSeconds)}` : ""}</p></div>
+                  <p className="font-semibold tabular-nums">{formatDuration(day.workedSeconds)}{day.weeklyBonusSeconds ? ` · 奖励 ${formatDuration(day.weeklyBonusSeconds)}` : day.weeklyBonusEstimatedSeconds ? ` · 可能奖励 ${formatDuration(day.weeklyBonusEstimatedSeconds)}` : ""}</p>
+                </div>
+              ))}
+            </CardContent>
           </Card>
         </section>
       ) : null}

@@ -137,6 +137,25 @@ export async function registerPayrollRoutes(
     },
   );
 
+  app.delete(
+    "/api/payroll/periods/:payPeriodId",
+    { preHandler: [app.csrfProtection, authenticate, configurePermission] },
+    async (request, reply) => {
+      const { payPeriodId } = periodParams.parse(request.params);
+      try {
+        return { result: await service.deleteUncommittedPeriod(request.auth!, payPeriodId) };
+      } catch (error) {
+        if (error instanceof PayrollNotFoundError) {
+          return reply.code(404).send({ error: "payroll_not_found", message: error.message });
+        }
+        if (error instanceof PayrollConflictError) {
+          return reply.code(409).send({ error: "payroll_conflict", message: error.message });
+        }
+        throw error;
+      }
+    },
+  );
+
   app.get(
     "/api/payroll/me",
     { preHandler: [authenticate, ownPermission] },
@@ -189,6 +208,25 @@ export async function registerPayrollRoutes(
       const { runId } = runParams.parse(request.params);
       try {
         return { run: await service.settle(request.auth!, runId) };
+      } catch (error) {
+        if (error instanceof PayrollNotFoundError) {
+          return reply.code(404).send({ error: "payroll_not_found", message: error.message });
+        }
+        if (error instanceof PayrollConflictError) {
+          return reply.code(409).send({ error: "payroll_conflict", message: error.message });
+        }
+        throw error;
+      }
+    },
+  );
+
+  app.post(
+    "/api/payroll-runs/:runId/cancel-calculation",
+    { preHandler: [app.csrfProtection, authenticate, settlePermission] },
+    async (request, reply) => {
+      const { runId } = runParams.parse(request.params);
+      try {
+        return { run: await service.cancelCalculation(request.auth!, runId) };
       } catch (error) {
         if (error instanceof PayrollNotFoundError) {
           return reply.code(404).send({ error: "payroll_not_found", message: error.message });

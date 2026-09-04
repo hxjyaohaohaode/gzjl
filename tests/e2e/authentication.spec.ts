@@ -425,6 +425,8 @@ test("logs in and renders a factual empty workspace", async ({ page }, testInfo)
   ).toHaveCount(0);
   await expect(page.getByText("还没有工作记录")).toBeVisible();
   await expect(page.getByText("暂无计时")).toBeVisible();
+  await expect(page.getByText("本周已记录工时", { exact: true })).toBeVisible();
+  await expect(page.getByText("5 小时 30 分", { exact: true })).toBeVisible();
   await page.screenshot({
     animations: "disabled",
     fullPage: true,
@@ -744,10 +746,10 @@ test("Owner can configure a versioned hourly plan and create a pay period", asyn
     },
   ]);
 
-  await expect(page.getByLabel("默认发薪日")).toHaveValue("15");
-  await expect(page.getByLabel("默认发薪截止时间")).toHaveValue("18:00");
-  await page.getByLabel("默认发薪截止时间").fill("09:30");
-  await page.getByRole("button", { name: "保存默认周期" }).click();
+  await expect(page.getByLabel("预计发薪日（每月）")).toHaveValue("15");
+  await expect(page.getByLabel("预计发薪时间", { exact: true })).toHaveValue("18:00");
+  await page.getByLabel("预计发薪时间", { exact: true }).fill("09:30");
+  await page.getByRole("button", { name: "保存预计发薪时间" }).click();
   await expect.poll(() => settingsPayload).toEqual({
     payrollCutoffDay: 15,
     payrollCutoffMinute: 570,
@@ -769,6 +771,72 @@ test("Owner can configure a versioned hourly plan and create a pay period", asyn
       hourCycle: "h23",
     }).format(new Date(String(periodPayload?.cutoffAt))),
   ).toBe("09:30");
+});
+
+test("Owner can undo an unexported calculation and remove an accidental period", async ({
+  page,
+}) => {
+  await mockAuthenticatedWorkspace(page);
+  let cancelled = false;
+  let deleted = false;
+  await page.route("**/api/payroll/management", (route) =>
+    route.fulfill({
+      json: {
+        members: [],
+        periods: deleted
+          ? []
+          : [{
+              id: "period-undo",
+              name: "2026 年 9 月",
+              status: cancelled ? "open" : "pending_confirmation",
+              startsAt: "2026-09-01T00:00:00.000Z",
+              endsAt: "2026-10-01T00:00:00.000Z",
+              cutoffAt: "2026-10-10T10:00:00.000Z",
+            }],
+        runs: cancelled
+          ? []
+          : [{
+              run: {
+                id: "run-undo",
+                runNumber: 1,
+                status: "ready",
+                createdAt: "2026-09-04T10:00:00.000Z",
+              },
+              period: { id: "period-undo", name: "2026 年 9 月" },
+            }],
+        latestItems: [],
+        liveItems: [],
+        settings: {
+          timezone: "Asia/Shanghai",
+          payrollCutoffDay: 10,
+          payrollCutoffMinute: 1_080,
+        },
+      },
+    }),
+  );
+  await page.route("**/api/payroll-runs/run-undo/cancel-calculation", async (route) => {
+    cancelled = true;
+    await route.fulfill({ json: { run: { id: "run-undo", status: "cancelled" } } });
+  });
+  await page.route("**/api/payroll/periods/period-undo", async (route) => {
+    deleted = true;
+    await route.fulfill({ json: { result: { id: "period-undo", deleted: true } } });
+  });
+
+  await page.goto("/login");
+  await page.getByLabel("邮箱或手机号").fill("owner@example.test");
+  await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+  await page.goto("/payroll");
+  await expect(page.getByText("尚未导出、尚未锁定；只有点击“确认导出并锁定”后才会生效。")).toBeVisible();
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.getByRole("button", { name: "撤销本次计算" }).click();
+  await expect(page.getByRole("button", { name: "撤销误建周期" })).toBeVisible();
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.getByRole("button", { name: "撤销误建周期" }).click();
+  await expect(page.getByText("2026 年 9 月", { exact: true })).toHaveCount(0);
+  expect(cancelled).toBe(true);
+  expect(deleted).toBe(true);
 });
 
 test("personal payroll renders reconciled totals, daily pay, period trend, and components", async ({
@@ -809,16 +877,49 @@ test("personal payroll renders reconciled totals, daily pay, period trend, and c
           pendingSeconds: 3_600,
           weeklyBonusSeconds: 0,
           weeklyBonusEstimatedSeconds: 18_000,
-          estimatedAmount: "900.000000",
-          projectedPeriodAmount: "3100.000000",
+          weeklyBonusRule: {
+            thresholdSeconds: 108_000,
+            rewardSeconds: 18_000,
+          },
+          estimatedAmount: "1400.000000",
+          projectedPeriodAmount: "3600.000000",
+          calculationBreakdown: {
+            confirmedWorkAmount: "800.000000",
+            pendingWorkAmount: "100.000000",
+            confirmedBonusAmount: "0.000000",
+            estimatedBonusAmount: "500.000000",
+          },
+          currentWeek: {
+            weekStartDate: "2026-08-31",
+            startsOn: "2026-09-01",
+            endsOn: "2026-09-06",
+            approvedSeconds: 28_800,
+            pendingSeconds: 3_600,
+            totalSeconds: 32_400,
+            weeklyBonusSeconds: 0,
+            weeklyBonusEstimatedSeconds: 18_000,
+          },
+          weeklyBreakdown: [{
+            weekStartDate: "2026-08-31",
+            startsOn: "2026-09-01",
+            endsOn: "2026-09-06",
+            approvedSeconds: 28_800,
+            pendingSeconds: 3_600,
+            weeklyBonusSeconds: 0,
+            weeklyBonusEstimatedSeconds: 18_000,
+          }],
           salaryTimeline: [
             {
               date: "2026-09-03",
               approvedAmount: "400.000000",
               pendingAmount: "0.000000",
               totalAmount: "400.000000",
+              approvedSeconds: 14_400,
+              pendingSeconds: 0,
               workedSeconds: 14_400,
               bonusSeconds: 0,
+              weeklyBonusSeconds: 0,
+              weeklyBonusEstimatedSeconds: 0,
               actualCumulativeAmount: "400.000000",
               projectedCumulativeAmount: "400.000000",
               forecast: false,
@@ -826,12 +927,16 @@ test("personal payroll renders reconciled totals, daily pay, period trend, and c
             {
               date: "2026-09-04",
               approvedAmount: "400.000000",
-              pendingAmount: "100.000000",
-              totalAmount: "500.000000",
+              pendingAmount: "600.000000",
+              totalAmount: "1000.000000",
+              approvedSeconds: 14_400,
+              pendingSeconds: 3_600,
               workedSeconds: 18_000,
               bonusSeconds: 18_000,
-              actualCumulativeAmount: "900.000000",
-              projectedCumulativeAmount: "900.000000",
+              weeklyBonusSeconds: 0,
+              weeklyBonusEstimatedSeconds: 18_000,
+              actualCumulativeAmount: "1400.000000",
+              projectedCumulativeAmount: "1400.000000",
               forecast: false,
             },
             {
@@ -839,8 +944,12 @@ test("personal payroll renders reconciled totals, daily pay, period trend, and c
               approvedAmount: "0.000000",
               pendingAmount: "0.000000",
               totalAmount: "0.000000",
+              approvedSeconds: 0,
+              pendingSeconds: 0,
               workedSeconds: 0,
               bonusSeconds: 0,
+              weeklyBonusSeconds: 0,
+              weeklyBonusEstimatedSeconds: 0,
               actualCumulativeAmount: null,
               projectedCumulativeAmount: "1350.000000",
               forecast: true,
@@ -926,8 +1035,13 @@ test("personal payroll renders reconciled totals, daily pay, period trend, and c
   await expect(page.getByRole("heading", { name: "我的薪资" })).toBeVisible();
   await expect(page.getByText("¥100.00 / 小时", { exact: true })).toBeVisible();
   await expect(page.getByText("本月实时预估", { exact: true })).toBeVisible();
-  await expect(page.getByText("周奖励工时（含预估）", { exact: true })).toBeVisible();
-  await expect(page.getByText("5 小时 0 分", { exact: true })).toBeVisible();
+  await expect(page.getByText("本周已记录工时", { exact: true })).toBeVisible();
+  await expect(page.getByText("周奖励工时", { exact: true })).toBeVisible();
+  await expect(page.getByText(/另有 5 小时 0 分 待审核预估/)).toBeVisible();
+  await expect(page.getByText("本月实时预估怎样计算", { exact: true })).toBeVisible();
+  await expect(page.getByText(/¥800.00 已批准工作计薪/)).toBeVisible();
+  await expect(page.getByText("每周工时", { exact: true })).toBeVisible();
+  await expect(page.getByText("每日工时", { exact: true })).toBeVisible();
   await expect(page.getByRole("img", { name: "本月每日薪资与周奖励" })).toBeVisible();
   await expect(page.getByRole("img", { name: "本月薪资累计与未来预测" })).toBeVisible();
   await expect(page.getByText("当前应结")).toBeVisible();
