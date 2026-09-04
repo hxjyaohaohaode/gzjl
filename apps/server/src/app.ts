@@ -34,6 +34,7 @@ import { EvidenceService } from "./evidence/service.js";
 import { registerOrganizationRoutes } from "./organization/routes.js";
 import { OrganizationService } from "./organization/service.js";
 import { registerOperationsRoutes } from "./operations/routes.js";
+import { ExportArtifactStore } from "./operations/artifact-store.js";
 import { OperationsService } from "./operations/service.js";
 import { registerNotificationRoutes } from "./notifications/routes.js";
 import { registerPayrollRoutes } from "./payroll/routes.js";
@@ -301,7 +302,12 @@ export async function buildApp({
     await registerRealtimeRoutes(app, database, authService, config);
     await registerOperationsRoutes(
       app,
-      new OperationsService(database, analyticsService, workService),
+      new OperationsService(
+        database,
+        analyticsService,
+        workService,
+        new ExportArtifactStore(config),
+      ),
       authenticate,
     );
     await registerEvidenceRoutes(

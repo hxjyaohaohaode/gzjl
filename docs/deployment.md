@@ -17,7 +17,7 @@ Render 的 `RENDER_EXTERNAL_URL` 会自动提供 Web Service 的 `onrender.com` 
 
 | 能力 | 服务 | 变量 |
 | --- | --- | --- |
-| 文件证据上传和下载 | Web | `S3_ENDPOINT`、`S3_BUCKET`、`S3_ACCESS_KEY_ID`、`S3_SECRET_ACCESS_KEY`、`S3_BROWSER_ORIGIN`；保持私有桶和精确域名 CORS |
+| 文件证据上传、后台导出和下载 | Web + Worker | Web 填写 `S3_ENDPOINT`、`S3_BUCKET`、`S3_ACCESS_KEY_ID`、`S3_SECRET_ACCESS_KEY`、`S3_BROWSER_ORIGIN`；Blueprint 将除浏览器 origin 外的同桶配置私密引用给 Worker；保持私有桶和精确域名 CORS |
 | 邮箱自动投递、邮箱绑定验证和自助找回密码 | Web | `SMTP_HOST`、`SMTP_USER`、`SMTP_PASSWORD`、`SMTP_FROM` |
 | 短信自动投递、手机号绑定验证和自助找回密码 | Web | `SMS_PROVIDER=twilio`、`TWILIO_ACCOUNT_SID`、`TWILIO_AUTH_TOKEN`、`TWILIO_FROM` |
 | 浏览器 Push | Web 与 Worker | Web 填 `VAPID_PUBLIC_KEY`；Worker 填同一个 `VAPID_PUBLIC_KEY`、匹配的 `VAPID_PRIVATE_KEY` 和 `VAPID_SUBJECT=mailto:你的运维邮箱` |
@@ -31,7 +31,7 @@ Render 的 `RENDER_EXTERNAL_URL` 会自动提供 Web Service 的 `onrender.com` 
 
 ## 最简单的附件方案：Cloudflare R2
 
-不需要购买或维护私人服务器。R2 是独立的私有对象存储，浏览器拿到短时预签名地址后直接上传；Render 只负责签名、权限校验、哈希核验和保存附件元数据。Render 自身磁盘保持无状态，因此重新部署或扩容不会丢附件。
+不需要购买或维护私人服务器。R2 是独立的私有对象存储，浏览器拿到短时预签名地址后直接上传证据；Worker 将后台生成的 CSV/JSON/XLSX/PDF 写入同一个私有桶。Render 只负责签名、权限校验、哈希核验、后台生成和保存元数据，不依赖临时磁盘，因此重新部署或扩容不会丢附件或已完成的导出。导出对象保留 24 小时，生产桶仍应配置独立生命周期规则作为最终兜底。
 
 1. 在 Cloudflare 控制台打开 **R2 Object Storage**，创建一个 Standard bucket，例如 `gzjl-evidence`。不要开启 public development URL，也不要设置公开读取。
 2. 在 R2 的 **Manage R2 API Tokens** 创建只针对这个 bucket 的 Object Read & Write token。保存一次性显示的 `Access Key ID` 和 `Secret Access Key`，不要把它们提交到 Git。

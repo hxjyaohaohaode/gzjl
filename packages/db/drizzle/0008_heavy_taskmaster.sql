@@ -1,0 +1,1 @@
+ALTER TABLE "exports" ADD COLUMN "delivery_mode" text DEFAULT 'inline' NOT NULL;

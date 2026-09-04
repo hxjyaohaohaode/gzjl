@@ -2,7 +2,7 @@ import { expect, test, type Page } from "@playwright/test";
 
 async function mockAuthenticatedWorkspace(
   page: Page,
-  options: { isOwner?: boolean } = {},
+  options: { isOwner?: boolean; canExport?: boolean } = {},
 ): Promise<void> {
   let authenticated = false;
   await page.route("**/api/auth/csrf", (route) =>
@@ -68,6 +68,15 @@ async function mockAuthenticatedWorkspace(
                 scopeKind: "organization",
                 scopeId: null,
               },
+              ...(options.canExport
+                ? [
+                    {
+                      permission: "export.scope",
+                      scopeKind: "organization",
+                      scopeId: null,
+                    },
+                  ]
+                : []),
             ],
           },
         })
@@ -1489,6 +1498,132 @@ test("analytics uses accessible, server-backed responsive chart containers", asy
   ).toBeVisible();
   await expect(page.getByRole("img", { name: "项目投入分布图" })).toBeVisible();
   await expect(page.getByText("工作台正式版")).toBeVisible();
+});
+
+test("authorized analytics users can create, cancel, retry, and download background exports", async ({
+  page,
+}) => {
+  await mockAuthenticatedWorkspace(page, { canExport: true });
+  const exportId = "00000000-0000-4000-8000-000000000091";
+  let status: "queued" | "failed" | "cancelled" | "completed" = "queued";
+  let hasJob = false;
+  let createPayload: Record<string, unknown> | null = null;
+  let cancelRequests = 0;
+  let retryRequests = 0;
+  let downloadAuthorizations = 0;
+  const job = () => ({
+    id: exportId,
+    exportType: "work_sessions",
+    format: "xlsx",
+    status,
+    progress: status === "completed" ? 100 : 0,
+    attempt: status === "failed" ? 3 : 0,
+    maxAttempts: 3,
+    fileName: status === "completed" ? "work-sessions.xlsx" : null,
+    contentType:
+      status === "completed"
+        ? "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        : null,
+    byteSize: status === "completed" ? 4_096 : null,
+    rowCount: status === "completed" ? 2 : null,
+    sha256: status === "completed" ? "a".repeat(64) : null,
+    errorCode: status === "failed" ? "export_upload_failed" : null,
+    createdAt: "2026-09-04T06:00:00.000Z",
+    startedAt: null,
+    completedAt: status === "completed" ? "2026-09-04T06:01:00.000Z" : null,
+    expiresAt: status === "completed" ? "2099-09-05T06:01:00.000Z" : null,
+    downloadReady: status === "completed",
+  });
+  await page.route("**/api/exports**", async (route) => {
+    const pathname = new URL(route.request().url()).pathname;
+    const method = route.request().method();
+    if (pathname === "/api/exports/capabilities") {
+      await route.fulfill({
+        json: {
+          available: true,
+          formats: ["csv", "json", "xlsx", "pdf"],
+          retentionHours: 24,
+        },
+      });
+      return;
+    }
+    if (pathname === `/api/exports/${exportId}/download`) {
+      downloadAuthorizations += 1;
+      await route.fulfill({
+        json: {
+          url: "/test-export-download",
+          expiresInSeconds: 300,
+          fileName: "work-sessions.xlsx",
+          sha256: "a".repeat(64),
+        },
+      });
+      return;
+    }
+    if (pathname === `/api/exports/${exportId}/retry`) {
+      retryRequests += 1;
+      status = "queued";
+      await route.fulfill({ json: job() });
+      return;
+    }
+    if (pathname === `/api/exports/${exportId}` && method === "DELETE") {
+      cancelRequests += 1;
+      status = "cancelled";
+      await route.fulfill({ json: job() });
+      return;
+    }
+    if (pathname === "/api/exports" && method === "POST") {
+      createPayload = route.request().postDataJSON() as Record<string, unknown>;
+      hasJob = true;
+      status = "queued";
+      await route.fulfill({ status: 202, json: job() });
+      return;
+    }
+    if (pathname === "/api/exports" && method === "GET") {
+      await route.fulfill({ json: { items: hasJob ? [job()] : [] } });
+      return;
+    }
+    await route.fulfill({ status: 404, json: { error: "unexpected_export_route" } });
+  });
+  await page.route("**/test-export-download", (route) =>
+    route.fulfill({
+      body: "xlsx-test-body",
+      contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      headers: { "content-disposition": 'attachment; filename="work-sessions.xlsx"' },
+    }),
+  );
+
+  await page.goto("/login");
+  await page.getByLabel("邮箱或手机号").fill("owner@example.test");
+  await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+  await page.goto("/analytics");
+  await expect(page.getByRole("heading", { name: "后台导出" })).toBeVisible();
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= window.innerWidth + 1,
+    ),
+  ).toBe(true);
+  await page.getByRole("button", { name: "创建导出" }).click();
+  await expect.poll(() => createPayload).not.toBeNull();
+  expect(createPayload).toMatchObject({ exportType: "work_sessions", format: "xlsx" });
+  await expect(page.getByText("等待处理", { exact: true })).toBeVisible();
+
+  await page.getByRole("button", { name: "取消", exact: true }).click();
+  await expect.poll(() => cancelRequests).toBe(1);
+  await expect(page.getByText("已取消", { exact: true })).toBeVisible();
+
+  status = "failed";
+  await page.reload();
+  await expect(page.getByText("文件上传失败，可以重试。")).toBeVisible();
+  await page.getByRole("button", { name: "重试", exact: true }).click();
+  await expect.poll(() => retryRequests).toBe(1);
+
+  status = "completed";
+  await page.reload();
+  const download = page.waitForEvent("download");
+  await page.getByRole("button", { name: "下载", exact: true }).click();
+  await expect.poll(() => downloadAuthorizations).toBe(1);
+  expect((await download).suggestedFilename()).toBe("work-sessions.xlsx");
 });
 
 test("AI page does not expose team analysis without an organization-scoped grant", async ({

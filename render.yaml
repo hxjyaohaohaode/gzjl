@@ -164,6 +164,39 @@ services:
         sync: false
       - key: VAPID_SUBJECT
         sync: false
+      # Evidence uploads are signed by the Web service while background export
+      # artifacts are written and expired by the Worker. Both services must
+      # therefore address the same private bucket with the same credentials.
+      - key: S3_REGION
+        fromService:
+          name: gzjl-hxjyaohaohaode-web
+          type: web
+          envVarKey: S3_REGION
+      - key: S3_FORCE_PATH_STYLE
+        fromService:
+          name: gzjl-hxjyaohaohaode-web
+          type: web
+          envVarKey: S3_FORCE_PATH_STYLE
+      - key: S3_ENDPOINT
+        fromService:
+          name: gzjl-hxjyaohaohaode-web
+          type: web
+          envVarKey: S3_ENDPOINT
+      - key: S3_BUCKET
+        fromService:
+          name: gzjl-hxjyaohaohaode-web
+          type: web
+          envVarKey: S3_BUCKET
+      - key: S3_ACCESS_KEY_ID
+        fromService:
+          name: gzjl-hxjyaohaohaode-web
+          type: web
+          envVarKey: S3_ACCESS_KEY_ID
+      - key: S3_SECRET_ACCESS_KEY
+        fromService:
+          name: gzjl-hxjyaohaohaode-web
+          type: web
+          envVarKey: S3_SECRET_ACCESS_KEY
       - key: AI_REQUEST_TIMEOUT_MS
         value: "60000"
       - key: AI_MAX_RETRIES

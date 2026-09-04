@@ -7443,6 +7443,270 @@ interface AnalyticsSummary {
   byHour: Array<{ hour: number; seconds: number; count: number }>;
   funnel: Array<{ stage: string; count: number }>;
 }
+
+type BackgroundExportStatus =
+  | "queued"
+  | "running"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "expired";
+
+interface BackgroundExportJob {
+  id: string;
+  exportType: "work_sessions";
+  format: "csv" | "json" | "xlsx" | "pdf";
+  status: BackgroundExportStatus;
+  progress: number;
+  attempt: number;
+  maxAttempts: number;
+  fileName: string | null;
+  contentType: string | null;
+  byteSize: number | null;
+  rowCount: number | null;
+  sha256: string | null;
+  errorCode: string | null;
+  createdAt: string;
+  startedAt: string | null;
+  completedAt: string | null;
+  expiresAt: string | null;
+  downloadReady: boolean;
+}
+
+interface BackgroundExportCapabilities {
+  available: boolean;
+  formats: Array<"csv" | "json" | "xlsx" | "pdf">;
+  retentionHours: number;
+  unavailableReason?: string;
+}
+
+const exportStatusMeta: Record<
+  BackgroundExportStatus,
+  { label: string; tone: "neutral" | "positive" | "warning" | "danger" | "info" }
+> = {
+  queued: { label: "等待处理", tone: "neutral" },
+  running: { label: "生成中", tone: "info" },
+  completed: { label: "可下载", tone: "positive" },
+  failed: { label: "失败", tone: "danger" },
+  cancelled: { label: "已取消", tone: "neutral" },
+  expired: { label: "已过期", tone: "warning" },
+};
+
+function exportErrorMessage(code: string | null): string | null {
+  if (!code) return null;
+  const messages: Record<string, string> = {
+    export_storage_unavailable: "私有对象存储未配置。",
+    export_too_large: "记录超过 50,000 条或文本超过 25 MiB，请缩小时间范围。",
+    export_job_invalid: "任务参数无效，请重新创建。",
+    export_render_failed: "文件生成失败，可以重试。",
+    export_upload_failed: "文件上传失败，可以重试。",
+    export_generation_failed: "后台生成失败，可以重试。",
+    export_lease_expired: "Worker 中断后已自动恢复任务。",
+  };
+  return messages[code] ?? "后台导出未完成，可以重试。";
+}
+
+function formatExportFileSize(bytes: number | null): string {
+  if (bytes === null) return "";
+  if (bytes < 1_024) return `${bytes} B`;
+  if (bytes < 1_048_576) return `${(bytes / 1_024).toFixed(1)} KB`;
+  return `${(bytes / 1_048_576).toFixed(1)} MB`;
+}
+
+function BackgroundExportPanel({ from, to }: { from: Date; to: Date }) {
+  const queryClient = useQueryClient();
+  const [format, setFormat] = useState<"csv" | "json" | "xlsx" | "pdf">("xlsx");
+  const capabilities = useQuery({
+    queryKey: ["export-capabilities"],
+    queryFn: () => api<BackgroundExportCapabilities>("/api/exports/capabilities"),
+    staleTime: 60_000,
+  });
+  const jobs = useQuery({
+    queryKey: ["background-exports"],
+    queryFn: () => api<{ items: BackgroundExportJob[] }>("/api/exports"),
+    refetchInterval: (query) =>
+      query.state.data?.items.some((job) => ["queued", "running"].includes(job.status))
+        ? 5_000
+        : false,
+  });
+  const refresh = () => queryClient.invalidateQueries({ queryKey: ["background-exports"] });
+  const createExport = useMutation({
+    mutationFn: () =>
+      api<BackgroundExportJob>("/api/exports", {
+        method: "POST",
+        body: {
+          exportType: "work_sessions",
+          format,
+          from: from.toISOString(),
+          to: to.toISOString(),
+        },
+      }),
+    onSuccess: refresh,
+  });
+  const cancelExport = useMutation({
+    mutationFn: (exportId: string) =>
+      api<BackgroundExportJob>(`/api/exports/${exportId}`, { method: "DELETE" }),
+    onSuccess: refresh,
+  });
+  const retryExport = useMutation({
+    mutationFn: (exportId: string) =>
+      api<BackgroundExportJob>(`/api/exports/${exportId}/retry`, { method: "POST" }),
+    onSuccess: refresh,
+  });
+  const downloadExport = useMutation({
+    mutationFn: (exportId: string) =>
+      api<{ url: string; expiresInSeconds: number; fileName: string; sha256: string | null }>(
+        `/api/exports/${exportId}/download`,
+      ),
+    onSuccess: (download) => {
+      const anchor = document.createElement("a");
+      anchor.href = download.url;
+      anchor.download = download.fileName;
+      anchor.rel = "noopener";
+      document.body.append(anchor);
+      anchor.click();
+      anchor.remove();
+    },
+  });
+
+  const mutationError =
+    createExport.error ?? cancelExport.error ?? retryExport.error ?? downloadExport.error;
+  const storageReady = capabilities.data?.available === true;
+
+  return (
+    <Card className="mt-5">
+      <CardHeader>
+        <div>
+          <p className="app-section-label">文件中心</p>
+          <h2 className="mt-2 font-extrabold tracking-[-0.025em]">后台导出</h2>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <select
+            aria-label="导出格式"
+            className={`${fieldClass} min-h-9 w-auto py-1`}
+            onChange={(event) => setFormat(event.target.value as typeof format)}
+            value={format}
+          >
+            <option value="xlsx">Excel</option>
+            <option value="csv">CSV</option>
+            <option value="pdf">PDF</option>
+            <option value="json">JSON</option>
+          </select>
+          <Button
+            disabled={!storageReady || createExport.isPending}
+            onClick={() => createExport.mutate()}
+            size="compact"
+          >
+            {createExport.isPending ? "正在创建…" : "创建导出"}
+          </Button>
+        </div>
+      </CardHeader>
+      <CardContent>
+        {capabilities.isPending || jobs.isPending ? <LoadingBlock /> : null}
+        {capabilities.data && !capabilities.data.available ? (
+          <div className="rounded-2xl bg-[var(--warning-soft)] px-4 py-3 text-sm text-[var(--warning)]">
+            {capabilities.data.unavailableReason ?? "私有对象存储尚未配置。"}
+          </div>
+        ) : null}
+        {jobs.data?.items.length ? (
+          <div className="space-y-2">
+            {jobs.data.items.slice(0, 10).map((job) => {
+              const status = exportStatusMeta[job.status];
+              const details = [
+                job.rowCount === null ? null : `${job.rowCount.toLocaleString("zh-CN")} 条`,
+                formatExportFileSize(job.byteSize) || null,
+                job.expiresAt && job.status === "completed"
+                  ? `有效至 ${formatDateTime(job.expiresAt)}`
+                  : null,
+              ].filter(Boolean);
+              return (
+                <div
+                  className="rounded-2xl bg-[var(--surface-subtle)] px-4 py-3"
+                  key={job.id}
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-semibold uppercase">{job.format}</span>
+                        <Badge tone={status.tone}>{status.label}</Badge>
+                        <span className="text-xs text-[var(--text-subtle)]">
+                          {formatDateTime(job.createdAt)}
+                        </span>
+                      </div>
+                      {details.length ? (
+                        <p className="mt-1 text-xs text-[var(--text-muted)]">
+                          {details.join(" · ")}
+                        </p>
+                      ) : null}
+                      {exportErrorMessage(job.errorCode) ? (
+                        <p className="mt-1 text-xs text-[var(--danger)]">
+                          {exportErrorMessage(job.errorCode)}
+                        </p>
+                      ) : null}
+                    </div>
+                    <div className="flex items-center gap-2">
+                      {job.downloadReady ? (
+                        <Button
+                          disabled={downloadExport.isPending}
+                          onClick={() => downloadExport.mutate(job.id)}
+                          size="compact"
+                          variant="secondary"
+                        >
+                          下载
+                        </Button>
+                      ) : null}
+                      {job.status === "failed" ? (
+                        <Button
+                          disabled={retryExport.isPending}
+                          onClick={() => retryExport.mutate(job.id)}
+                          size="compact"
+                          variant="secondary"
+                        >
+                          重试
+                        </Button>
+                      ) : null}
+                      {["queued", "running"].includes(job.status) ? (
+                        <Button
+                          disabled={cancelExport.isPending}
+                          onClick={() => cancelExport.mutate(job.id)}
+                          size="compact"
+                          variant="ghost"
+                        >
+                          取消
+                        </Button>
+                      ) : null}
+                    </div>
+                  </div>
+                  {["queued", "running"].includes(job.status) ? (
+                    <div
+                      aria-label={`导出进度 ${job.progress}%`}
+                      className="mt-3 h-1.5 overflow-hidden rounded-full bg-[var(--surface)]"
+                      role="progressbar"
+                      aria-valuemax={100}
+                      aria-valuemin={0}
+                      aria-valuenow={job.progress}
+                    >
+                      <div
+                        className="h-full rounded-full bg-[var(--accent)] transition-[width]"
+                        style={{ width: `${Math.max(2, job.progress)}%` }}
+                      />
+                    </div>
+                  ) : null}
+                </div>
+              );
+            })}
+          </div>
+        ) : !jobs.isPending ? (
+          <p className="py-4 text-sm text-[var(--text-muted)]">
+            选择格式后创建任务；文件生成完成会出现在这里，并保留 24 小时。
+          </p>
+        ) : null}
+        <ErrorMessage error={capabilities.error ?? jobs.error ?? mutationError} />
+      </CardContent>
+    </Card>
+  );
+}
+
 export function AnalyticsPage({ me }: { me: Me }) {
   const [days, setDays] = useState(30);
   const chartPalette = useChartPalette();
@@ -7579,18 +7843,8 @@ export function AnalyticsPage({ me }: { me: Me }) {
     tooltip: { trigger: "item", backgroundColor: chartPalette.surface, borderColor: chartPalette.border, textStyle: { color: chartPalette.text } },
     series: [{ type: "funnel", left: "8%", width: "84%", top: 18, bottom: 18, minSize: "24%", maxSize: "100%", sort: "none", gap: 4, label: { color: chartPalette.text }, itemStyle: { borderColor: chartPalette.surface, borderWidth: 2 }, data: analytics.data?.funnel.map((item) => ({ name: item.stage, value: item.count })) ?? [] }],
   }), [analytics.data?.funnel, chartPalette]);
-  const exportData = (format: "csv" | "json") => {
-    const params = new URLSearchParams({
-      from: from.toISOString(),
-      to: to.toISOString(),
-    });
-    window.location.assign(
-      `/api/exports/work-sessions.${format}?${params.toString()}`,
-    );
-  };
-  const canExportOrganization = me.permissions.some(
-    (grant) =>
-      grant.permission === "export.scope" && grant.scopeKind === "organization",
+  const canExport = me.permissions.some(
+    (grant) => grant.permission === "export.scope",
   );
   const leadProject = analytics.data?.byProject.reduce<{
     projectName: string;
@@ -7622,15 +7876,8 @@ export function AnalyticsPage({ me }: { me: Me }) {
               <option value={30}>最近 30 天</option>
               <option value={90}>最近 90 天</option>
             </select>
-            {canExportOrganization ? (
-              <>
-                <Button onClick={() => exportData("csv")} size="compact" variant="secondary">
-                  导出 CSV
-                </Button>
-                <Button onClick={() => exportData("json")} size="compact" variant="secondary">
-                  导出 JSON
-                </Button>
-              </>
+            {canExport ? (
+              <Badge tone="info">支持 CSV / JSON / Excel / PDF</Badge>
             ) : null}
           </>
         }
@@ -7641,7 +7888,8 @@ export function AnalyticsPage({ me }: { me: Me }) {
         </Card>
       ) : analytics.data ? (
         <>
-          <Card className="analytics-summary-strip">
+          {canExport ? <BackgroundExportPanel from={from} to={to} /> : null}
+          <Card className="mt-5 analytics-summary-strip">
             <div className="analytics-summary-icon">
               <CalendarDays size={21} />
             </div>

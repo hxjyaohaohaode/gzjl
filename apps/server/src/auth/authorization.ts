@@ -42,3 +42,27 @@ export function requirePermission(
     }
   };
 }
+
+/**
+ * Use only when the downstream query itself applies every grant scope. This
+ * authorizes the capability without pretending that a project/org-unit grant
+ * is organization-wide; the service must still intersect all returned rows.
+ */
+export function requireAnyScopedPermission(permission: Permission) {
+  return async (request: FastifyRequest, reply: FastifyReply): Promise<FastifyReply | void> => {
+    if (!request.auth) {
+      return reply.code(401).send({
+        error: "unauthorized",
+        message: "登录状态已失效，请重新登录。",
+        requestId: request.id,
+      });
+    }
+    if (!request.auth.grants.some((grant) => grant.permission === permission)) {
+      return reply.code(403).send({
+        error: "forbidden",
+        message: "当前账号没有执行此操作的权限，请联系管理员明确细节。",
+        requestId: request.id,
+      });
+    }
+  };
+}

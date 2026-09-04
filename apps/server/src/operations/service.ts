@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import { and, desc, eq, gte, isNull, lt } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, isNull, lt } from "drizzle-orm";
 import { z } from "zod";
 import type { Database } from "@workbench/db";
 import {
@@ -8,6 +8,7 @@ import {
   exports as exportJobs,
   imports as importJobs,
   orgMemberships,
+  outboxEvents,
   users,
   workSessions,
 } from "@workbench/db/schema";
@@ -22,9 +23,30 @@ import type {
   ImportedWorkSessionInput,
   WorkSessionService,
 } from "../work/service.js";
+import type { ExportArtifactAccess } from "./artifact-store.js";
 
 export class ImportValidationError extends Error {
   constructor(message: string) { super(message); this.name = "ImportValidationError"; }
+}
+
+export class ExportJobError extends Error {
+  constructor(
+    readonly code: string,
+    message: string,
+    readonly statusCode = 409,
+  ) {
+    super(message);
+    this.name = "ExportJobError";
+  }
+}
+
+export type BackgroundExportFormat = "csv" | "json" | "xlsx" | "pdf";
+
+export interface CreateBackgroundExportInput {
+  exportType: "work_sessions";
+  format: BackgroundExportFormat;
+  from: Date;
+  to: Date;
 }
 
 function sha256(value: string): string {
@@ -99,7 +121,378 @@ export function previewWorkSessionCsv(csv: string): ImportPreview {
 }
 
 export class OperationsService {
-  constructor(private readonly db: Database, private readonly analytics: AnalyticsService, private readonly work: WorkSessionService) {}
+  constructor(
+    private readonly db: Database,
+    private readonly analytics: AnalyticsService,
+    private readonly work: WorkSessionService,
+    private readonly exportStore: ExportArtifactAccess,
+  ) {}
+
+  exportCapabilities() {
+    return this.exportStore.capabilities();
+  }
+
+  private exportSummary(job: typeof exportJobs.$inferSelect) {
+    const expired = Boolean(
+      job.status === "completed" &&
+        job.expiresAt &&
+        job.expiresAt.getTime() <= Date.now(),
+    );
+    return {
+      id: job.id,
+      exportType: job.exportType,
+      format: job.format,
+      status: expired ? "expired" : job.status,
+      progress: expired ? 100 : job.progress,
+      attempt: job.attempt,
+      maxAttempts: job.maxAttempts,
+      fileName: job.fileName,
+      contentType: job.contentType,
+      byteSize: job.byteSize,
+      rowCount: job.rowCount,
+      sha256: job.sha256,
+      errorCode: job.errorSummary,
+      createdAt: job.createdAt,
+      startedAt: job.startedAt,
+      completedAt: job.completedAt,
+      expiresAt: job.expiresAt,
+      downloadReady: Boolean(
+        !expired &&
+          job.status === "completed" &&
+          job.objectKey &&
+          job.contentType &&
+          job.fileName,
+      ),
+    };
+  }
+
+  private async ownedBackgroundExport(actor: AnalyticsActor, exportId: string) {
+    const [job] = await this.db
+      .select()
+      .from(exportJobs)
+      .where(
+        and(
+          eq(exportJobs.id, exportId),
+          eq(exportJobs.organizationId, actor.organizationId),
+          eq(exportJobs.requestedBy, actor.membershipId),
+          eq(exportJobs.deliveryMode, "background"),
+        ),
+      )
+      .limit(1);
+    if (!job) {
+      throw new ExportJobError("export_not_found", "导出任务不存在。", 404);
+    }
+    return job;
+  }
+
+  async createBackgroundExport(
+    actor: AnalyticsActor,
+    input: CreateBackgroundExportInput,
+  ) {
+    const capabilities = this.exportStore.capabilities();
+    if (!capabilities.available) {
+      throw new ExportJobError(
+        "export_storage_unavailable",
+        capabilities.unavailableReason ?? "后台导出对象存储不可用。",
+        503,
+      );
+    }
+    const duration = input.to.getTime() - input.from.getTime();
+    if (duration <= 0 || duration > 366 * 86_400_000) {
+      throw new ExportJobError(
+        "invalid_export_range",
+        "导出时间范围必须大于零且不能超过 366 天。",
+        400,
+      );
+    }
+    const broadGrants = actor.grants.filter((grant) =>
+      ["work.view_full_scope", "analytics.view_team"].includes(grant.permission),
+    );
+    const contentGrants = actor.grants.filter(
+      (grant) => grant.permission === "work.view_full_scope",
+    );
+    const exportGrants = actor.grants.filter(
+      (grant) => grant.permission === "export.scope",
+    );
+    const fieldPolicySnapshot = {
+      version: 1,
+      requestedBy: actor.membershipId,
+      includeContent: contentGrants.some(
+        (grant) => grant.scopeKind === "organization",
+      ),
+      contentOrganizationWide: contentGrants.some(
+        (grant) => grant.scopeKind === "organization",
+      ),
+      contentOrgUnitIds: contentGrants
+        .filter((grant) => grant.scopeKind === "org_unit" && grant.scopeId)
+        .map((grant) => grant.scopeId!),
+      contentProjectIds: contentGrants
+        .filter((grant) => grant.scopeKind === "project" && grant.scopeId)
+        .map((grant) => grant.scopeId!),
+      organizationWide: broadGrants.some(
+        (grant) => grant.scopeKind === "organization",
+      ),
+      orgUnitIds: broadGrants
+        .filter((grant) => grant.scopeKind === "org_unit" && grant.scopeId)
+        .map((grant) => grant.scopeId!),
+      projectIds: broadGrants
+        .filter((grant) => grant.scopeKind === "project" && grant.scopeId)
+        .map((grant) => grant.scopeId!),
+      exportOrganizationWide: exportGrants.some(
+        (grant) => grant.scopeKind === "organization",
+      ),
+      exportSelf: exportGrants.some((grant) => grant.scopeKind === "self"),
+      exportOrgUnitIds: exportGrants
+        .filter((grant) => grant.scopeKind === "org_unit" && grant.scopeId)
+        .map((grant) => grant.scopeId!),
+      exportProjectIds: exportGrants
+        .filter((grant) => grant.scopeKind === "project" && grant.scopeId)
+        .map((grant) => grant.scopeId!),
+    };
+    const scope = {
+      version: 1,
+      from: input.from.toISOString(),
+      to: input.to.toISOString(),
+      snapshotAt: new Date().toISOString(),
+    };
+    const job = await this.db.transaction(async (tx) => {
+      const [created] = await tx
+        .insert(exportJobs)
+        .values({
+          organizationId: actor.organizationId,
+          requestedBy: actor.membershipId,
+          format: input.format,
+          exportType: input.exportType,
+          deliveryMode: "background",
+          scope,
+          fieldPolicySnapshot,
+          status: "queued",
+          progress: 0,
+        })
+        .returning();
+      if (!created) {
+        throw new ExportJobError(
+          "export_enqueue_failed",
+          "无法创建后台导出任务，请稍后重试。",
+          500,
+        );
+      }
+      await tx.insert(outboxEvents).values({
+        organizationId: actor.organizationId,
+        eventType: "export.job.queued",
+        entityType: "export",
+        entityId: created.id,
+        entityVersion: 1,
+        payload: { format: input.format, exportType: input.exportType },
+      });
+      await tx.insert(auditLogs).values({
+        organizationId: actor.organizationId,
+        actorMembershipId: actor.membershipId,
+        action: "export.background_requested",
+        entityType: "export",
+        entityId: created.id,
+        after: {
+          exportType: input.exportType,
+          format: input.format,
+          scope,
+          includeContent: fieldPolicySnapshot.includeContent,
+          exportScope: {
+            organizationWide: fieldPolicySnapshot.exportOrganizationWide,
+            self: fieldPolicySnapshot.exportSelf,
+            orgUnitCount: fieldPolicySnapshot.exportOrgUnitIds.length,
+            projectCount: fieldPolicySnapshot.exportProjectIds.length,
+          },
+        },
+      });
+      return created;
+    });
+    return this.exportSummary(job);
+  }
+
+  async listBackgroundExports(actor: AnalyticsActor) {
+    const jobs = await this.db
+      .select()
+      .from(exportJobs)
+      .where(
+        and(
+          eq(exportJobs.organizationId, actor.organizationId),
+          eq(exportJobs.requestedBy, actor.membershipId),
+          eq(exportJobs.deliveryMode, "background"),
+        ),
+      )
+      .orderBy(desc(exportJobs.createdAt))
+      .limit(50);
+    return jobs.map((job) => this.exportSummary(job));
+  }
+
+  async cancelBackgroundExport(actor: AnalyticsActor, exportId: string) {
+    await this.ownedBackgroundExport(actor, exportId);
+    const updated = await this.db.transaction(async (tx) => {
+      const [cancelled] = await tx
+        .update(exportJobs)
+        .set({ status: "cancelled", completedAt: new Date() })
+        .where(
+          and(
+            eq(exportJobs.id, exportId),
+            eq(exportJobs.organizationId, actor.organizationId),
+            eq(exportJobs.requestedBy, actor.membershipId),
+            eq(exportJobs.deliveryMode, "background"),
+            inArray(exportJobs.status, ["queued", "running"]),
+          ),
+        )
+        .returning();
+      if (!cancelled) return null;
+      await tx.insert(auditLogs).values({
+        organizationId: actor.organizationId,
+        actorMembershipId: actor.membershipId,
+        action: "export.background_cancelled",
+        entityType: "export",
+        entityId: exportId,
+      });
+      return cancelled;
+    });
+    if (!updated) {
+      throw new ExportJobError(
+        "export_not_cancellable",
+        "该导出任务已结束，不能再取消。",
+      );
+    }
+    return this.exportSummary(updated);
+  }
+
+  async retryBackgroundExport(actor: AnalyticsActor, exportId: string) {
+    const existing = await this.ownedBackgroundExport(actor, exportId);
+    const updated = await this.db.transaction(async (tx) => {
+      const [retried] = await tx
+        .update(exportJobs)
+        .set({
+          status: "queued",
+          progress: 0,
+          attempt: 0,
+          errorSummary: null,
+          startedAt: null,
+          completedAt: null,
+        })
+        .where(
+          and(
+            eq(exportJobs.id, exportId),
+            eq(exportJobs.status, "failed"),
+          ),
+        )
+        .returning();
+      if (!retried) return null;
+      await tx.insert(outboxEvents).values({
+        organizationId: actor.organizationId,
+        eventType: "export.job.queued",
+        entityType: "export",
+        entityId: exportId,
+        entityVersion: existing.attempt + 1,
+        payload: { retry: true },
+      });
+      await tx.insert(auditLogs).values({
+        organizationId: actor.organizationId,
+        actorMembershipId: actor.membershipId,
+        action: "export.background_retried",
+        entityType: "export",
+        entityId: exportId,
+      });
+      return retried;
+    });
+    if (!updated) {
+      throw new ExportJobError(
+        "export_not_retryable",
+        "只有失败的导出任务可以重试。",
+      );
+    }
+    return this.exportSummary(updated);
+  }
+
+  async backgroundExportDownload(actor: AnalyticsActor, exportId: string) {
+    const job = await this.ownedBackgroundExport(actor, exportId);
+    const exportScope = z
+      .object({
+        exportOrganizationWide: z.boolean(),
+        exportSelf: z.boolean(),
+        exportOrgUnitIds: z.array(z.uuid()),
+        exportProjectIds: z.array(z.uuid()),
+      })
+      .safeParse(job.fieldPolicySnapshot);
+    if (!exportScope.success) {
+      throw new ExportJobError(
+        "export_policy_invalid",
+        "导出任务的权限快照无效，请重新创建任务。",
+      );
+    }
+    const currentExportGrants = actor.grants.filter(
+      (grant) => grant.permission === "export.scope",
+    );
+    const currentOrganizationWide = currentExportGrants.some(
+      (grant) => grant.scopeKind === "organization",
+    );
+    const currentSelf = currentExportGrants.some(
+      (grant) => grant.scopeKind === "self",
+    );
+    const currentOrgUnits = new Set(
+      currentExportGrants
+        .filter((grant) => grant.scopeKind === "org_unit" && grant.scopeId)
+        .map((grant) => grant.scopeId!),
+    );
+    const currentProjects = new Set(
+      currentExportGrants
+        .filter((grant) => grant.scopeKind === "project" && grant.scopeId)
+        .map((grant) => grant.scopeId!),
+    );
+    const snapshot = exportScope.data;
+    const scopeStillAuthorized =
+      currentOrganizationWide ||
+      (!snapshot.exportOrganizationWide &&
+        (!snapshot.exportSelf || currentSelf) &&
+        snapshot.exportOrgUnitIds.every((id) => currentOrgUnits.has(id)) &&
+        snapshot.exportProjectIds.every((id) => currentProjects.has(id)));
+    if (!scopeStillAuthorized) {
+      throw new ExportJobError(
+        "export_scope_revoked",
+        "当前导出权限已不能覆盖该任务的原始范围，请重新创建任务。",
+        403,
+      );
+    }
+    if (job.status !== "completed" || !job.objectKey || !job.fileName || !job.contentType) {
+      throw new ExportJobError(
+        "export_not_ready",
+        "导出文件尚未生成完成。",
+      );
+    }
+    if (!job.expiresAt || job.expiresAt.getTime() <= Date.now()) {
+      throw new ExportJobError(
+        "export_expired",
+        "导出文件已过期，请重新创建任务。",
+        410,
+      );
+    }
+    let signed: { url: string; expiresInSeconds: number };
+    try {
+      signed = await this.exportStore.createDownloadUrl(
+        job.objectKey,
+        job.fileName,
+        job.contentType,
+      );
+    } catch {
+      throw new ExportJobError(
+        "export_download_unavailable",
+        "暂时无法授权下载，请稍后重试。",
+        503,
+      );
+    }
+    await this.db.insert(auditLogs).values({
+      organizationId: actor.organizationId,
+      actorMembershipId: actor.membershipId,
+      action: "export.background_download_authorized",
+      entityType: "export",
+      entityId: job.id,
+      after: { expiresInSeconds: signed.expiresInSeconds },
+    });
+    return { ...signed, fileName: job.fileName, sha256: job.sha256 };
+  }
 
   async exportWorkSessions(actor: AnalyticsActor, from: Date, to: Date) {
     const access = await this.analytics.buildAccessCondition(actor);

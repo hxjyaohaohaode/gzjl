@@ -1,20 +1,111 @@
-import type { FastifyInstance, preHandlerHookHandler } from "fastify";
+import type { FastifyInstance, FastifyReply, preHandlerHookHandler } from "fastify";
 import { z } from "zod";
 
-import { requirePermission } from "../auth/authorization.js";
-import { ImportValidationError, type OperationsService } from "./service.js";
+import { requireAnyScopedPermission, requirePermission } from "../auth/authorization.js";
+import { ExportJobError, ImportValidationError, type OperationsService } from "./service.js";
 
-const rangeQuery = z.object({ from: z.iso.datetime({ offset: true }), to: z.iso.datetime({ offset: true }) }).refine((value) => new Date(value.to) > new Date(value.from), { message: "结束时间必须晚于开始时间" });
+const rangeQuery = z
+  .object({ from: z.iso.datetime({ offset: true }), to: z.iso.datetime({ offset: true }) })
+  .refine((value) => new Date(value.to) > new Date(value.from), { message: "结束时间必须晚于开始时间" });
+const backgroundExportBody = z
+  .object({
+    exportType: z.literal("work_sessions"),
+    format: z.enum(["csv", "json", "xlsx", "pdf"]),
+    from: z.iso.datetime({ offset: true }),
+    to: z.iso.datetime({ offset: true }),
+  })
+  .refine((value) => new Date(value.to) > new Date(value.from), { message: "结束时间必须晚于开始时间" });
 const csvBody = z.object({ csv: z.string().min(1).max(5 * 1024 * 1024) });
 const importParams = z.object({ importId: z.uuid() });
+const exportParams = z.object({ exportId: z.uuid() });
 const auditQuery = z.object({ limit: z.coerce.number().int().min(1).max(200).default(100), before: z.iso.datetime({ offset: true }).optional() });
+
+function handleExportError(reply: FastifyReply, error: unknown) {
+  if (!(error instanceof ExportJobError)) throw error;
+  return reply.code(error.statusCode).send({ error: error.code, message: error.message });
+}
 
 export async function registerOperationsRoutes(app: FastifyInstance, service: OperationsService, authenticate: preHandlerHookHandler): Promise<void> {
   const requireOrgImport = requirePermission("import.scope", () => ({ scopeKind: "organization" }));
-  const requireOrgExport = requirePermission("export.scope", () => ({ scopeKind: "organization" }));
-  app.get("/api/exports/work-sessions.csv", { preHandler: [authenticate, requireOrgExport] }, async (request, reply) => { const query = rangeQuery.parse(request.query); const result = await service.exportWorkSessions(request.auth!, new Date(query.from), new Date(query.to)); return reply.header("content-type", "text/csv; charset=utf-8").header("content-disposition", 'attachment; filename="work-sessions.csv"').header("x-content-sha256", result.sha256).send(`\uFEFF${result.csv}`); });
-  app.get("/api/exports/work-sessions.json", { preHandler: [authenticate, requireOrgExport] }, async (request, reply) => { const query = rangeQuery.parse(request.query); const result = await service.exportWorkSessionsJson(request.auth!, new Date(query.from), new Date(query.to)); return reply.header("content-type", "application/json; charset=utf-8").header("content-disposition", 'attachment; filename="work-sessions.json"').header("x-content-sha256", result.sha256).send(result.json); });
-  app.post("/api/imports/work-sessions/preview", { preHandler: [app.csrfProtection, authenticate, requireOrgImport] }, async (request, reply) => { const { csv } = csvBody.parse(request.body); try { return await service.createImportPreview(request.auth!, csv); } catch (error) { if (error instanceof ImportValidationError) return reply.code(400).send({ error: "invalid_import", message: error.message }); throw error; } });
-  app.post("/api/imports/:importId/confirm", { preHandler: [app.csrfProtection, authenticate, requireOrgImport] }, async (request, reply) => { const { importId } = importParams.parse(request.params); const { csv } = csvBody.parse(request.body); try { return await service.confirmImport(request.auth!, importId, csv); } catch (error) { if (error instanceof ImportValidationError) return reply.code(409).send({ error: "import_conflict", message: error.message }); throw error; } });
-  app.get("/api/audit", { preHandler: [authenticate, requirePermission("audit.view", () => ({ scopeKind: "organization" }))] }, async (request) => { const query = auditQuery.parse(request.query); return { items: await service.audit(request.auth!, query.limit, query.before ? new Date(query.before) : undefined) }; });
+  const requireScopedExport = requireAnyScopedPermission("export.scope");
+
+  app.get("/api/exports/capabilities", { preHandler: [authenticate, requireScopedExport] }, async () => service.exportCapabilities());
+
+  app.post("/api/exports", { preHandler: [app.csrfProtection, authenticate, requireScopedExport] }, async (request, reply) => {
+    const body = backgroundExportBody.parse(request.body);
+    try {
+      const job = await service.createBackgroundExport(request.auth!, {
+        ...body,
+        from: new Date(body.from),
+        to: new Date(body.to),
+      });
+      return reply.code(202).send(job);
+    } catch (error) {
+      return handleExportError(reply, error);
+    }
+  });
+
+  app.get("/api/exports", { preHandler: [authenticate, requireScopedExport] }, async (request) => ({ items: await service.listBackgroundExports(request.auth!) }));
+
+  app.get("/api/exports/:exportId/download", { preHandler: [authenticate, requireScopedExport] }, async (request, reply) => {
+    const { exportId } = exportParams.parse(request.params);
+    try {
+      const result = await service.backgroundExportDownload(request.auth!, exportId);
+      return reply.header("cache-control", "private, no-store").send(result);
+    } catch (error) {
+      return handleExportError(reply, error);
+    }
+  });
+
+  app.post("/api/exports/:exportId/retry", { preHandler: [app.csrfProtection, authenticate, requireScopedExport] }, async (request, reply) => {
+    const { exportId } = exportParams.parse(request.params);
+    try {
+      return await service.retryBackgroundExport(request.auth!, exportId);
+    } catch (error) {
+      return handleExportError(reply, error);
+    }
+  });
+
+  app.delete("/api/exports/:exportId", { preHandler: [app.csrfProtection, authenticate, requireScopedExport] }, async (request, reply) => {
+    const { exportId } = exportParams.parse(request.params);
+    try {
+      return await service.cancelBackgroundExport(request.auth!, exportId);
+    } catch (error) {
+      return handleExportError(reply, error);
+    }
+  });
+
+  app.get("/api/exports/work-sessions.csv", { preHandler: [authenticate, requireScopedExport] }, async (request, reply) => {
+    const query = rangeQuery.parse(request.query);
+    const result = await service.exportWorkSessions(request.auth!, new Date(query.from), new Date(query.to));
+    return reply.header("content-type", "text/csv; charset=utf-8").header("content-disposition", 'attachment; filename="work-sessions.csv"').header("x-content-sha256", result.sha256).send(`\uFEFF${result.csv}`);
+  });
+  app.get("/api/exports/work-sessions.json", { preHandler: [authenticate, requireScopedExport] }, async (request, reply) => {
+    const query = rangeQuery.parse(request.query);
+    const result = await service.exportWorkSessionsJson(request.auth!, new Date(query.from), new Date(query.to));
+    return reply.header("content-type", "application/json; charset=utf-8").header("content-disposition", 'attachment; filename="work-sessions.json"').header("x-content-sha256", result.sha256).send(result.json);
+  });
+  app.post("/api/imports/work-sessions/preview", { preHandler: [app.csrfProtection, authenticate, requireOrgImport] }, async (request, reply) => {
+    const { csv } = csvBody.parse(request.body);
+    try {
+      return await service.createImportPreview(request.auth!, csv);
+    } catch (error) {
+      if (error instanceof ImportValidationError) return reply.code(400).send({ error: "invalid_import", message: error.message });
+      throw error;
+    }
+  });
+  app.post("/api/imports/:importId/confirm", { preHandler: [app.csrfProtection, authenticate, requireOrgImport] }, async (request, reply) => {
+    const { importId } = importParams.parse(request.params);
+    const { csv } = csvBody.parse(request.body);
+    try {
+      return await service.confirmImport(request.auth!, importId, csv);
+    } catch (error) {
+      if (error instanceof ImportValidationError) return reply.code(409).send({ error: "import_conflict", message: error.message });
+      throw error;
+    }
+  });
+  app.get("/api/audit", { preHandler: [authenticate, requirePermission("audit.view", () => ({ scopeKind: "organization" }))] }, async (request) => {
+    const query = auditQuery.parse(request.query);
+    return { items: await service.audit(request.auth!, query.limit, query.before ? new Date(query.before) : undefined) };
+  });
 }

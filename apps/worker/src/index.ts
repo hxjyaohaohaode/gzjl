@@ -1,5 +1,6 @@
 import "dotenv/config";
 
+import { S3Client } from "@aws-sdk/client-s3";
 import { and, eq, gt, gte, inArray, isNull, lt, lte, or, sql } from "drizzle-orm";
 import { PgBoss } from "pg-boss";
 import pino from "pino";
@@ -32,6 +33,7 @@ import {
   workSessions,
 } from "@workbench/db/schema";
 
+import { createExportJobRuntime } from "./export-jobs.js";
 import {
   isPermanentWebPushFailure,
   isWithinQuietHours,
@@ -54,6 +56,12 @@ const config = z.object({
   VAPID_PRIVATE_KEY: z.string().min(1).optional(),
   VAPID_SUBJECT: z.string().min(1).optional(),
   PUSH_SUBSCRIPTION_ENCRYPTION_KEY: z.string().min(32).optional(),
+  S3_ENDPOINT: z.url().optional(),
+  S3_REGION: z.string().min(1).default("auto"),
+  S3_BUCKET: z.string().min(1).optional(),
+  S3_ACCESS_KEY_ID: z.string().min(1).optional(),
+  S3_SECRET_ACCESS_KEY: z.string().min(1).optional(),
+  S3_FORCE_PATH_STYLE: z.stringbool().default(false),
 }).superRefine((value, context) => {
   const configuredVapidValues = [
     value.VAPID_PUBLIC_KEY,
@@ -83,6 +91,28 @@ const logger = pino({ level: config.LOG_LEVEL, redact: ["DATABASE_URL", "apiKey"
 const database = createDatabase(process.env);
 const boss = new PgBoss({ connectionString: config.DATABASE_URL, schema: "pgboss", application_name: "workbench-worker" });
 boss.on("error", (error: Error) => logger.error({ error }, "background queue error"));
+
+const exportStoreReady = Boolean(
+  config.S3_BUCKET && config.S3_ACCESS_KEY_ID && config.S3_SECRET_ACCESS_KEY,
+);
+const exportStore = exportStoreReady
+  ? new S3Client({
+      ...(config.S3_ENDPOINT ? { endpoint: config.S3_ENDPOINT } : {}),
+      region: config.S3_REGION,
+      forcePathStyle: config.S3_FORCE_PATH_STYLE,
+      credentials: {
+        accessKeyId: config.S3_ACCESS_KEY_ID!,
+        secretAccessKey: config.S3_SECRET_ACCESS_KEY!,
+      },
+    })
+  : null;
+const exportRuntime = createExportJobRuntime(
+  database.db,
+  boss,
+  exportStore && config.S3_BUCKET
+    ? { client: exportStore, bucket: config.S3_BUCKET }
+    : null,
+);
 
 const pushReady = Boolean(
   config.VAPID_PUBLIC_KEY &&
@@ -726,34 +756,48 @@ async function publishOutbox(): Promise<void> {
     if (event.eventType === "ai.job.queued") {
       await enqueueAiJob(event.entityId);
     }
+    if (event.eventType === "export.job.queued") {
+      await exportRuntime.enqueue(event.entityId);
+    }
     await database.db.update(outboxEvents).set({ publishedAt: new Date(), attempt: sql`${outboxEvents.attempt} + 1` }).where(eq(outboxEvents.id, event.id));
   }
 }
 
 await boss.start();
 await boss.createQueue("ai-generate-report");
+await boss.createQueue("export-generate");
 await boss.work<{ jobId: string }>("ai-generate-report", { batchSize: 1 }, async (jobs) => {
   for (const job of jobs) await processAiJob(job.data.jobId);
+});
+await boss.work<{ jobId: string }>("export-generate", { batchSize: 1 }, async (jobs) => {
+  for (const job of jobs) await exportRuntime.process(job.data.jobId);
 });
 await ensureDefaultReminderRules();
 await Promise.all([
   dispatchAiJobs(),
+  exportRuntime.dispatch(),
+  exportRuntime.cleanupExpired(),
   evaluateReminders(),
   publishOutbox(),
   runPushCycle(),
 ]);
 const dispatchTimer = setInterval(() => void dispatchAiJobs().catch((error) => logger.error({ error }, "AI dispatch failed")), 15_000);
+const exportDispatchTimer = setInterval(() => void exportRuntime.dispatch().catch((error) => logger.error({ error }, "export dispatch failed")), 15_000);
+const exportCleanupTimer = setInterval(() => void exportRuntime.cleanupExpired().catch((error) => logger.error({ error }, "expired export cleanup failed")), 60 * 60_000);
 const reminderTimer = setInterval(() => void evaluateReminders().catch((error) => logger.error({ error }, "reminder evaluation failed")), 60_000);
 const outboxTimer = setInterval(() => void publishOutbox().catch((error) => logger.error({ error }, "outbox publishing failed")), 5_000);
 const pushTimer = setInterval(() => void runPushCycle().catch((error) => logger.error({ error }, "web push cycle failed")), 10_000);
 logger.info("background worker started");
 if (!pushReady) logger.info("browser push is disabled because VAPID is not configured");
+if (!exportStoreReady) logger.info("background export is disabled because S3 object storage is not configured");
 
 let shuttingDown = false;
 async function shutdown(signal: string): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
   clearInterval(dispatchTimer);
+  clearInterval(exportDispatchTimer);
+  clearInterval(exportCleanupTimer);
   clearInterval(reminderTimer);
   clearInterval(outboxTimer);
   clearInterval(pushTimer);
