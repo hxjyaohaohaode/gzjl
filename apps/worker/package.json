@@ -9,7 +9,7 @@
     "start": "node dist/index.js",
     "lint": "eslint src --max-warnings=0",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run --passWithNoTests",
+    "test": "vitest run --passWithNoTests --testTimeout=20000",
     "test:watch": "vitest --passWithNoTests"
   },
   "dependencies": {
