@@ -1,8 +1,17 @@
 import { createHash } from "node:crypto";
 
-import { and, desc, eq, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { Database } from "@workbench/db";
-import { aiJobs, aiReports, aiReportSources, outboxEvents } from "@workbench/db/schema";
+import {
+  aiJobs,
+  aiReports,
+  aiReportSources,
+  orgMemberships,
+  outboxEvents,
+  projectNodes,
+  projects,
+  users,
+} from "@workbench/db/schema";
 
 import type { AnalyticsActor, AnalyticsService } from "../analytics/service.js";
 import type { AiConfigurationService } from "./configuration.js";
@@ -15,6 +24,7 @@ export const aiTaskTypes = [
   "project_progress",
   "project_blockers",
   "organization_summary",
+  "assistant_chat",
 ] as const;
 export type AiTaskType = (typeof aiTaskTypes)[number];
 
@@ -26,6 +36,7 @@ const taskGoals: Record<AiTaskType, string> = {
   project_progress: "按项目汇总投入和进展证据；工时不能被直接解释为完成度。",
   project_blockers: "仅根据工作记录中的阻塞与项目事实定位风险，并给出可验证的处理建议。",
   organization_summary: "汇总授权范围内的组织工作事实，不做员工排名、处罚或绩效结论。",
+  assistant_chat: "回答用户关于工作、成员状态和项目状态的问题；结论必须能回溯到当前授权范围内的事实。",
 };
 
 export interface AiReportRequest {
@@ -33,6 +44,8 @@ export interface AiReportRequest {
   scope: "self" | "team";
   from: Date;
   to: Date;
+  question?: string | undefined;
+  conversationId?: string | undefined;
 }
 
 export class AiUnavailableError extends Error {
@@ -52,6 +65,8 @@ export class AiService {
 
   async requestReport(actor: AnalyticsActor, input: AiReportRequest) {
     const { taskType, scope, from, to } = input;
+    const question = input.question?.trim();
+    const conversationId = input.conversationId?.trim() || "primary";
     const provider = await this.configuration.resolveEffective(actor.organizationId);
     if (!provider) throw new AiUnavailableError();
     const facts = await this.analytics.summary(
@@ -61,18 +76,165 @@ export class AiService {
       from,
       to,
     );
+    const memberRows = await this.db
+      .select({
+        membershipId: orgMemberships.id,
+        displayName: users.displayName,
+        status: orgMemberships.status,
+        orgUnitId: orgMemberships.orgUnitId,
+        joinedAt: orgMemberships.joinedAt,
+      })
+      .from(orgMemberships)
+      .innerJoin(users, eq(users.id, orgMemberships.userId))
+      .where(
+        and(
+          eq(orgMemberships.organizationId, actor.organizationId),
+          scope === "self" ? eq(orgMemberships.id, actor.membershipId) : undefined,
+        ),
+      )
+      .limit(200);
+    const accessibleProjectIds = facts.byProject
+      .map((item) => item.projectId)
+      .filter((id): id is string => Boolean(id));
+    const projectRows =
+      scope === "self" && accessibleProjectIds.length === 0
+        ? []
+        : await this.db
+            .select({
+              projectId: projects.id,
+              projectName: projects.name,
+              projectStatus: projects.status,
+              projectDueAt: projects.dueAt,
+              projectVersion: projects.version,
+              nodeId: projectNodes.id,
+              nodeTitle: projectNodes.title,
+              nodeStatus: projectNodes.status,
+              nodeProgress: projectNodes.progress,
+              nodeWeight: projectNodes.weight,
+              nodeDueAt: projectNodes.dueAt,
+              nodeVersion: projectNodes.version,
+            })
+            .from(projects)
+            .leftJoin(
+              projectNodes,
+              and(eq(projectNodes.projectId, projects.id), isNull(projectNodes.deletedAt)),
+            )
+            .where(
+              and(
+                eq(projects.organizationId, actor.organizationId),
+                isNull(projects.deletedAt),
+                scope === "self" ? inArray(projects.id, accessibleProjectIds) : undefined,
+              ),
+            )
+            .limit(240);
+    const projectContext = new Map<
+      string,
+      {
+        id: string;
+        name: string;
+        status: string;
+        dueAt: Date | null;
+        version: number;
+        recordedSeconds: number;
+        nodes: Array<{
+          id: string;
+          title: string;
+          status: string;
+          progress: string;
+          weight: string;
+          dueAt: Date | null;
+          version: number;
+        }>;
+      }
+    >();
+    for (const row of projectRows) {
+      const project = projectContext.get(row.projectId) ?? {
+        id: row.projectId,
+        name: row.projectName,
+        status: row.projectStatus,
+        dueAt: row.projectDueAt,
+        version: row.projectVersion,
+        recordedSeconds:
+          facts.byProject.find((item) => item.projectId === row.projectId)?.seconds ?? 0,
+        nodes: [],
+      };
+      if (row.nodeId && row.nodeTitle && row.nodeStatus && row.nodeProgress && row.nodeWeight) {
+        project.nodes.push({
+          id: row.nodeId,
+          title: row.nodeTitle,
+          status: row.nodeStatus,
+          progress: row.nodeProgress,
+          weight: row.nodeWeight,
+          dueAt: row.nodeDueAt,
+          version: row.nodeVersion ?? 1,
+        });
+      }
+      projectContext.set(row.projectId, project);
+    }
+    const conversationRows =
+      taskType === "assistant_chat"
+        ? await this.db
+            .select({ job: aiJobs, report: aiReports })
+            .from(aiJobs)
+            .leftJoin(aiReports, eq(aiReports.aiJobId, aiJobs.id))
+            .where(
+              and(
+                eq(aiJobs.organizationId, actor.organizationId),
+                eq(aiJobs.requestedBy, actor.membershipId),
+                eq(aiJobs.taskType, "assistant_chat"),
+              ),
+            )
+            .orderBy(desc(aiJobs.queuedAt))
+            .limit(30)
+        : [];
+    const conversationHistory = conversationRows
+      .filter((entry) => {
+        const jobScope = entry.job.scope as { conversationId?: unknown };
+        return (jobScope.conversationId || "primary") === conversationId;
+      })
+      .slice(0, 10)
+      .reverse()
+      .map((entry) => ({
+        question: String((entry.job.scope as { question?: unknown }).question ?? ""),
+        answer: entry.report?.summary ?? null,
+      }));
     const sourceSummary = this.limitSourceSummary({
       taskType,
       taskGoal: taskGoals[taskType],
+      ...(question ? { question, conversationId, conversationHistory } : {}),
       scope,
       range: facts.range,
       totals: facts.totals,
       byDay: facts.byDay,
       byProject: facts.byProject,
       byMember: scope === "team" ? facts.byMember : [],
-      sources: facts.byProject
-        .filter((item) => item.projectId)
-        .map((item) => ({ entityType: "project", entityId: item.projectId, label: item.projectName })),
+      byWorkType: facts.byWorkType,
+      byApproval: facts.byApproval,
+      byHour: facts.byHour,
+      funnel: facts.funnel,
+      members: memberRows.map((member) => ({
+        ...member,
+        recordedSeconds:
+          facts.byMember.find((item) => item.membershipId === member.membershipId)?.seconds ??
+          (member.membershipId === actor.membershipId ? facts.totals.totalSeconds : 0),
+      })),
+      projects: [...projectContext.values()].map((project) => ({
+        ...project,
+        nodes: project.nodes.slice(0, 40),
+        nodesTruncated: project.nodes.length > 40,
+      })),
+      sources: [
+        ...facts.byProject
+          .filter((item) => item.projectId)
+          .map((item) => ({ entityType: "project", entityId: item.projectId!, label: item.projectName })),
+        ...(scope === "team"
+          ? memberRows.map((member) => ({
+              entityType: "organization_membership",
+              entityId: member.membershipId,
+              label: member.displayName,
+            }))
+          : []),
+      ],
     });
     const inputHash = createHash("sha256")
       // Provider/model/output-cap changes can materially affect a report even
@@ -93,7 +255,7 @@ export class AiService {
             model: provider.model,
             maxOutputTokens: provider.maxOutputTokens,
           },
-          template: "structured-work-intelligence-v3",
+          template: "structured-work-intelligence-v4-chat",
         }),
       )
       .digest("hex");
@@ -117,7 +279,7 @@ export class AiService {
         .limit(1);
       if (existing) return existing;
       await this.configuration.assertQuota(actor.organizationId, tx);
-      const [job] = await tx.insert(aiJobs).values({ organizationId: actor.organizationId, requestedBy: actor.membershipId, scope: { scope, from, to }, taskType, provider: "openai_compatible", model: provider.model, promptTemplateVersion: "structured-work-intelligence-v3", inputHash, sourceSummary, maxAttempts: provider.maxAttempts, maxOutputTokens: provider.maxOutputTokens }).returning();
+      const [job] = await tx.insert(aiJobs).values({ organizationId: actor.organizationId, requestedBy: actor.membershipId, scope: { scope, from, to, ...(question ? { question, conversationId } : {}) }, taskType, provider: "openai_compatible", model: provider.model, promptTemplateVersion: "structured-work-intelligence-v4-chat", inputHash, sourceSummary, maxAttempts: provider.maxAttempts, maxOutputTokens: provider.maxOutputTokens }).returning();
       if (!job) throw new Error("Failed to create AI job");
       await tx.insert(outboxEvents).values({ organizationId: actor.organizationId, eventType: "ai.job.queued", entityType: "ai_job", entityId: job.id, entityVersion: 1, payload: { jobId: job.id } });
       return job;
@@ -173,6 +335,9 @@ export class AiService {
       byDay: cap(summary.byDay, 366),
       byProject: cap(summary.byProject, 200),
       byMember: cap(summary.byMember, 200),
+      members: cap(summary.members, 200),
+      projects: cap(summary.projects, 200),
+      conversationHistory: cap(summary.conversationHistory, 10),
       sources: cap(summary.sources, 200),
     } as T;
     if (JSON.stringify(bounded).length <= 48_000) return bounded;
@@ -181,9 +346,34 @@ export class AiService {
       byDay: cap(summary.byDay, 90),
       byProject: cap(summary.byProject, 80),
       byMember: cap(summary.byMember, 80),
+      members: cap(summary.members, 80),
+      projects: cap(summary.projects, 80),
+      conversationHistory: cap(summary.conversationHistory, 6),
       sources: cap(summary.sources, 80),
       inputTruncated: true,
     } as T;
-    return bounded;
+    if (JSON.stringify(bounded).length <= 48_000) return bounded;
+    const compactProjects = Array.isArray(summary.projects)
+      ? summary.projects.slice(0, 24).map((project) => {
+          if (!project || typeof project !== "object") return project;
+          const value = project as Record<string, unknown>;
+          return {
+            ...value,
+            nodes: Array.isArray(value.nodes) ? value.nodes.slice(0, 12) : [],
+            nodesTruncated: true,
+          };
+        })
+      : summary.projects;
+    return {
+      ...summary,
+      byDay: cap(summary.byDay, 31),
+      byProject: cap(summary.byProject, 24),
+      byMember: cap(summary.byMember, 50),
+      members: cap(summary.members, 50),
+      projects: compactProjects,
+      conversationHistory: cap(summary.conversationHistory, 4),
+      sources: cap(summary.sources, 48),
+      inputTruncated: true,
+    } as T;
   }
 }

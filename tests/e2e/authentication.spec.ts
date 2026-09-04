@@ -598,6 +598,93 @@ test("Owner can configure a versioned hourly plan and create a pay period", asyn
   expect(periodPayload).toMatchObject({ timezone: "Asia/Shanghai" });
 });
 
+test("personal payroll renders reconciled totals, daily pay, period trend, and components", async ({
+  page,
+}) => {
+  await mockAuthenticatedWorkspace(page);
+  await page.route("**/api/payroll/management", (route) =>
+    route.fulfill({ json: { members: [], periods: [], runs: [] } }),
+  );
+  await page.route("**/api/payroll/me", (route) =>
+    route.fulfill({
+      json: {
+        summary: [
+          {
+            currency: "CNY",
+            settledAmount: "4000.000000",
+            pendingAmount: "900.000000",
+            totalAmount: "4900.000000",
+          },
+        ],
+        items: [
+          {
+            item: {
+              id: "payroll-item-1",
+              currency: "CNY",
+              approvedSeconds: 28_800,
+              pendingSeconds: 3_600,
+              grossAmount: "880.000000",
+              adjustmentAmount: "20.000000",
+              finalAmount: "900.000000",
+              estimate: true,
+              needsReview: false,
+            },
+            run: {
+              id: "run-1",
+              runNumber: 2,
+              status: "ready",
+              calculationVersion: "payroll-engine-v2-daily-trace",
+            },
+            period: {
+              name: "2026 年 9 月",
+              startsAt: "2026-09-01T00:00:00.000Z",
+              endsAt: "2026-10-01T00:00:00.000Z",
+              status: "pending_confirmation",
+            },
+            dailyBreakdown: [
+              { date: "2026-09-03", amount: "400.000000", estimatedAmount: "0.000000" },
+              { date: "2026-09-04", amount: "500.000000", estimatedAmount: "100.000000" },
+            ],
+            components: [
+              {
+                id: "component-1",
+                type: "base",
+                label: "基础工时",
+                quantity: "28800.000000",
+                unit: "second",
+                rate: "100.000000",
+                multiplier: "1.000000",
+                amount: "880.000000",
+              },
+              {
+                id: "component-2",
+                type: "allowance",
+                label: "补贴",
+                quantity: null,
+                unit: null,
+                rate: null,
+                multiplier: null,
+                amount: "20.000000",
+              },
+            ],
+          },
+        ],
+      },
+    }),
+  );
+  await page.goto("/login");
+  await page.getByLabel("邮箱或手机号").fill("owner@example.test");
+  await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+  await page.goto("/payroll");
+  await expect(page.getByText("当前应结")).toBeVisible();
+  await expect(page.getByText("¥900.00", { exact: true }).first()).toBeVisible();
+  await expect(page.getByRole("img", { name: "2026 年 9 月每日薪资" })).toBeVisible();
+  await expect(page.getByRole("img", { name: "周期薪资趋势" })).toBeVisible();
+  await expect(page.getByText("基础工时", { exact: true })).toBeVisible();
+  await expect(page.getByText("补贴", { exact: true })).toBeVisible();
+});
+
 test("contact verification consumes a fragment capability without leaving it in the address bar", async ({
   page,
 }) => {
@@ -961,6 +1048,33 @@ test("mobile navigation exposes the five primary destinations", async ({
   for (const label of ["今日", "记录", "项目", "分析", "薪资"]) {
     await expect(navigation.getByText(label, { exact: true })).toBeVisible();
   }
+});
+
+test("mobile sidebar stays usable after a desktop collapse preference", async ({
+  page,
+}, testInfo) => {
+  test.skip(
+    !testInfo.project.name.startsWith("mobile"),
+    "mobile-only assertion",
+  );
+  await page.addInitScript(() => {
+    localStorage.setItem("workbench-sidebar-collapsed", "true");
+    localStorage.setItem("workbench-sidebar-width", "420");
+  });
+  await mockAuthenticatedWorkspace(page);
+  await page.goto("/login");
+  await page.getByLabel("邮箱或手机号").fill("owner@example.test");
+  await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+  await page.getByRole("button", { name: "打开导航" }).click();
+  const sidebar = page.getByRole("complementary", { name: "主导航" });
+  await expect(sidebar).toBeVisible();
+  await expect(sidebar.getByText("数据分析", { exact: true })).toBeVisible();
+  const box = await sidebar.boundingBox();
+  expect(box?.width).toBeLessThanOrEqual(420);
+  expect(box?.width).toBeLessThanOrEqual(390);
+  await sidebar.getByRole("button", { name: "关闭导航" }).click();
+  await expect(sidebar).toHaveClass(/-translate-x-full/);
 });
 
 test("manual work recording persists primary and auxiliary project-node associations", async ({
@@ -1711,6 +1825,39 @@ test("AI report requests keep a stable five-minute range for cost-safe deduplica
   expect(to.getUTCMilliseconds()).toBe(0);
   expect(to.getUTCMinutes() % 5).toBe(0);
   expect(to.getTime() - from.getTime()).toBe(7 * 86_400_000);
+});
+
+test("AI workspace sends a persistent fact-scoped conversation turn", async ({ page }) => {
+  await mockAuthenticatedWorkspace(page);
+  let request: Record<string, unknown> | null = null;
+  await page.route("**/api/ai/reports", async (route) => {
+    if (route.request().method() === "GET") {
+      await route.fulfill({ json: { items: [] } });
+      return;
+    }
+    request = route.request().postDataJSON() as Record<string, unknown>;
+    await route.fulfill({
+      status: 202,
+      json: { job: { id: "chat-job", status: "queued" } },
+    });
+  });
+  await page.goto("/login");
+  await page.getByLabel("邮箱或手机号").fill("owner@example.test");
+  await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+  await page.goto("/ai");
+  await page.getByLabel("向 AI 提问").fill("当前有哪些项目受阻？");
+  await page.getByRole("button", { name: "发送", exact: true }).click();
+  await expect.poll(() => request).not.toBeNull();
+  expect(request).toMatchObject({
+    taskType: "assistant_chat",
+    scope: "self",
+    question: "当前有哪些项目受阻？",
+    conversationId: "primary",
+  });
+  expect(
+    new Date(String(request?.to)).getTime() - new Date(String(request?.from)).getTime(),
+  ).toBe(31 * 86_400_000);
 });
 
 test("AI background jobs can be cancelled and deliberately retried without changing core facts", async ({

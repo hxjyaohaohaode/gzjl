@@ -36,6 +36,7 @@ export interface PayrollComponentResult {
   trace: {
     ruleIds: string[];
     timezone: string;
+    date: string;
   };
 }
 
@@ -173,6 +174,7 @@ function highestPriority(
 }
 
 interface MutableComponent {
+  date: string;
   type: PayrollComponentResult["type"];
   label: string;
   sourceIds: Set<string>;
@@ -204,7 +206,10 @@ export function calculateHourlyPayroll(input: {
     .sort((a, b) => a.startAt.getTime() - b.startAt.getTime());
   let approvedSeconds = 0;
   let pendingSeconds = 0;
-  let cumulativeSeconds = 0;
+  // Overtime thresholds are civil-day rules. Keep a separate accumulator for
+  // every organization-local date so a multi-day pay period cannot make all
+  // work after day one look like overtime.
+  const cumulativeSecondsByDate = new Map<string, number>();
   const components = new Map<string, MutableComponent>();
 
   for (const interval of intervals) {
@@ -224,6 +229,7 @@ export function calculateHourlyPayroll(input: {
 
       while (segmentSeconds > 0) {
         const parts = localParts(cursor, input.timezone);
+        const cumulativeSeconds = cumulativeSecondsByDate.get(parts.date) ?? 0;
         const isWeekendDay = parts.weekday === "Sat" || parts.weekday === "Sun";
         const holidayRule = highestPriority(
           input.rules,
@@ -282,10 +288,14 @@ export function calculateHourlyPayroll(input: {
         }
 
         const estimate = interval.approvalStatus === "pending_review";
-        const componentKey = `${selectedType}:${multiplierMicros}:${estimate}:${ruleIds.join(",")}`;
+        // A date-scoped component is intentionally preserved in the immutable
+        // payroll trace. The employee dashboard can therefore render exact
+        // daily pay without recalculating money in the browser.
+        const componentKey = `${parts.date}:${selectedType}:${multiplierMicros}:${estimate}:${ruleIds.join(",")}`;
         let component = components.get(componentKey);
         if (!component) {
           component = {
+            date: parts.date,
             type: selectedType,
             label: selectedType === "base" ? "基础工时" : selectedType,
             sourceIds: new Set(),
@@ -304,7 +314,7 @@ export function calculateHourlyPayroll(input: {
           rateMicros * multiplierMicros * BigInt(pieceSeconds);
         if (estimate) pendingSeconds += pieceSeconds;
         else approvedSeconds += pieceSeconds;
-        cumulativeSeconds += pieceSeconds;
+        cumulativeSecondsByDate.set(parts.date, cumulativeSeconds + pieceSeconds);
         segmentSeconds -= pieceSeconds;
         cursor = new Date(cursor.getTime() + pieceSeconds * 1_000);
       }
@@ -322,7 +332,11 @@ export function calculateHourlyPayroll(input: {
       divideRounded(component.amountNumerator, SCALE * SECONDS_PER_HOUR),
     ),
     estimate: component.estimate,
-    trace: { ruleIds: component.ruleIds, timezone: input.timezone },
+    trace: {
+      ruleIds: component.ruleIds,
+      timezone: input.timezone,
+      date: component.date,
+    },
   }));
   const grossAmount = resultComponents.reduce(
     (total, component) => total + parseDecimal(component.amount),

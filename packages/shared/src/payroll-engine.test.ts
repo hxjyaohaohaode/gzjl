@@ -98,6 +98,45 @@ describe("calculateHourlyPayroll", () => {
     });
     expect(result.grossAmount).toBe("180.000000");
     expect(result.components.map((component) => component.seconds).sort()).toEqual([3_600, 3_600]);
+    expect(result.components.every((component) => component.trace.date === "2026-09-01")).toBe(true);
+  });
+
+  it("resets overtime thresholds for each organization-local calendar day", () => {
+    const result = calculateHourlyPayroll({
+      hourlyRate: "60",
+      timezone: "Asia/Shanghai",
+      intervals: [
+        {
+          sourceId: "day-1",
+          startAt: new Date("2026-09-01T01:00:00.000Z"),
+          endAt: new Date("2026-09-01T03:00:00.000Z"),
+          approvalStatus: "approved",
+        },
+        {
+          sourceId: "day-2",
+          startAt: new Date("2026-09-02T01:00:00.000Z"),
+          endAt: new Date("2026-09-02T03:00:00.000Z"),
+          approvalStatus: "approved",
+        },
+      ],
+      rules: [
+        {
+          id: "daily-overtime",
+          type: "overtime",
+          priority: 500,
+          multiplier: "2",
+          thresholdSeconds: 3_600,
+        },
+      ],
+      includePendingAsEstimate: false,
+    });
+    expect(result.grossAmount).toBe("360.000000");
+    expect(result.components.map((component) => component.trace.date).sort()).toEqual([
+      "2026-09-01",
+      "2026-09-01",
+      "2026-09-02",
+      "2026-09-02",
+    ]);
   });
 
   it("excludes pending work unless estimates are enabled", () => {

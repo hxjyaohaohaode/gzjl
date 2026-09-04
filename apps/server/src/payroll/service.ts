@@ -90,6 +90,35 @@ function sha256(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
 
+function decimalMicros(value: string): bigint {
+  const negative = value.startsWith("-");
+  const unsigned = negative ? value.slice(1) : value;
+  const [whole = "0", fraction = ""] = unsigned.split(".");
+  const result = BigInt(whole) * 1_000_000n + BigInt(fraction.padEnd(6, "0").slice(0, 6));
+  return negative ? -result : result;
+}
+
+function formatMicros(value: bigint): string {
+  const negative = value < 0;
+  const absolute = negative ? -value : value;
+  return `${negative ? "-" : ""}${absolute / 1_000_000n}.${(absolute % 1_000_000n)
+    .toString()
+    .padStart(6, "0")}`;
+}
+
+function splitMicros(value: bigint, count: number): bigint[] {
+  if (count <= 0) return [];
+  const divisor = BigInt(count);
+  const quotient = value / divisor;
+  let remainder = value % divisor;
+  return Array.from({ length: count }, () => {
+    if (remainder === 0n) return quotient;
+    const extra = remainder > 0n ? 1n : -1n;
+    remainder -= extra;
+    return quotient + extra;
+  });
+}
+
 function parseRule(row: typeof rateRules.$inferSelect): PayrollRateRule | null {
   if (!["weekday", "weekend", "holiday", "night_window", "overtime"].includes(row.type)) {
     return null;
@@ -788,7 +817,7 @@ export class PayrollService {
     });
 
     const snapshotPayload = {
-      calculationVersion: "payroll-engine-v1",
+      calculationVersion: "payroll-engine-v2-daily-trace",
       period,
       plans: planRows,
       rules,
@@ -822,7 +851,7 @@ export class PayrollService {
           status: calculatedItems.some((item) => item.needsReview)
             ? "review_required"
             : "ready",
-          calculationVersion: "payroll-engine-v1",
+          calculationVersion: "payroll-engine-v2-daily-trace",
           requestedBy: actor.membershipId,
           inputHash,
           startedAt: new Date(),
@@ -1027,7 +1056,7 @@ export class PayrollService {
   }
 
   async listOwn(actor: PayrollActor) {
-    return this.db
+    const records = await this.db
       .select({ item: payrollItems, run: payrollRuns, period: payPeriods })
       .from(payrollItems)
       .innerJoin(payrollRuns, eq(payrollRuns.id, payrollItems.payrollRunId))
@@ -1039,5 +1068,104 @@ export class PayrollService {
         ),
       )
       .orderBy(desc(payPeriods.endsAt), desc(payrollRuns.runNumber));
+
+    // A period may be recalculated many times before settlement. Only its
+    // newest immutable run is payable; showing every historical run would
+    // double-count an employee's accumulated pay.
+    const latestByPeriod = new Map<string, (typeof records)[number]>();
+    for (const record of records) {
+      if (!latestByPeriod.has(record.period.id)) {
+        latestByPeriod.set(record.period.id, record);
+      }
+    }
+    const latest = [...latestByPeriod.values()];
+    const componentRows = latest.length
+      ? await this.db
+          .select()
+          .from(payrollItemComponents)
+          .where(inArray(payrollItemComponents.payrollItemId, latest.map((record) => record.item.id)))
+          .orderBy(asc(payrollItemComponents.createdAt))
+      : [];
+    const componentsByItem = new Map<string, Array<(typeof componentRows)[number]>>();
+    for (const component of componentRows) {
+      componentsByItem.set(component.payrollItemId, [
+        ...(componentsByItem.get(component.payrollItemId) ?? []),
+        component,
+      ]);
+    }
+
+    const items = latest.map((record) => {
+      const components = componentsByItem.get(record.item.id) ?? [];
+      const periodDates = localDateKeysForIntervals(
+        [{ startAt: record.period.startsAt, endAt: record.period.endsAt }],
+        record.period.timezone,
+      );
+      const daily = new Map<string, { amount: bigint; estimatedAmount: bigint }>();
+      const addDaily = (date: string, amount: bigint, estimated: boolean) => {
+        const current = daily.get(date) ?? { amount: 0n, estimatedAmount: 0n };
+        current.amount += amount;
+        if (estimated) current.estimatedAmount += amount;
+        daily.set(date, current);
+      };
+      for (const component of components) {
+        const trace = (component.calculationTrace ?? {}) as {
+          date?: unknown;
+          dates?: unknown;
+          estimate?: unknown;
+        };
+        const tracedDates =
+          typeof trace.date === "string"
+            ? [trace.date]
+            : Array.isArray(trace.dates)
+              ? trace.dates.filter((date): date is string => typeof date === "string")
+              : [];
+        const dates = tracedDates.length
+          ? tracedDates
+          : component.sourceEntityType === "payroll_adjustment"
+            ? periodDates.slice(-1)
+            : periodDates;
+        const allocations = splitMicros(decimalMicros(component.amount), dates.length || 1);
+        (dates.length ? dates : [periodDates.at(-1)!]).forEach(
+          (date, index) => addDaily(date, allocations[index] ?? 0n, trace.estimate === true),
+        );
+      }
+      return {
+        ...record,
+        components,
+        dailyBreakdown: [...daily]
+          .sort(([left], [right]) => left.localeCompare(right))
+          .map(([date, amount]) => ({
+            date,
+            amount: formatMicros(amount.amount),
+            estimatedAmount: formatMicros(amount.estimatedAmount),
+          })),
+      };
+    });
+
+    const totals = new Map<
+      string,
+      { settledAmount: bigint; pendingAmount: bigint; totalAmount: bigint }
+    >();
+    for (const record of items) {
+      const current = totals.get(record.item.currency) ?? {
+        settledAmount: 0n,
+        pendingAmount: 0n,
+        totalAmount: 0n,
+      };
+      const amount = decimalMicros(record.item.finalAmount);
+      current.totalAmount += amount;
+      if (record.run.status === "settled") current.settledAmount += amount;
+      else current.pendingAmount += amount;
+      totals.set(record.item.currency, current);
+    }
+    return {
+      items,
+      summary: [...totals].map(([currency, amount]) => ({
+        currency,
+        settledAmount: formatMicros(amount.settledAmount),
+        pendingAmount: formatMicros(amount.pendingAmount),
+        totalAmount: formatMicros(amount.totalAmount),
+      })),
+    };
   }
 }

@@ -26,6 +26,8 @@ const requestSchema = z
     scope: z.enum(["self", "team"]).default("self"),
     from: z.iso.datetime({ offset: true }),
     to: z.iso.datetime({ offset: true }),
+    question: z.string().trim().min(2).max(2_000).optional(),
+    conversationId: z.string().trim().regex(/^[a-zA-Z0-9_-]{1,64}$/).optional(),
   })
   .superRefine((value, context) => {
     const from = new Date(value.from);
@@ -42,6 +44,13 @@ const requestSchema = z
         code: "custom",
         path: ["from"],
         message: "单次 AI 分析最多覆盖 366 天，避免无界成本与失真结论。",
+      });
+    }
+    if (value.taskType === "assistant_chat" && !value.question) {
+      context.addIssue({
+        code: "custom",
+        path: ["question"],
+        message: "请输入要询问 AI 的内容。",
       });
     }
   });
@@ -154,6 +163,8 @@ export async function registerAiRoutes(
           scope: input.scope,
           from: new Date(input.from),
           to: new Date(input.to),
+          question: input.question,
+          conversationId: input.conversationId,
         });
         return reply.code(202).send({ job });
       } catch (error) {

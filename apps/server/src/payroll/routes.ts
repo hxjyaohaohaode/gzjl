@@ -113,7 +113,7 @@ export async function registerPayrollRoutes(
   app.get(
     "/api/payroll/me",
     { preHandler: [authenticate, ownPermission] },
-    async (request) => ({ items: await service.listOwn(request.auth!) }),
+    async (request) => service.listOwn(request.auth!),
   );
 
   app.post(

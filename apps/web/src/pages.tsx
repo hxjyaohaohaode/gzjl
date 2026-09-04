@@ -32,6 +32,7 @@ import {
   Users,
 } from "lucide-react";
 import {
+  Component,
   lazy,
   Suspense,
   useEffect,
@@ -99,6 +100,35 @@ const timezone =
   Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Shanghai";
 const AnalyticsChartLazy = lazy(() => import("./analytics-chart.js"));
 const ProjectCanvasLazy = lazy(() => import("./project-canvas.js"));
+class AnalyticsChartBoundary extends Component<
+  { children: ReactNode },
+  { failed: boolean }
+> {
+  override state = { failed: false };
+
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+
+  override componentDidCatch(error: unknown) {
+    console.error("Analytics chart failed to render", error);
+  }
+
+  override render() {
+    if (this.state.failed) {
+      return (
+        <div className="grid min-h-64 place-items-center rounded-xl bg-[var(--surface-subtle)] p-6 text-center">
+          <div>
+            <AlertCircle className="mx-auto text-[var(--danger)]" />
+            <p className="mt-3 font-bold">图表暂时无法加载</p>
+            <p className="mt-1 text-sm text-[var(--text-muted)]">其他数据仍可正常查看，刷新页面可重试。</p>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 function AnalyticsChart({
   ariaLabel,
   option,
@@ -107,9 +137,11 @@ function AnalyticsChart({
   option: EChartsCoreOption;
 }) {
   return (
-    <Suspense fallback={<LoadingBlock />}>
-      <AnalyticsChartLazy ariaLabel={ariaLabel} option={option} />
-    </Suspense>
+    <AnalyticsChartBoundary>
+      <Suspense fallback={<LoadingBlock />}>
+        <AnalyticsChartLazy ariaLabel={ariaLabel} option={option} />
+      </Suspense>
+    </AnalyticsChartBoundary>
   );
 }
 function ProjectCanvas({
@@ -6337,6 +6369,30 @@ interface PayrollRecord {
     calculationVersion: string;
   };
   period: { name: string; startsAt: string; endsAt: string; status: string };
+  components: Array<{
+    id: string;
+    type: string;
+    label: string;
+    quantity: string | null;
+    unit: string | null;
+    rate: string | null;
+    multiplier: string | null;
+    amount: string;
+  }>;
+  dailyBreakdown: Array<{
+    date: string;
+    amount: string;
+    estimatedAmount: string;
+  }>;
+}
+interface PayrollOwnResponse {
+  items: PayrollRecord[];
+  summary: Array<{
+    currency: string;
+    settledAmount: string;
+    pendingAmount: string;
+    totalAmount: string;
+  }>;
 }
 type CompensationPlanType =
   | "hourly"
@@ -6576,6 +6632,24 @@ function PayrollManagementPanel() {
           <Badge tone="info">版本化 · 生效日期 · 审计</Badge>
         </CardHeader>
         <CardContent>
+          <div className="mb-5 grid gap-2 sm:grid-cols-2 xl:grid-cols-4" aria-label="选择要配置薪资的成员">
+            {activeMembers.map((member) => (
+              <button
+                aria-pressed={selectedMemberId === member.membershipId}
+                className={`rounded-xl px-4 py-3 text-left transition ${selectedMemberId === member.membershipId ? "bg-[var(--accent-soft)] text-[var(--accent-strong)]" : "bg-[var(--surface-subtle)] hover:bg-[var(--surface-tint)]"}`}
+                key={member.membershipId}
+                onClick={() => selectMember(member.membershipId)}
+                type="button"
+              >
+                <span className="block font-bold">{member.displayName}</span>
+                <span className="mt-1 block text-xs opacity-70">
+                  {member.plan
+                    ? `${compensationTypeLabels[member.plan.version.type]} · ${member.plan.plan.currency} ${Number(member.plan.version.baseAmount).toFixed(2)}`
+                    : "尚未配置"}
+                </span>
+              </button>
+            ))}
+          </div>
           <form
             className="grid gap-4 xl:grid-cols-4"
             onSubmit={(event) => {
@@ -6684,83 +6758,184 @@ function PayrollManagementPanel() {
 }
 
 export function PayrollPage({ me }: { me: Me }) {
+  const chartPalette = useChartPalette();
   const payroll = useQuery({
     queryKey: ["payroll-me"],
-    queryFn: () => api<{ items: PayrollRecord[] }>("/api/payroll/me"),
+    queryFn: () => api<PayrollOwnResponse>("/api/payroll/me"),
   });
+  const [selectedPayrollId, setSelectedPayrollId] = useState("");
+  const selected =
+    payroll.data?.items.find((record) => record.item.id === selectedPayrollId) ??
+    payroll.data?.items[0] ??
+    null;
+  const money = (currency: string, amount: string) => {
+    try {
+      return new Intl.NumberFormat("zh-CN", {
+        style: "currency",
+        currency,
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+      }).format(Number(amount));
+    } catch {
+      return `${currency} ${Number(amount).toFixed(2)}`;
+    }
+  };
+  const dailyOption = useMemo<EChartsCoreOption>(() => ({
+    animationDuration: 260,
+    grid: { left: 64, right: 22, top: 28, bottom: 58 },
+    tooltip: {
+      trigger: "axis",
+      backgroundColor: chartPalette.surface,
+      borderColor: chartPalette.border,
+      textStyle: { color: chartPalette.text },
+      valueFormatter: (value: string | number) =>
+        selected ? money(selected.item.currency, String(value)) : String(value),
+    },
+    xAxis: {
+      type: "category",
+      data: selected?.dailyBreakdown.map((item) => item.date.slice(5)) ?? [],
+      axisLabel: { hideOverlap: true, color: chartPalette.textSubtle },
+      axisLine: { lineStyle: { color: chartPalette.border } },
+    },
+    yAxis: {
+      type: "value",
+      axisLabel: { color: chartPalette.textSubtle },
+      splitLine: { lineStyle: { color: chartPalette.grid } },
+    },
+    dataZoom: [
+      { type: "inside" },
+      {
+        type: "slider",
+        height: 18,
+        bottom: 12,
+        borderColor: "transparent",
+        fillerColor: hexWithAlpha(chartPalette.accent, 0.14),
+        handleStyle: { color: chartPalette.accent },
+      },
+    ],
+    series: [
+      {
+        type: "bar",
+        name: "每日薪资",
+        data: selected?.dailyBreakdown.map((item) => Number(item.amount)) ?? [],
+        itemStyle: { color: chartPalette.accent, borderRadius: [7, 7, 0, 0] },
+      },
+    ],
+  }), [chartPalette, selected]);
+  const periodOption = useMemo<EChartsCoreOption>(() => ({
+    animationDuration: 260,
+    grid: { left: 64, right: 22, top: 28, bottom: 62 },
+    tooltip: {
+      trigger: "axis",
+      backgroundColor: chartPalette.surface,
+      borderColor: chartPalette.border,
+      textStyle: { color: chartPalette.text },
+    },
+    xAxis: {
+      type: "category",
+      data: [...(payroll.data?.items ?? [])].reverse().map((record) => record.period.name),
+      axisLabel: { hideOverlap: true, rotate: 18, color: chartPalette.textSubtle },
+      axisLine: { lineStyle: { color: chartPalette.border } },
+    },
+    yAxis: {
+      type: "value",
+      axisLabel: { color: chartPalette.textSubtle },
+      splitLine: { lineStyle: { color: chartPalette.grid } },
+    },
+    dataZoom: [{ type: "inside" }],
+    series: [{
+      type: "line",
+      name: "周期薪资",
+      smooth: true,
+      symbolSize: 8,
+      data: [...(payroll.data?.items ?? [])].reverse().map((record) => Number(record.item.finalAmount)),
+      lineStyle: { color: chartPalette.accent, width: 3 },
+      itemStyle: { color: chartPalette.accent },
+      areaStyle: { color: hexWithAlpha(chartPalette.accent, 0.12) },
+    }],
+  }), [chartPalette, payroll.data?.items]);
   return (
     <>
       <PageHeader
         title={hasGrant(me, "payroll.configure") ? "薪资管理与我的薪资" : "我的薪资"}
-        description="薪资方案按生效时间版本化；结算金额来自已保存的规则、工时版本与不可变计算快照。"
       />
       {hasGrant(me, "payroll.configure") ? <PayrollManagementPanel /> : null}
       {payroll.isPending ? (
         <Card>
           <LoadingBlock />
         </Card>
-      ) : payroll.data?.items.length ? (
-        <div className="space-y-4">
-          {payroll.data.items.map((record) => (
-            <Card key={record.item.id}>
-              <CardContent>
-                <div className="grid gap-5 md:grid-cols-[1fr_auto]">
-                  <div>
-                    <div className="flex flex-wrap items-center gap-2">
-                      <h2 className="font-bold">{record.period.name}</h2>
-                      <Badge
-                        tone={
-                          record.run.status === "settled"
-                            ? "positive"
-                            : record.item.needsReview
-                              ? "danger"
-                              : record.item.estimate
-                                ? "warning"
-                                : "info"
-                        }
-                      >
-                        {record.run.status}
-                      </Badge>
-                    </div>
-                    <p className="mt-2 text-sm text-[var(--text-muted)]">
-                      批次 #{record.run.runNumber} ·{" "}
-                      {record.run.calculationVersion} · 已批{" "}
-                      {formatDuration(record.item.approvedSeconds)}
-                      {record.item.pendingSeconds > 0
-                        ? ` · 待审 ${formatDuration(record.item.pendingSeconds)}`
-                        : ""}
-                    </p>
-                    <div className="mt-4 grid grid-cols-3 gap-3 text-sm">
-                      <StatusLine
-                        label="应计"
-                        value={`${record.item.currency} ${Number(record.item.grossAmount).toFixed(2)}`}
-                      />
-                      <StatusLine
-                        label="调整"
-                        value={`${record.item.currency} ${Number(record.item.adjustmentAmount).toFixed(2)}`}
-                      />
-                      <StatusLine
-                        label="最终"
-                        value={`${record.item.currency} ${Number(record.item.finalAmount).toFixed(2)}`}
-                      />
-                    </div>
-                  </div>
-                  <div className="flex items-center text-3xl font-bold tabular-nums">
-                    ¥
-                    {Number(record.item.finalAmount).toLocaleString("zh-CN", {
-                      minimumFractionDigits: 2,
-                      maximumFractionDigits: 2,
-                    })}
-                  </div>
-                </div>
-              </CardContent>
+      ) : payroll.data?.items.length && selected ? (
+        <div className="space-y-5">
+          <section className="grid gap-3 md:grid-cols-3" aria-label="薪资总览">
+            {(payroll.data.summary.length ? payroll.data.summary : [{
+              currency: selected.item.currency,
+              settledAmount: "0",
+              pendingAmount: selected.item.finalAmount,
+              totalAmount: selected.item.finalAmount,
+            }]).map((summary) => (
+              <div className="contents" key={summary.currency}>
+                <Card><CardContent><StatusLine label="当前应结" value={money(summary.currency, summary.pendingAmount)} /></CardContent></Card>
+                <Card><CardContent><StatusLine label="已结累计" value={money(summary.currency, summary.settledAmount)} /></CardContent></Card>
+                <Card><CardContent><StatusLine label="累计薪资" value={money(summary.currency, summary.totalAmount)} /></CardContent></Card>
+              </div>
+            ))}
+          </section>
+
+          <div className="flex flex-wrap items-end justify-between gap-3">
+            <Field label="查看薪资周期">
+              <select className={`${fieldClass} min-w-64`} onChange={(event) => setSelectedPayrollId(event.target.value)} value={selected.item.id}>
+                {payroll.data.items.map((record) => (
+                  <option key={record.item.id} value={record.item.id}>
+                    {record.period.name} · {money(record.item.currency, record.item.finalAmount)}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <div className="flex items-center gap-2">
+              <Badge tone={selected.run.status === "settled" ? "positive" : selected.item.needsReview ? "danger" : selected.item.estimate ? "warning" : "info"}>
+                {selected.run.status === "settled" ? "已结算" : selected.item.estimate ? "预估" : "待结算"}
+              </Badge>
+              <span className="text-sm text-[var(--text-muted)]">已批 {formatDuration(selected.item.approvedSeconds)}{selected.item.pendingSeconds ? ` · 待审 ${formatDuration(selected.item.pendingSeconds)}` : ""}</span>
+            </div>
+          </div>
+
+          <section className="grid gap-5 xl:grid-cols-2" aria-label="薪资趋势图表">
+            <Card className="analytics-chart-card">
+              <CardHeader><h2 className="font-bold">每日薪资</h2><Badge>{selected.period.name}</Badge></CardHeader>
+              <CardContent><AnalyticsChart ariaLabel={`${selected.period.name}每日薪资`} option={dailyOption} /></CardContent>
             </Card>
-          ))}
+            <Card className="analytics-chart-card">
+              <CardHeader><h2 className="font-bold">周期趋势</h2><Badge>{payroll.data.items.length} 期</Badge></CardHeader>
+              <CardContent><AnalyticsChart ariaLabel="周期薪资趋势" option={periodOption} /></CardContent>
+            </Card>
+          </section>
+
+          <Card>
+            <CardHeader>
+              <div><p className="app-page-kicker">{selected.period.name}</p><h2 className="mt-1 text-lg font-bold">计薪明细</h2></div>
+              <strong className="text-2xl tabular-nums">{money(selected.item.currency, selected.item.finalAmount)}</strong>
+            </CardHeader>
+            <CardContent>
+              <div className="grid gap-3 sm:grid-cols-3">
+                <StatusLine label="应计" value={money(selected.item.currency, selected.item.grossAmount)} />
+                <StatusLine label="调整" value={money(selected.item.currency, selected.item.adjustmentAmount)} />
+                <StatusLine label="最终" value={money(selected.item.currency, selected.item.finalAmount)} />
+              </div>
+              <div className="mt-5 divide-y divide-[var(--border)]">
+                {selected.components.map((component) => (
+                  <div className="flex items-center justify-between gap-4 py-3 text-sm" key={component.id}>
+                    <div><p className="font-semibold">{component.label}</p><p className="text-xs text-[var(--text-muted)]">{component.quantity ? `${Number(component.quantity).toLocaleString("zh-CN")} ${component.unit ?? ""}` : component.type}{component.multiplier ? ` · ${Number(component.multiplier)}×` : ""}</p></div>
+                    <strong className="tabular-nums">{money(selected.item.currency, component.amount)}</strong>
+                  </div>
+                ))}
+              </div>
+            </CardContent>
+          </Card>
         </div>
       ) : (
         <Card>
           <EmptyState
-            description="管理员完成薪资计算后，本人的真实结算或预估结果会显示在这里。"
+            description="管理员计算薪资后会在这里显示。"
             icon={<CircleDollarSign />}
             title="暂无薪资批次"
           />
@@ -7846,14 +8021,6 @@ export function AnalyticsPage({ me }: { me: Me }) {
   const canExport = me.permissions.some(
     (grant) => grant.permission === "export.scope",
   );
-  const leadProject = analytics.data?.byProject.reduce<{
-    projectName: string;
-    seconds: number;
-  } | null>(
-    (current, item) =>
-      !current || item.seconds > current.seconds ? item : current,
-    null,
-  );
   const maxProjectSeconds = Math.max(
     ...(analytics.data?.byProject.map((item) => item.seconds) ?? [1]),
     1,
@@ -7889,42 +8056,24 @@ export function AnalyticsPage({ me }: { me: Me }) {
       ) : analytics.data ? (
         <>
           {canExport ? <BackgroundExportPanel from={from} to={to} /> : null}
-          <Card className="mt-5 analytics-summary-strip">
-            <div className="analytics-summary-icon">
-              <CalendarDays size={21} />
-            </div>
-            <div>
-              <p className="app-section-label text-[var(--accent-strong)]">
-                授权范围内的真实聚合
-              </p>
-              <h2 className="mt-2 text-lg font-extrabold tracking-[-0.03em]">
-                最近 {days} 天的工作事实
-              </h2>
-              <p className="mt-1 text-sm leading-6 text-[var(--text-muted)]">
-                {leadProject
-                  ? `当前范围的最大单项目投入为 ${formatDuration(leadProject.seconds)}，完整项目名称与时长请见下方明细。`
-                  : "当前范围尚无可归属项目的投入数据。"}
-              </p>
-            </div>
-          </Card>
           <div className="mt-5 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
             <Metric
-              hint="服务端已裁剪的有效会话"
+              hint={`最近 ${days} 天`}
               label="记录数"
               value={`${analytics.data.totals.sessionCount} 条`}
             />
             <Metric
-              hint="当前时间范围的净时长"
+              hint="净时长"
               label="总工时"
               value={formatDuration(analytics.data.totals.totalSeconds)}
             />
             <Metric
-              hint="已进入批准状态的时长"
+              hint="已确认"
               label="已批准"
               value={formatDuration(analytics.data.totals.approvedSeconds)}
             />
             <Metric
-              hint="仍待审核的时长"
+              hint="待处理"
               label="待审核"
               value={formatDuration(analytics.data.totals.pendingSeconds)}
             />
@@ -7937,9 +8086,6 @@ export function AnalyticsPage({ me }: { me: Me }) {
                   <h2 className="mt-2 font-extrabold tracking-[-0.025em]">
                     每日净工时趋势
                   </h2>
-                  <p className="mt-1 text-sm text-[var(--text-muted)]">
-                    拖拽底部范围条缩放；Tooltip 显示精确时长。
-                  </p>
                 </div>
               </CardHeader>
               <CardContent>
@@ -7964,9 +8110,6 @@ export function AnalyticsPage({ me }: { me: Me }) {
                   <h2 className="mt-2 font-extrabold tracking-[-0.025em]">
                     项目投入分布
                   </h2>
-                  <p className="mt-1 text-sm text-[var(--text-muted)]">
-                    仅汇总当前授权范围内的项目。
-                  </p>
                 </div>
               </CardHeader>
               <CardContent>
@@ -8097,7 +8240,13 @@ interface AiReportRecord {
     status: string;
     errorSummary: string | null;
     queuedAt: string;
-    scope: unknown;
+    scope: {
+      scope?: "self" | "team";
+      question?: string;
+      conversationId?: string;
+      from?: string;
+      to?: string;
+    };
   };
   report: {
     id: string;
@@ -8120,7 +8269,8 @@ type AiTaskType =
   | "work_rhythm"
   | "project_progress"
   | "project_blockers"
-  | "organization_summary";
+  | "organization_summary"
+  | "assistant_chat";
 
 const aiTaskPresets: Array<{
   type: AiTaskType;
@@ -8467,6 +8617,7 @@ export function AiPage({ me }: { me: Me }) {
   });
   const [scope, setScope] = useState<"self" | "team">("self");
   const [taskType, setTaskType] = useState<AiTaskType>("weekly_summary");
+  const [question, setQuestion] = useState("");
   const [activeReportId, setActiveReportId] = useState<string | null>(() => searchParams.get("report"));
   const [settingsOpen, setSettingsOpen] = useState(false);
   // Keep one five-minute-aligned seven-day range for the lifetime of this
@@ -8493,6 +8644,27 @@ export function AiPage({ me }: { me: Me }) {
       await queryClient.invalidateQueries({ queryKey: ["ai-reports"] });
     },
   });
+  const sendChat = useMutation({
+    mutationFn: () => {
+      const to = new Date();
+      to.setSeconds(0, 0);
+      return api("/api/ai/reports", {
+        method: "POST",
+        body: {
+          taskType: "assistant_chat",
+          scope,
+          question: question.trim(),
+          conversationId: "primary",
+          from: new Date(to.getTime() - 31 * 86_400_000).toISOString(),
+          to: to.toISOString(),
+        },
+      });
+    },
+    onSuccess: async () => {
+      setQuestion("");
+      await queryClient.invalidateQueries({ queryKey: ["ai-reports"] });
+    },
+  });
   const cancel = useMutation({
     mutationFn: (jobId: string) =>
       api(`/api/ai/jobs/${jobId}/cancel`, { method: "POST" }),
@@ -8508,7 +8680,15 @@ export function AiPage({ me }: { me: Me }) {
       grant.permission === "ai.team_analysis" &&
       grant.scopeKind === "organization",
   );
-  const reportItems = reports.data?.items ?? [];
+  const allItems = reports.data?.items ?? [];
+  const reportItems = allItems.filter((item) => item.job.taskType !== "assistant_chat");
+  const chatItems = allItems
+    .filter(
+      (item) =>
+        item.job.taskType === "assistant_chat" &&
+        (item.job.scope.conversationId ?? "primary") === "primary",
+    )
+    .reverse();
   const selected =
     reportItems.find((item) => item.job.id === activeReportId || item.report?.id === activeReportId) ??
     reportItems[0] ??
@@ -8582,12 +8762,73 @@ export function AiPage({ me }: { me: Me }) {
             </Card>
           </aside>
           <section className="min-w-0">
-            <Card className="ai-compose-card">
+            <Card className="ai-chat-card">
+              <CardHeader>
+                <div>
+                  <p className="app-page-kicker">基于当前授权事实</p>
+                  <h2 className="mt-1 text-xl font-extrabold tracking-[-0.04em]">和 AI 对话</h2>
+                </div>
+                <Badge tone="info">{scope === "team" ? "团队" : "本人"}</Badge>
+              </CardHeader>
+              <CardContent>
+                {chatItems.length ? (
+                  <div className="max-h-[32rem] space-y-4 overflow-y-auto pr-1" aria-live="polite">
+                    {chatItems.map((item) => (
+                      <div className="space-y-2" key={item.job.id}>
+                        <div className="ml-auto max-w-[88%] rounded-2xl rounded-br-md bg-[var(--accent)] px-4 py-3 text-sm leading-6 text-[var(--accent-foreground)]">
+                          {item.job.scope.question || "工作分析"}
+                        </div>
+                        <div className="max-w-[92%] rounded-2xl rounded-bl-md bg-[var(--surface-subtle)] px-4 py-3 text-sm leading-7">
+                          {item.report?.summary ??
+                            (item.job.status === "failed"
+                              ? item.job.errorSummary || "本次回答生成失败，可以重试。"
+                              : item.job.status === "cancelled"
+                                ? "本次对话已取消。"
+                                : "正在结合最新工时、成员和项目状态生成回答…")}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="py-6 text-center text-sm text-[var(--text-muted)]">
+                    可以询问工作进展、项目阻塞、成员状态或下一步安排。
+                  </div>
+                )}
+                <form
+                  className="mt-4 flex flex-col gap-3"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    if (question.trim().length >= 2) sendChat.mutate();
+                  }}
+                >
+                  <textarea
+                    aria-label="向 AI 提问"
+                    className={`${textAreaClass} min-h-28 resize-y`}
+                    maxLength={2_000}
+                    onChange={(event) => setQuestion(event.target.value)}
+                    placeholder={scope === "team" ? "例如：哪些项目当前受阻，分别需要谁处理？" : "例如：总结我本周的投入、成果和待处理事项。"}
+                    value={question}
+                  />
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div className="flex flex-wrap gap-2">
+                      {["总结我今天的工作", "梳理当前项目阻塞", "给出下一步优先级"].map((prompt) => (
+                        <button className="rounded-lg bg-[var(--surface-subtle)] px-3 py-2 text-xs font-semibold hover:bg-[var(--accent-soft)]" key={prompt} onClick={() => setQuestion(prompt)} type="button">{prompt}</button>
+                      ))}
+                    </div>
+                    <Button disabled={question.trim().length < 2 || sendChat.isPending} type="submit">
+                      <ArrowUpRight size={16} />
+                      {sendChat.isPending ? "正在发送…" : "发送"}
+                    </Button>
+                  </div>
+                </form>
+              </CardContent>
+            </Card>
+            <Card className="ai-compose-card mt-5">
               <CardContent>
                 <div className="flex flex-col gap-5 sm:flex-row sm:items-start sm:justify-between">
                   <div>
                     <h2 className="text-xl font-extrabold tracking-[-0.04em]">
-                      生成工作总结
+                      快捷分析报告
                     </h2>
                   </div>
                   <div className="min-w-[10rem]">
@@ -8797,7 +9038,7 @@ export function AiPage({ me }: { me: Me }) {
         </div>
       )}
       <div className="mt-4">
-        <ErrorMessage error={reports.error ?? create.error ?? cancel.error ?? retry.error} />
+        <ErrorMessage error={reports.error ?? create.error ?? sendChat.error ?? cancel.error ?? retry.error} />
       </div>
     </>
   );

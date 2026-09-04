@@ -472,6 +472,14 @@ export function AppShell({
     localStorage.setItem("workbench-sidebar-width", String(sidebarWidth));
   }, [sidebarWidth]);
   useEffect(() => {
+    if (!sidebarOpen) return undefined;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [sidebarOpen]);
+  useEffect(() => {
     const root = document.documentElement;
     // The exact stored value is the exact visible accent. Contrast-sensitive
     // foreground and derivative tokens are calculated separately, so a picker
@@ -564,7 +572,7 @@ export function AppShell({
       <aside
         aria-label="主导航"
         className={cn(
-          "app-sidebar fixed inset-y-0 left-0 z-40 flex w-[var(--sidebar-width)] flex-col border-r border-[var(--border)] backdrop-blur-xl transition-[transform,width] duration-300 lg:translate-x-0",
+          "app-sidebar fixed inset-y-0 left-0 z-40 flex w-[var(--sidebar-width)] max-w-[88vw] flex-col border-r border-[var(--border)] backdrop-blur-xl transition-[transform,width] duration-300 lg:max-w-none lg:translate-x-0",
           sidebarCollapsed && "lg:w-[76px]",
           sidebarOpen ? "translate-x-0" : "-translate-x-full",
         )}
@@ -581,6 +589,15 @@ export function AppShell({
               以事实，推进工作
             </p>
           </div>
+          <Button
+            aria-label="关闭导航"
+            className="ml-auto lg:hidden"
+            onClick={() => setSidebarOpen(false)}
+            size="icon"
+            variant="ghost"
+          >
+            <X size={20} />
+          </Button>
         </div>
         <div className="px-4 pb-4">
           <button

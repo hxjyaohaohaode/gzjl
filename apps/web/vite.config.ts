@@ -63,19 +63,11 @@ export default defineConfig({
               test: /[\\/]node_modules[\\/]@xyflow[\\/]/,
               priority: 30,
             },
-            {
-              // ECharts is already lazy at the route level. Split its internal
-              // modules too so an analytics visit never requires one oversized
-              // cache asset on a cold or mobile connection.
-              name: "analytics-engine",
-              test: /[\\/]node_modules[\\/]echarts[\\/]/,
-              priority: 30,
-              // The limit is based on Rolldown's module-size heuristic rather
-              // than the final gzip size. 768 KiB yields a small handful of
-              // cacheable analytics chunks, instead of either one 500+ KiB
-              // payload or dozens of tiny HTTP requests.
-              maxSize: 768 * 1024,
-            },
+            // ECharts intentionally has no manual group here. The analytics
+            // renderer is already loaded through React.lazy; splitting the
+            // engine's mutually-dependent class modules by an arbitrary size
+            // boundary can execute a subclass before its base class exists.
+            // Let Rolldown preserve the dependency graph of that lazy subtree.
           ],
         },
       },
