@@ -215,11 +215,48 @@ export const pushSubscriptions = pgTable(
     p256dhCiphertext: text("p256dh_ciphertext").notNull(),
     authCiphertext: text("auth_ciphertext").notNull(),
     userAgent: text("user_agent"),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
     lastSuccessAt: timestamp("last_success_at", { withTimezone: true }),
     disabledAt: timestamp("disabled_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [uniqueIndex("push_subscriptions_endpoint_uidx").on(table.endpointHash)],
+);
+
+export const notificationDeliveries = pgTable(
+  "notification_deliveries",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    notificationId: uuid("notification_id")
+      .notNull()
+      .references(() => notifications.id, { onDelete: "cascade" }),
+    pushSubscriptionId: uuid("push_subscription_id")
+      .notNull()
+      .references(() => pushSubscriptions.id, { onDelete: "cascade" }),
+    channel: notificationChannelEnum("channel").notNull(),
+    status: jobStatusEnum("status").notNull().default("queued"),
+    attempts: integer("attempts").notNull().default(0),
+    nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    lastAttemptAt: timestamp("last_attempt_at", { withTimezone: true }),
+    deliveredAt: timestamp("delivered_at", { withTimezone: true }),
+    errorSummary: text("error_summary"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("notification_deliveries_notification_subscription_uidx").on(
+      table.notificationId,
+      table.pushSubscriptionId,
+      table.channel,
+    ),
+    index("notification_deliveries_dispatch_idx").on(
+      table.channel,
+      table.status,
+      table.nextAttemptAt,
+    ),
+  ],
 );
 
 export const auditLogs = pgTable(

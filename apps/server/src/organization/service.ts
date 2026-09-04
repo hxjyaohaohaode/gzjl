@@ -218,6 +218,17 @@ export class OrganizationService {
       .leftJoin(orgUnits, eq(orgUnits.id, orgMemberships.orgUnitId))
       .where(eq(orgMemberships.organizationId, actor.organizationId))
       .orderBy(asc(users.displayName));
+    const sessionRows = await this.db
+      .select({
+        membershipId: orgMemberships.id,
+        lastSeenAt: sessions.lastSeenAt,
+        expiresAt: sessions.expiresAt,
+        revokedAt: sessions.revokedAt,
+      })
+      .from(orgMemberships)
+      .innerJoin(sessions, eq(sessions.userId, orgMemberships.userId))
+      .where(eq(orgMemberships.organizationId, actor.organizationId))
+      .orderBy(desc(sessions.lastSeenAt));
     const roles = await this.db
       .select()
       .from(accessRoles)
@@ -306,6 +317,32 @@ export class OrganizationService {
         grant,
       ]),
     );
+    const activityByMembership = new Map<
+      string,
+      {
+        lastSeenAt: Date;
+        activeSessionCount: number;
+        onlineNow: boolean;
+      }
+    >();
+    const now = new Date();
+    const onlineCutoff = new Date(now.getTime() - 5 * 60_000);
+    for (const session of sessionRows) {
+      const current = activityByMembership.get(session.membershipId);
+      const sessionIsActive = !session.revokedAt && session.expiresAt > now;
+      const lastSeenAt =
+        !current || session.lastSeenAt > current.lastSeenAt
+          ? session.lastSeenAt
+          : current.lastSeenAt;
+      activityByMembership.set(session.membershipId, {
+        lastSeenAt,
+        activeSessionCount:
+          (current?.activeSessionCount ?? 0) + (sessionIsActive ? 1 : 0),
+        onlineNow:
+          (current?.onlineNow ?? false) ||
+          (sessionIsActive && session.lastSeenAt >= onlineCutoff),
+      });
+    }
 
     return {
       organization,
@@ -317,6 +354,11 @@ export class OrganizationService {
       members: memberRows.map((member) => ({
         ...member,
         isOwner: owner?.membershipId === member.membership.id,
+        activity: activityByMembership.get(member.membership.id) ?? {
+          lastSeenAt: null,
+          activeSessionCount: 0,
+          onlineNow: false,
+        },
         accessRoles: rolesByMembership.get(member.membership.id) ?? [],
         professionalIdentities:
           identitiesByMembership.get(member.membership.id) ?? [],
@@ -1630,8 +1672,20 @@ export class OrganizationService {
       requestedCredentials,
     );
     const [existing] = await this.db
-      .select({ id: userCredentials.id })
+      .select({
+        id: userCredentials.id,
+        membershipId: orgMemberships.id,
+        membershipStatus: orgMemberships.status,
+      })
       .from(userCredentials)
+      .leftJoin(users, eq(users.id, userCredentials.userId))
+      .leftJoin(
+        orgMemberships,
+        and(
+          eq(orgMemberships.userId, userCredentials.userId),
+          eq(orgMemberships.organizationId, actor.organizationId),
+        ),
+      )
       .where(
         or(
           ...requestedCredentials.map((credential) =>
@@ -1643,6 +1697,14 @@ export class OrganizationService {
         ),
       )
       .limit(1);
+    if (existing?.membershipStatus === "invited")
+      throw new OrganizationConflictError(
+        "该联系方式已有待加入成员。请在成员列表打开该成员，生成新链接或撤销旧邀请。",
+      );
+    if (existing?.membershipStatus === "inactive")
+      throw new OrganizationConflictError(
+        "该联系方式属于已移除成员。请在成员列表打开原成员并选择“恢复成员”，无需重复邀请。",
+      );
     if (existing)
       throw new OrganizationConflictError(
         "该邮箱或手机号已经绑定账号，不能重复加入白名单。",
@@ -1985,6 +2047,111 @@ export class OrganizationService {
         expiresAt: result.expiresAt,
         credentialKinds: result.credentials.map((credential) => credential.kind),
       },
+    };
+  }
+
+  /**
+   * Withdraw a never-accepted invitation and release its whitelisted contact
+   * identifiers for a clean re-invite. Accepted members are deliberately not
+   * hard-deleted: their work, payroll, project, and audit facts must survive a
+   * later removal and can instead be deactivated through setMemberStatus().
+   */
+  async cancelPendingInvitation(
+    actor: OrganizationActor,
+    membershipId: string,
+  ): Promise<void> {
+    if (membershipId === actor.membershipId)
+      throw new OrganizationConflictError("不能撤销当前登录成员。");
+    await this.db.transaction(async (tx) => {
+      const [record] = await tx
+        .select({ membership: orgMemberships, user: users })
+        .from(orgMemberships)
+        .innerJoin(users, eq(users.id, orgMemberships.userId))
+        .where(
+          and(
+            eq(orgMemberships.id, membershipId),
+            eq(orgMemberships.organizationId, actor.organizationId),
+          ),
+        )
+        .for("update")
+        .limit(1);
+      if (!record)
+        throw new OrganizationConflictError("成员不存在或不属于当前组织。");
+      if (record.membership.status !== "invited")
+        throw new OrganizationConflictError(
+          "只有尚未接受的邀请可以彻底撤销；已激活成员请使用“移除成员”以保留历史事实。",
+        );
+      const [owner] = await tx
+        .select({ membershipId: organizationOwners.membershipId })
+        .from(organizationOwners)
+        .where(eq(organizationOwners.membershipId, membershipId))
+        .limit(1);
+      if (owner)
+        throw new OrganizationConflictError("唯一 Owner 不能被撤销。");
+
+      await tx.insert(auditLogs).values({
+        organizationId: actor.organizationId,
+        actorMembershipId: actor.membershipId,
+        action: "member.invitation_cancelled",
+        entityType: "org_membership",
+        entityId: membershipId,
+        before: {
+          status: record.membership.status,
+          userIdHash: hashOpaqueToken(record.user.id),
+        },
+        after: { removed: true, identifiersReleased: true },
+      });
+      const [removed] = await tx
+        .delete(orgMemberships)
+        .where(
+          and(
+            eq(orgMemberships.id, membershipId),
+            eq(orgMemberships.status, "invited"),
+          ),
+        )
+        .returning({ id: orgMemberships.id });
+      if (!removed)
+        throw new OrganizationConflictError(
+          "邀请状态刚刚发生变化，请刷新后重试。",
+        );
+      await tx.delete(users).where(eq(users.id, record.user.id));
+    });
+  }
+
+  async inspectInvitation(token: string) {
+    const now = new Date();
+    const [record] = await this.db
+      .select({
+        expiresAt: verificationTokens.expiresAt,
+        consumedAt: verificationTokens.consumedAt,
+        membershipStatus: orgMemberships.status,
+        displayName: users.displayName,
+      })
+      .from(verificationTokens)
+      .innerJoin(
+        userCredentials,
+        eq(userCredentials.id, verificationTokens.credentialId),
+      )
+      .innerJoin(users, eq(users.id, userCredentials.userId))
+      .innerJoin(orgMemberships, eq(orgMemberships.userId, users.id))
+      .where(
+        and(
+          eq(verificationTokens.tokenHash, hashOpaqueToken(token)),
+          eq(verificationTokens.purpose, "invitation"),
+        ),
+      )
+      .limit(1);
+    const valid = Boolean(
+      record &&
+        !record.consumedAt &&
+        record.membershipStatus === "invited" &&
+        record.expiresAt > now,
+    );
+    return {
+      valid,
+      serverTime: now,
+      expiresAt: valid ? record!.expiresAt : null,
+      displayName: valid ? record!.displayName : null,
     };
   }
 

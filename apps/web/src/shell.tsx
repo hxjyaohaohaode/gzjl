@@ -34,6 +34,7 @@ import { api, hasGrant, resetCsrfToken, type Me } from "./api.js";
 import type { RealtimeSyncStatus } from "./realtime.js";
 import { AccentPicker } from "./accent-picker.js";
 import { readableForeground, sanitizeAccent } from "./color.js";
+import { detachCurrentBrowserPushBeforeLogout } from "./push-client.js";
 
 interface NavigationItem {
   label: string;
@@ -422,7 +423,10 @@ export function AppShell({
     .map((path) => visibleNavigation.find((item) => item.to === path))
     .filter((item): item is NavigationItem => Boolean(item));
   const logout = useMutation({
-    mutationFn: () => api<void>("/api/auth/logout", { method: "POST" }),
+    mutationFn: async () => {
+      await detachCurrentBrowserPushBeforeLogout();
+      return api<void>("/api/auth/logout", { method: "POST" });
+    },
     onSettled: async () => {
       resetCsrfToken();
       await queryClient.invalidateQueries({ queryKey: ["me"] });

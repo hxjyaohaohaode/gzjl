@@ -33,6 +33,8 @@ pwsh ./scripts/restore.ps1 -DatabaseUrl $env:RESTORE_DATABASE_URL -BackupPath ./
 恢复后运行 `pnpm db:migrate`（只前进，不回滚迁移）、检查 `readyz`、抽样核验 Owner 唯一性/最近工时/工资运行输入哈希，并将 Web 与 Worker 恢复流量。
 # 通知运行边界
 
-提醒 worker 每分钟评估启用的规则。应用内通知会先读取成员同一分类的 `notification_preferences.inAppEnabled`：没有偏好记录时默认发送，显式关闭后不会创建该分类通知。当前已接入该检查的分类包括 `timer_long_running`、`payroll_cutoff_pending`、`ai_report_ready` 与 `ai_report_failed`。通知的 `validUntil` 到期后不会再从 API 返回。
+提醒 worker 每分钟评估启用规则。通知事实与投递通道分离：某分类的站内或浏览器通道至少一个开启时才创建事实；`GET /api/notifications` 再按当前成员的 `inAppEnabled` 与临时静音裁剪，不能通过关闭站内通道阻断已明确开启的浏览器推送。通知的 `validUntil` 到期后既不返回，也不再创建新投递。
 
-`pushEnabled` 与 `emailEnabled` 是独立渠道意图，不会伪装为已经投递：未配置 VAPID 或邮件渠道时，运行时仅保留可用的应用内通道。上线前应为目标渠道完成凭据配置、订阅注册、失败重试和退订验证。
+浏览器推送需要完整的 `VAPID_PUBLIC_KEY`、`VAPID_PRIVATE_KEY`、`VAPID_SUBJECT` 和 `PUSH_SUBSCRIPTION_ENCRYPTION_KEY`。订阅端点、P-256 公钥与 auth secret 在数据库中使用不同 AAD 域的 AES-256-GCM 密文；API 永不回传这些字段。`notification_deliveries` 为每个通知/浏览器建立唯一记录，Worker 用 compare-and-set 抢占，网络或 429/5xx 采用最多 5 次的有界指数退避；Push 服务返回 404/410 时立即停用端点，30 天后删除失效订阅及关联投递。免打扰只延后 Push，按成员保存的 IANA 时区判断并支持跨午夜。
+
+换浏览器或设备必须分别授权。退出账号时前端先尽力停用并取消当前浏览器订阅；同一浏览器随后登录另一个账号时，服务端以 endpoint hash 幂等转移绑定，不会创建重复端点。浏览器自动轮换订阅时，Service Worker 使用现有 application server key 重新订阅，并在仍有登录会话时安全回写。`emailEnabled` 目前固定为 false，不能伪装成已实现的通知邮件通道。

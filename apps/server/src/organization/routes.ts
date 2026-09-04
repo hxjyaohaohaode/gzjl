@@ -193,6 +193,7 @@ const acceptSchema = z.object({
     .regex(/[0-9]/)
     .regex(/[^A-Za-z0-9]/),
 });
+const inspectInvitationSchema = acceptSchema.pick({ token: true });
 
 function sendConflict(
   error: unknown,
@@ -481,6 +482,19 @@ export async function registerOrganizationRoutes(
       }
     },
   );
+  app.delete(
+    "/api/organization/invitations/:membershipId",
+    { preHandler: [app.csrfProtection, authenticate, manageMembers] },
+    async (request, reply) => {
+      const { membershipId } = membershipParams.parse(request.params);
+      try {
+        await service.cancelPendingInvitation(request.auth!, membershipId);
+        return reply.code(204).send();
+      } catch (error) {
+        return sendConflict(error, reply);
+      }
+    },
+  );
   app.post(
     "/api/organization/members/:membershipId/password-reset-link",
     {
@@ -584,6 +598,17 @@ export async function registerOrganizationRoutes(
       } catch (error) {
         return sendConflict(error, reply);
       }
+    },
+  );
+  app.post(
+    "/api/auth/invitations/inspect",
+    {
+      preHandler: app.csrfProtection,
+      config: { rateLimit: { max: 30, timeWindow: "15 minutes", ban: 3 } },
+    },
+    async (request) => {
+      const { token } = inspectInvitationSchema.parse(request.body);
+      return service.inspectInvitation(token);
     },
   );
   app.post(

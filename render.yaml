@@ -42,6 +42,10 @@ services:
       # Render's private service reference, so no human has to copy a secret.
       - key: AI_CONFIG_ENCRYPTION_KEY
         generateValue: true
+      # Push endpoint/auth material is encrypted before it enters PostgreSQL.
+      # Worker receives this same generated value through a private reference.
+      - key: PUSH_SUBSCRIPTION_ENCRYPTION_KEY
+        generateValue: true
       - key: AI_REQUEST_TIMEOUT_MS
         value: "60000"
       - key: AI_MAX_RETRIES
@@ -105,6 +109,11 @@ services:
         value: "false"
       - key: SMS_PROVIDER
         value: disabled
+      # The API only exposes the public application-server key to authenticated
+      # browsers. Existing Blueprints ignore newly added sync:false entries, so
+      # an omitted key safely keeps Push disabled until it is added manually.
+      - key: VAPID_PUBLIC_KEY
+        sync: false
       - key: ZHIPU_API_BASE_URL
         value: https://open.bigmodel.cn/api/paas/v4
       - key: ZHIPU_MODEL
@@ -144,6 +153,17 @@ services:
           name: gzjl-hxjyaohaohaode-web
           type: web
           envVarKey: AI_CONFIG_ENCRYPTION_KEY
+      - key: PUSH_SUBSCRIPTION_ENCRYPTION_KEY
+        fromService:
+          name: gzjl-hxjyaohaohaode-web
+          type: web
+          envVarKey: PUSH_SUBSCRIPTION_ENCRYPTION_KEY
+      - key: VAPID_PUBLIC_KEY
+        sync: false
+      - key: VAPID_PRIVATE_KEY
+        sync: false
+      - key: VAPID_SUBJECT
+        sync: false
       - key: AI_REQUEST_TIMEOUT_MS
         value: "60000"
       - key: AI_MAX_RETRIES

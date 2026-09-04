@@ -15,6 +15,7 @@ import {
   Save,
   ShieldCheck,
   Sparkles,
+  Trash2,
   UserCog,
   UserRound,
   UsersRound,
@@ -87,11 +88,19 @@ interface OrganizationMember {
     status: string;
     positionTitle: string | null;
     orgUnitId: string | null;
+    joinedAt?: string | null;
+    leftAt?: string | null;
+    createdAt?: string;
   };
   user: { displayName: string };
   positionTitle: string | null;
   unitName: string | null;
   isOwner: boolean;
+  activity?: {
+    lastSeenAt: string | null;
+    activeSessionCount: number;
+    onlineNow: boolean;
+  };
   accessRoles: RoleGrant[];
   professionalIdentities: IdentityGrant[];
 }
@@ -174,6 +183,18 @@ function memberStatusLabel(status: string): string {
       : status === "inactive"
         ? "已停用"
         : status;
+}
+
+function memberActivityLabel(member: OrganizationMember): string {
+  if (member.membership.status === "invited") return "尚未接受邀请";
+  if (member.activity?.onlineNow)
+    return `当前在线 · ${member.activity.activeSessionCount} 个活跃端`;
+  if (member.activity?.lastSeenAt)
+    return `最近活动 ${new Date(member.activity.lastSeenAt).toLocaleString("zh-CN")}`;
+  if (member.membership.status === "active") return "已激活，尚未登录";
+  return member.membership.leftAt
+    ? `移除于 ${new Date(member.membership.leftAt).toLocaleString("zh-CN")}`
+    : "已移除";
 }
 
 function scopeLabel(
@@ -546,6 +567,16 @@ function MemberInspector({
           ? { link: result.manualLink, expiresAt: result.delivery.expiresAt }
           : null,
       );
+      await refresh();
+    },
+  });
+  const cancelInvitation = useMutation({
+    mutationFn: () =>
+      api(`/api/organization/invitations/${member.membership.id}`, {
+        method: "DELETE",
+      }),
+    onSuccess: async () => {
+      onClose();
       await refresh();
     },
   });
@@ -1145,36 +1176,81 @@ function MemberInspector({
         ) : null}
         <section className="organization-inspector-section">
           <CategoryLabel icon={<UserCog size={14} />}>成员状态</CategoryLabel>
+          <p className="organization-inspector-description">
+            {memberActivityLabel(member)}
+            {member.membership.joinedAt
+              ? ` · 接受邀请于 ${new Date(member.membership.joinedAt).toLocaleString("zh-CN")}`
+              : ""}
+          </p>
           <div className="flex items-center justify-between gap-3">
             <Badge tone={memberStatusTone(member.membership.status)}>
               {memberStatusLabel(member.membership.status)}
             </Badge>
             {member.membership.status === "invited" ? (
-              <Button
-                aria-label={`为 ${member.user.displayName} 生成新的白名单邀请链接`}
-                disabled={resendInvitation.isPending}
-                onClick={() => resendInvitation.mutate()}
-                size="compact"
-                variant="secondary"
-              >
-                <Link2 size={14} />
-                {resendInvitation.isPending ? "正在生成…" : "生成新链接"}
-              </Button>
+              <div className="flex flex-wrap justify-end gap-2">
+                <Button
+                  aria-label={`为 ${member.user.displayName} 作废旧链接并生成新的白名单邀请链接`}
+                  disabled={
+                    resendInvitation.isPending || cancelInvitation.isPending
+                  }
+                  onClick={() => {
+                    if (
+                      window.confirm(
+                        "生成后，之前复制的所有邀请链接会立即失效。确定继续吗？",
+                      )
+                    )
+                      resendInvitation.mutate();
+                  }}
+                  size="compact"
+                  variant="secondary"
+                >
+                  <Link2 size={14} />
+                  {resendInvitation.isPending
+                    ? "正在生成…"
+                    : "作废旧链接并生成新链接"}
+                </Button>
+                <Button
+                  aria-label={`撤销 ${member.user.displayName} 的邀请并释放白名单联系方式`}
+                  disabled={
+                    resendInvitation.isPending || cancelInvitation.isPending
+                  }
+                  onClick={() => {
+                    if (
+                      window.confirm(
+                        "确定撤销这个尚未接受的邀请吗？该成员占用的邮箱和手机号会被释放，之后可以重新添加。",
+                      )
+                    )
+                      cancelInvitation.mutate();
+                  }}
+                  size="compact"
+                  variant="ghost"
+                >
+                  <Trash2 size={14} />
+                  {cancelInvitation.isPending ? "正在撤销…" : "撤销邀请"}
+                </Button>
+              </div>
             ) : member.membership.status !== "invited" && !member.isOwner ? (
               <Button
                 disabled={statusMutation.isPending}
-                onClick={() =>
-                  statusMutation.mutate(
+                onClick={() => {
+                  const nextStatus =
                     member.membership.status === "active"
                       ? "inactive"
-                      : "active",
+                      : "active";
+                  if (
+                    nextStatus === "inactive" &&
+                    !window.confirm(
+                      "确定移除这位成员吗？系统会立即撤销其所有登录会话，但保留工时、项目、审批、薪资和审计历史；之后可以恢复。",
+                    )
                   )
-                }
+                    return;
+                  statusMutation.mutate(nextStatus);
+                }}
                 size="compact"
                 variant="secondary"
               >
                 {member.membership.status === "active"
-                  ? "停用成员"
+                  ? "移除成员（保留记录）"
                   : "恢复成员"}
               </Button>
             ) : null}
@@ -1256,6 +1332,7 @@ function MemberInspector({
             rolesMutation.error ??
             statusMutation.error ??
             resendInvitation.error ??
+            cancelInvitation.error ??
             issueManualPasswordReset.error ??
             requestOwnershipTransfer.error ??
             confirmOwnershipTransfer.error ??
@@ -2282,9 +2359,12 @@ export function OrganizationPage({ me }: { me: Me }) {
                         projects={projects.data?.items ?? []}
                         units={overview.units}
                       />
-                      <Badge tone={memberStatusTone(member.membership.status)}>
-                        {memberStatusLabel(member.membership.status)}
-                      </Badge>
+                      <span className="organization-member-presence">
+                        <Badge tone={memberStatusTone(member.membership.status)}>
+                          {memberStatusLabel(member.membership.status)}
+                        </Badge>
+                        <small>{memberActivityLabel(member)}</small>
+                      </span>
                       <ChevronRight
                         className="organization-row-arrow"
                         size={16}

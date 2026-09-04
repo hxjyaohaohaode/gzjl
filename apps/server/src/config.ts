@@ -77,7 +77,20 @@ const serverConfigSchema = z.object({
   TWILIO_ACCOUNT_SID: z.string().min(1).optional(),
   TWILIO_AUTH_TOKEN: z.string().min(1).optional(),
   TWILIO_FROM: z.string().regex(/^\+[1-9]\d{7,14}$/).optional(),
+  VAPID_PUBLIC_KEY: z
+    .string()
+    .regex(/^[A-Za-z0-9_-]{80,100}$/)
+    .optional(),
+  PUSH_SUBSCRIPTION_ENCRYPTION_KEY: z.string().min(32).optional(),
 }).superRefine((value, context) => {
+  if (value.VAPID_PUBLIC_KEY && !value.PUSH_SUBSCRIPTION_ENCRYPTION_KEY) {
+    context.addIssue({
+      code: "custom",
+      path: ["VAPID_PUBLIC_KEY"],
+      message:
+        "配置 VAPID_PUBLIC_KEY 时必须同时配置 PUSH_SUBSCRIPTION_ENCRYPTION_KEY。",
+    });
+  }
   if (value.NODE_ENV !== "production") return;
 
   const assertPublicHttps = (

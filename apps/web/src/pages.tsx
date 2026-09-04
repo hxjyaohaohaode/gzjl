@@ -46,6 +46,14 @@ import { Badge, Button, Card, CardContent, CardHeader } from "@workbench/ui";
 import { api, ApiError, hasGrant, resetCsrfToken, type Me } from "./api.js";
 import { readableForeground } from "./color.js";
 import { sendQueueableTimerEvent } from "./offline.js";
+import {
+  currentBrowserPushSubscription,
+  detachCurrentBrowserPushBeforeLogout,
+  disableCurrentBrowserPush,
+  enableCurrentBrowserPush,
+  pushBrowserSupported,
+  type PushConfiguration,
+} from "./push-client.js";
 
 export const fieldClass =
   "min-h-11 w-full rounded-xl border border-transparent bg-[var(--surface-subtle)] px-3 text-sm text-[var(--text)] outline-none transition focus:border-[var(--accent)] focus:bg-[var(--surface)] focus:ring-2 focus:ring-[var(--accent-soft)]";
@@ -1487,24 +1495,83 @@ interface NotificationPreference {
 
 export function NotificationPreferencesPage() {
   const queryClient = useQueryClient();
+  const [quietDraft, setQuietDraft] = useState<{
+    start: string;
+    end: string;
+  } | null>(null);
   const preferences = useQuery({
     queryKey: ["notification-preferences"],
     queryFn: () =>
       api<{ items: NotificationPreference[] }>("/api/notification-preferences"),
   });
+  const pushConfiguration = useQuery({
+    queryKey: ["push-configuration"],
+    queryFn: () => api<PushConfiguration>("/api/push/configuration"),
+  });
+  const currentSubscription = useQuery({
+    queryKey: ["current-browser-push"],
+    queryFn: () => currentBrowserPushSubscription().then(Boolean),
+  });
+  const savedQuiet = preferences.data?.items
+    .map((item) => item.quietHours)
+    .find(
+      (item) =>
+        typeof item.start === "string" && typeof item.end === "string",
+    );
+  const quietStart = quietDraft?.start ?? String(savedQuiet?.start ?? "22:00");
+  const quietEnd = quietDraft?.end ?? String(savedQuiet?.end ?? "07:00");
+  const currentBrowserSubscribed = Boolean(currentSubscription.data);
+
+  const enablePush = useMutation({
+    mutationFn: async () => {
+      if (!pushConfiguration.data) throw new Error("推送配置仍在加载。");
+      await enableCurrentBrowserPush(pushConfiguration.data);
+    },
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["current-browser-push"] }),
+        queryClient.invalidateQueries({ queryKey: ["push-configuration"] }),
+      ]);
+    },
+  });
+  const disablePush = useMutation({
+    mutationFn: disableCurrentBrowserPush,
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["current-browser-push"] }),
+        queryClient.invalidateQueries({ queryKey: ["push-configuration"] }),
+      ]);
+    },
+  });
   const save = useMutation({
     mutationFn: (body: {
       category: string;
       inAppEnabled: boolean;
+      pushEnabled: boolean;
       mutedUntil: string | null;
+      quietHours: Record<string, unknown>;
     }) =>
       api("/api/notification-preferences", {
         method: "PUT",
         body: {
           ...body,
-          pushEnabled: false,
           emailEnabled: false,
-          quietHours: {},
+        },
+      }),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({
+        queryKey: ["notification-preferences"],
+      });
+    },
+  });
+  const saveQuietHours = useMutation({
+    mutationFn: (enabled: boolean) =>
+      api("/api/notification-preferences/quiet-hours", {
+        method: "PUT",
+        body: {
+          quietHours: enabled
+            ? { start: quietStart, end: quietEnd, timeZone: timezone }
+            : {},
         },
       }),
     onSuccess: async () => {
@@ -1518,20 +1585,122 @@ export function NotificationPreferencesPage() {
       category,
       inAppEnabled: true,
       mutedUntil: null,
+      pushEnabled: false,
+      emailEnabled: false,
+      quietHours: {},
     };
+  const supportsPush = pushBrowserSupported();
+  const pushAvailable = Boolean(pushConfiguration.data?.available);
+  const savedQuietHours = preferences.data?.items.some(
+    (item) =>
+      typeof item.quietHours.start === "string" &&
+      typeof item.quietHours.end === "string",
+  );
   return (
     <>
       <PageHeader
         title="通知设置"
-        description="应用内通知默认开启。当前版本不会把“邮件”或“浏览器推送”开关伪装成已投递能力；它们会在通道真正配置并验证后才开放。"
+        description="按分类控制站内与浏览器提醒；浏览器订阅只作用于当前设备，关闭后不会影响其他已授权设备。"
       />
+      <Card className="mb-5 max-w-4xl">
+        <CardHeader>
+          <div>
+            <h2 className="font-bold">当前浏览器</h2>
+            <p className="mt-1 text-sm text-[var(--text-muted)]">
+              {!supportsPush
+                ? "当前浏览器不支持标准 Web Push，站内提醒仍可正常使用。"
+                : !pushAvailable
+                  ? "服务端尚未配置 VAPID，站内提醒仍可正常使用。"
+                  : currentBrowserSubscribed
+                    ? `本设备已授权；账号共有 ${pushConfiguration.data?.activeSubscriptions.length ?? 0} 个有效浏览器订阅。`
+                    : "服务已就绪；启用后再为需要的提醒分类打开推送。"}
+            </p>
+          </div>
+          <Button
+            disabled={
+              pushConfiguration.isPending ||
+              enablePush.isPending ||
+              disablePush.isPending ||
+              !supportsPush ||
+              !pushAvailable
+            }
+            onClick={() =>
+              currentBrowserSubscribed
+                ? disablePush.mutate()
+                : enablePush.mutate()
+            }
+            size="compact"
+            variant={currentBrowserSubscribed ? "secondary" : "primary"}
+          >
+            {enablePush.isPending || disablePush.isPending
+              ? "正在更新…"
+              : currentBrowserSubscribed
+                ? "关闭本设备推送"
+                : "启用本设备推送"}
+          </Button>
+        </CardHeader>
+        <CardContent>
+          <div className="grid gap-3 sm:grid-cols-[1fr_1fr_auto_auto] sm:items-end">
+            <label className="space-y-1.5 text-sm font-semibold">
+              <span>免打扰开始</span>
+              <input
+                className={fieldClass}
+                onChange={(event) =>
+                  setQuietDraft({ start: event.target.value, end: quietEnd })
+                }
+                type="time"
+                value={quietStart}
+              />
+            </label>
+            <label className="space-y-1.5 text-sm font-semibold">
+              <span>免打扰结束</span>
+              <input
+                className={fieldClass}
+                onChange={(event) =>
+                  setQuietDraft({ start: quietStart, end: event.target.value })
+                }
+                type="time"
+                value={quietEnd}
+              />
+            </label>
+            <Button
+              disabled={saveQuietHours.isPending || quietStart === quietEnd}
+              onClick={() => saveQuietHours.mutate(true)}
+              size="compact"
+              variant="secondary"
+            >
+              应用到全部分类
+            </Button>
+            <Button
+              disabled={saveQuietHours.isPending || !savedQuietHours}
+              onClick={() => saveQuietHours.mutate(false)}
+              size="compact"
+              variant="ghost"
+            >
+              清除免打扰
+            </Button>
+          </div>
+          <p className="mt-2 text-xs text-[var(--text-muted)]">
+            按当前设备时区 {timezone} 判断；跨午夜时段同样有效。免打扰只延后浏览器推送，不隐藏站内事实。
+          </p>
+          <div className="mt-3">
+            <ErrorMessage
+              error={
+                pushConfiguration.error ??
+                enablePush.error ??
+                disablePush.error ??
+                saveQuietHours.error
+              }
+            />
+          </div>
+        </CardContent>
+      </Card>
       <Card className="max-w-4xl">
         <CardHeader>
           <div>
-            <h2 className="font-bold">应用内提醒</h2>
+            <h2 className="font-bold">提醒分类</h2>
             <p className="mt-1 text-sm text-[var(--text-muted)]">
-              关闭某类提醒会阻止 worker
-              创建该分类的应用内通知；静音会在截止时间自动恢复。
+              各通道独立控制；临时静音会在截止时间自动恢复。
             </p>
           </div>
         </CardHeader>
@@ -1566,7 +1735,9 @@ export function NotificationPreferencesPage() {
                           save.mutate({
                             category: item.category,
                             inAppEnabled: !preference.inAppEnabled,
+                            pushEnabled: preference.pushEnabled,
                             mutedUntil: preference.mutedUntil,
+                            quietHours: preference.quietHours,
                           })
                         }
                         size="compact"
@@ -1574,7 +1745,23 @@ export function NotificationPreferencesPage() {
                           preference.inAppEnabled ? "secondary" : "primary"
                         }
                       >
-                        {preference.inAppEnabled ? "关闭" : "开启"}
+                        站内 {preference.inAppEnabled ? "已开" : "已关"}
+                      </Button>
+                      <Button
+                        disabled={save.isPending || !currentBrowserSubscribed}
+                        onClick={() =>
+                          save.mutate({
+                            category: item.category,
+                            inAppEnabled: preference.inAppEnabled,
+                            pushEnabled: !preference.pushEnabled,
+                            mutedUntil: preference.mutedUntil,
+                            quietHours: preference.quietHours,
+                          })
+                        }
+                        size="compact"
+                        variant={preference.pushEnabled ? "secondary" : "ghost"}
+                      >
+                        推送 {preference.pushEnabled ? "已开" : "已关"}
                       </Button>
                       {muted ? (
                         <Button
@@ -1583,7 +1770,9 @@ export function NotificationPreferencesPage() {
                             save.mutate({
                               category: item.category,
                               inAppEnabled: preference.inAppEnabled,
+                              pushEnabled: preference.pushEnabled,
                               mutedUntil: null,
+                              quietHours: preference.quietHours,
                             })
                           }
                           size="compact"
@@ -1598,9 +1787,11 @@ export function NotificationPreferencesPage() {
                             save.mutate({
                               category: item.category,
                               inAppEnabled: preference.inAppEnabled,
+                              pushEnabled: preference.pushEnabled,
                               mutedUntil: new Date(
                                 Date.now() + 60 * 60_000,
                               ).toISOString(),
+                              quietHours: preference.quietHours,
                             })
                           }
                           size="compact"
@@ -1903,7 +2094,10 @@ function ExistingSessionHandoff({
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const logout = useMutation({
-    mutationFn: () => api<void>("/api/auth/logout", { method: "POST" }),
+    mutationFn: async () => {
+      await detachCurrentBrowserPushBeforeLogout();
+      return api<void>("/api/auth/logout", { method: "POST" });
+    },
     onSuccess: () => {
       resetCsrfToken();
       queryClient.removeQueries({
@@ -2335,6 +2529,22 @@ export function InvitationPage({
     removeOneTimeTokenFromLocation();
   }, []);
   const [password, setPassword] = useState("");
+  const inspection = useQuery({
+    queryKey: ["invitation-inspection"],
+    queryFn: () =>
+      api<{
+        valid: boolean;
+        serverTime: string;
+        expiresAt: string | null;
+        displayName: string | null;
+      }>("/api/auth/invitations/inspect", {
+        method: "POST",
+        body: { token },
+      }),
+    enabled: Boolean(token),
+    gcTime: 0,
+    retry: false,
+  });
   const accept = useMutation({
     mutationFn: () =>
       api("/api/auth/invitations/accept", {
@@ -2362,9 +2572,37 @@ export function InvitationPage({
         }}
       >
         {token ? (
-          <p className="rounded-xl bg-[var(--success-soft)] px-3 py-2 text-sm text-[var(--success)]">
-            已安全读取一次性邀请凭据。提交后立即失效。
-          </p>
+          inspection.isLoading ? (
+            <p className="rounded-xl bg-[var(--surface-subtle)] px-3 py-2 text-sm text-[var(--text-muted)]">
+              正在向服务端核验邀请链接…
+            </p>
+          ) : inspection.data?.valid ? (
+            <p
+              className="rounded-xl bg-[var(--success-soft)] px-3 py-2 text-sm text-[var(--success)]"
+              role="status"
+            >
+              邀请有效
+              {inspection.data.displayName
+                ? `，将激活“${inspection.data.displayName}”`
+                : ""}
+              ；有效期至
+              {inspection.data.expiresAt
+                ? new Date(inspection.data.expiresAt).toLocaleString("zh-CN")
+                : "未知时间"}
+              。设置密码成功后才会失效。
+            </p>
+          ) : inspection.data?.valid === false ? (
+            <p
+              className="rounded-xl bg-[var(--danger-soft)] px-3 py-2 text-sm text-[var(--danger)]"
+              role="alert"
+            >
+              这条邀请已经被使用、被新链接替代、被管理员撤销或超过有效期。请让管理员在对应的“待加入”成员详情中生成最新链接。
+            </p>
+          ) : (
+            <p className="rounded-xl bg-[var(--warning-soft)] px-3 py-2 text-sm text-[var(--warning)]">
+              暂时无法预检邀请；仍可提交，由服务端执行最终的单次原子校验。
+            </p>
+          )
         ) : (
           <Field hint="仅在没有完整链接时手工粘贴。" label="邀请令牌">
             <textarea
@@ -2390,8 +2628,16 @@ export function InvitationPage({
             value={password}
           />
         </Field>
-        <ErrorMessage error={accept.error} />
-        <Button className="w-full" disabled={accept.isPending} type="submit">
+        <ErrorMessage error={inspection.error ?? accept.error} />
+        <Button
+          className="w-full"
+          disabled={
+            accept.isPending ||
+            inspection.isLoading ||
+            inspection.data?.valid === false
+          }
+          type="submit"
+        >
           {accept.isPending ? "正在加入组织…" : "接受邀请并激活账号"}
         </Button>
       </form>

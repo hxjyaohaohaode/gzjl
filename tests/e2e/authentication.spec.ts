@@ -434,6 +434,17 @@ test("an Owner session cannot swallow an employee invitation link", async ({
   await mockAuthenticatedWorkspace(page);
   const token = "employee-invitation-token-that-is-long-enough-123456";
   let accepted = false;
+  await page.route("**/api/auth/invitations/inspect", async (route) => {
+    expect(route.request().postDataJSON()).toEqual({ token });
+    await route.fulfill({
+      json: {
+        valid: true,
+        serverTime: "2026-09-04T05:00:00.000Z",
+        expiresAt: "2026-09-11T05:00:00.000Z",
+        displayName: "受邀员工",
+      },
+    });
+  });
   await page.route("**/api/auth/invitations/accept", async (route) => {
     expect(route.request().postDataJSON()).toEqual({
       token,
@@ -456,6 +467,7 @@ test("an Owner session cannot swallow an employee invitation link", async ({
   await page
     .getByRole("button", { name: "退出当前账号并继续接受邀请" })
     .click();
+  await expect(page.getByText(/邀请有效，将激活“受邀员工”/)).toBeVisible();
   await page
     .getByLabel("设置密码")
     .fill("Employee-Secure-Password-123!");
@@ -785,6 +797,7 @@ test("notification preferences can disable a worker-backed category", async ({
     quietHours: {},
     mutedUntil: null,
   };
+  let quietHoursUpdate: unknown;
   await page.route("**/api/notification-preferences", async (route) => {
     if (route.request().method() === "GET")
       await route.fulfill({ json: { items: [preference] } });
@@ -798,17 +811,47 @@ test("notification preferences can disable a worker-backed category", async ({
       });
     }
   });
+  await page.route("**/api/push/configuration", (route) =>
+    route.fulfill({
+      json: { available: false, publicKey: null, activeSubscriptions: [] },
+    }),
+  );
+  await page.route(
+    "**/api/notification-preferences/quiet-hours",
+    async (route) => {
+      quietHoursUpdate = route.request().postDataJSON();
+      await route.fulfill({
+        json: {
+          quietHours: {
+            start: "22:00",
+            end: "07:00",
+            timeZone: "Asia/Shanghai",
+          },
+          categoryCount: 15,
+        },
+      });
+    },
+  );
   await page.goto("/login");
   await page.getByLabel("邮箱或手机号").fill("owner@example.test");
   await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
   await page.getByRole("button", { name: "登录", exact: true }).click();
   await page.goto("/notification-preferences");
   await expect(page.getByRole("heading", { name: "通知设置" })).toBeVisible();
+  await expect(page.getByText("服务端尚未配置 VAPID")).toBeVisible();
   await page
     .getByText("长时间计时")
     .locator("xpath=../..")
-    .getByRole("button", { name: "关闭" })
+    .getByRole("button", { name: "站内 已开" })
     .click();
+  await page.getByRole("button", { name: "应用到全部分类" }).click();
+  await expect.poll(() => quietHoursUpdate).toEqual({
+    quietHours: {
+      start: "22:00",
+      end: "07:00",
+      timeZone: "Asia/Shanghai",
+    },
+  });
 });
 
 test("CSV import blocks invalid previews and confirms only the previewed content", async ({
@@ -2167,6 +2210,116 @@ test("an owner can white-list both contacts and copy a manual one-time invitatio
     "https://app.example.test/invite#token=manual-invitation-test-token",
   );
   await expect(page.getByText(/私密渠道单独发送给当事人/)).toBeVisible();
+});
+
+test("owner can see invitation activation state and withdraw a pending member", async ({
+  page,
+}) => {
+  await mockAuthenticatedWorkspace(page);
+  const ownerId = "00000000-0000-4000-8000-000000000002";
+  const invitedId = "00000000-0000-4000-8000-000000000075";
+  let removed = false;
+  await page.route("**/api/organization", (route) =>
+    route.fulfill({
+      json: {
+        organization: {
+          id: "00000000-0000-4000-8000-000000000003",
+          name: "顺势而为",
+          timezone: "Asia/Shanghai",
+        },
+        ownerMembershipId: ownerId,
+        ownershipTransfer: null,
+        units: [],
+        roles: [],
+        professionalIdentities: [],
+        members: [
+          {
+            membership: {
+              id: ownerId,
+              status: "active",
+              positionTitle: "负责人",
+              orgUnitId: null,
+              joinedAt: "2026-09-01T01:00:00.000Z",
+              leftAt: null,
+            },
+            user: { displayName: "林知夏" },
+            positionTitle: "负责人",
+            unitName: null,
+            isOwner: true,
+            activity: {
+              onlineNow: true,
+              activeSessionCount: 2,
+              lastSeenAt: "2026-09-04T05:00:00.000Z",
+            },
+            accessRoles: [],
+            professionalIdentities: [],
+          },
+          ...(!removed
+            ? [
+                {
+                  membership: {
+                    id: invitedId,
+                    status: "invited",
+                    positionTitle: null,
+                    orgUnitId: null,
+                    joinedAt: null,
+                    leftAt: null,
+                  },
+                  user: { displayName: "待加入成员" },
+                  positionTitle: null,
+                  unitName: null,
+                  isOwner: false,
+                  activity: {
+                    onlineNow: false,
+                    activeSessionCount: 0,
+                    lastSeenAt: null,
+                  },
+                  accessRoles: [],
+                  professionalIdentities: [],
+                },
+              ]
+            : []),
+        ],
+      },
+    }),
+  );
+  await page.route("**/api/projects", (route) =>
+    route.fulfill({ json: { items: [] } }),
+  );
+  await page.route(
+    `**/api/organization/invitations/${invitedId}`,
+    async (route) => {
+      expect(route.request().method()).toBe("DELETE");
+      removed = true;
+      await route.fulfill({ status: 204, body: "" });
+    },
+  );
+
+  await page.goto("/login");
+  await page.getByLabel("邮箱或手机号").fill("owner@example.test");
+  await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+  await page.goto("/organization");
+  await page.getByRole("tab", { name: /成员/ }).click();
+  await expect(page.getByText("当前在线 · 2 个活跃端")).toBeVisible();
+  await page
+    .locator(".organization-member-row")
+    .filter({ hasText: "待加入成员" })
+    .click();
+  await expect(
+    page
+      .getByLabel("待加入成员 的成员详情")
+      .getByText("尚未接受邀请", { exact: true }),
+  ).toBeVisible();
+  page.once("dialog", (dialog) => dialog.accept());
+  await page
+    .getByRole("button", {
+      name: "撤销 待加入成员 的邀请并释放白名单联系方式",
+    })
+    .click();
+  await expect(
+    page.locator(".organization-member-row").filter({ hasText: "待加入成员" }),
+  ).toHaveCount(0);
 });
 
 test("white-list invitation never submits a required role select with no assignable role", async ({

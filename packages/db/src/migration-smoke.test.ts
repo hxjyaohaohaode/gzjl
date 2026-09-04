@@ -21,7 +21,7 @@ describe("generated PostgreSQL migration", () => {
       const tables = await database.query<{ count: number }>(
         "select count(*)::int as count from information_schema.tables where table_schema = 'public' and table_type = 'BASE TABLE'",
       );
-      expect(tables.rows[0]?.count).toBe(67);
+      expect(tables.rows[0]?.count).toBe(68);
       const planKindColumn = await database.query<{
         column_default: string | null;
         is_nullable: string;
@@ -34,6 +34,15 @@ describe("generated PostgreSQL migration", () => {
           is_nullable: "NO",
         }),
       ]);
+      const pushDeliveryIndexes = await database.query<{ indexname: string }>(
+        "select indexname from pg_indexes where schemaname = 'public' and tablename = 'notification_deliveries' order by indexname",
+      );
+      expect(pushDeliveryIndexes.rows.map((row) => row.indexname)).toEqual(
+        expect.arrayContaining([
+          "notification_deliveries_dispatch_idx",
+          "notification_deliveries_notification_subscription_uidx",
+        ]),
+      );
     } finally {
       await database.close();
     }

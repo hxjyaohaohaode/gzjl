@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { decryptSecret, encryptSecret, SecretCipherError } from "./secret.js";
+import {
+  decryptScopedSecret,
+  decryptSecret,
+  encryptScopedSecret,
+  encryptSecret,
+  SecretCipherError,
+} from "./secret.js";
 
 const key = "test-only-organization-ai-envelope-key-at-least-32-bytes";
 
@@ -23,5 +29,22 @@ describe("organization AI secret envelope", () => {
     expect(() => decryptSecret(`${ciphertext}x`, key)).toThrow(
       SecretCipherError,
     );
+  });
+
+  it("domain-separates scoped application secrets", () => {
+    const ciphertext = encryptScopedSecret(
+      "https://push.example.test/subscription",
+      key,
+      "push.endpoint",
+    );
+
+    expect(ciphertext).toMatch(/^v2\./);
+    expect(
+      decryptScopedSecret(ciphertext, key, "push.endpoint"),
+    ).toBe("https://push.example.test/subscription");
+    expect(() =>
+      decryptScopedSecret(ciphertext, key, "push.auth"),
+    ).toThrow(SecretCipherError);
+    expect(() => decryptSecret(ciphertext, key)).toThrow(SecretCipherError);
   });
 });

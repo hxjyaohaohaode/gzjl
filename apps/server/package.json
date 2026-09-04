@@ -33,6 +33,7 @@
     "zod": "4.5.4"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "0.5.8",
     "@types/node": "26.4.0",
     "@types/nodemailer": "7.0.4",
     "tsx": "4.23.13",

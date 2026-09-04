@@ -34,6 +34,28 @@ describe("production public URLs", () => {
     );
   });
 
+  it("requires the browser-push public key and subscription envelope key together", () => {
+    expect(() =>
+      loadServerConfig({
+        ...productionEnvironment,
+        VAPID_PUBLIC_KEY: "B".repeat(87),
+      }),
+    ).toThrow();
+    expect(
+      loadServerConfig({
+        ...productionEnvironment,
+        PUSH_SUBSCRIPTION_ENCRYPTION_KEY: "p".repeat(32),
+      }).VAPID_PUBLIC_KEY,
+    ).toBeUndefined();
+    expect(
+      loadServerConfig({
+        ...productionEnvironment,
+        VAPID_PUBLIC_KEY: "B".repeat(87),
+        PUSH_SUBSCRIPTION_ENCRYPTION_KEY: "p".repeat(32),
+      }).VAPID_PUBLIC_KEY,
+    ).toBe("B".repeat(87));
+  });
+
   it("rejects HTTP, credential-bearing, and mismatched public URLs", () => {
     expect(() =>
       loadServerConfig({ ...productionEnvironment, WEB_ORIGIN: "http://app.example.test" }),

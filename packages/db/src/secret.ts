@@ -6,8 +6,9 @@ import {
 } from "node:crypto";
 
 const algorithm = "aes-256-gcm";
-const version = "v1";
-const aad = Buffer.from("workbench.organization-ai-key", "utf8");
+const legacyVersion = "v1";
+const scopedVersion = "v2";
+const legacyAad = Buffer.from("workbench.organization-ai-key", "utf8");
 
 export class SecretCipherError extends Error {
   constructor() {
@@ -41,7 +42,12 @@ function decodeEnvelopeSegment(value: string): Buffer {
 }
 
 /** Encrypts a short provider credential with authenticated encryption. */
-export function encryptSecret(plaintext: string, secret: string): string {
+function encryptEnvelope(
+  plaintext: string,
+  secret: string,
+  version: string,
+  aad: Buffer,
+): string {
   try {
     const iv = randomBytes(12);
     const cipher = createCipheriv(algorithm, deriveKey(secret), iv);
@@ -62,13 +68,17 @@ export function encryptSecret(plaintext: string, secret: string): string {
   }
 }
 
-/** Decrypts a versioned, authenticated ciphertext without exposing failure detail. */
-export function decryptSecret(ciphertext: string, secret: string): string {
+function decryptEnvelope(
+  ciphertext: string,
+  secret: string,
+  expectedVersion: string,
+  aad: Buffer,
+): string {
   try {
     const [cipherVersion, ivValue, tagValue, encryptedValue, ...extra] =
       ciphertext.split(".");
     if (
-      cipherVersion !== version ||
+      cipherVersion !== expectedVersion ||
       !ivValue ||
       !tagValue ||
       !encryptedValue ||
@@ -96,4 +106,42 @@ export function decryptSecret(ciphertext: string, secret: string): string {
   } catch {
     throw new SecretCipherError();
   }
+}
+
+/** Encrypts an existing organization AI key with the stable legacy envelope. */
+export function encryptSecret(plaintext: string, secret: string): string {
+  return encryptEnvelope(plaintext, secret, legacyVersion, legacyAad);
+}
+
+/** Decrypts an existing organization AI key without changing stored values. */
+export function decryptSecret(ciphertext: string, secret: string): string {
+  return decryptEnvelope(ciphertext, secret, legacyVersion, legacyAad);
+}
+
+function scopedAad(scope: string): Buffer {
+  if (!/^[a-z0-9][a-z0-9._:-]{0,79}$/.test(scope)) {
+    throw new SecretCipherError();
+  }
+  return Buffer.from(`workbench.secret.${scope}`, "utf8");
+}
+
+/**
+ * Encrypts non-AI application secrets with authenticated, domain-separated
+ * envelopes. The scope is deliberately not stored next to the ciphertext: a
+ * caller must know the field's purpose in order to decrypt it.
+ */
+export function encryptScopedSecret(
+  plaintext: string,
+  secret: string,
+  scope: string,
+): string {
+  return encryptEnvelope(plaintext, secret, scopedVersion, scopedAad(scope));
+}
+
+export function decryptScopedSecret(
+  ciphertext: string,
+  secret: string,
+  scope: string,
+): string {
+  return decryptEnvelope(ciphertext, secret, scopedVersion, scopedAad(scope));
 }

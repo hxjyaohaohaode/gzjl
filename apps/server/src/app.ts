@@ -296,6 +296,7 @@ export async function buildApp({
       app,
       database,
       authenticate,
+      config,
     );
     await registerRealtimeRoutes(app, database, authService, config);
     await registerOperationsRoutes(

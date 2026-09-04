@@ -3141,6 +3141,32 @@ body {
   font-size: 0.62rem;
 }
 
+.organization-member-presence {
+  display: grid;
+  justify-items: start;
+  gap: 0.25rem;
+}
+
+.organization-member-presence small {
+  max-width: 13rem;
+  color: var(--text-subtle);
+  font-size: 0.58rem;
+  line-height: 1.35;
+}
+
+.organization-member-presence {
+  display: grid;
+  justify-items: start;
+  gap: 0.22rem;
+}
+
+.organization-member-presence small {
+  max-width: 12rem;
+  color: var(--text-subtle);
+  font-size: 0.58rem;
+  line-height: 1.35;
+}
+
 .organization-member-avatar {
   display: grid;
   width: 2rem;
