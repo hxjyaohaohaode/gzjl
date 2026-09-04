@@ -26,6 +26,7 @@ import {
 import {
   addDecimalAmounts,
   calculateHourlyPayroll,
+  forecastCalendarSeries,
   localDateKeysForIntervals,
   multiplyDecimalAmount,
   prorateDecimalAmount,
@@ -475,6 +476,7 @@ export class PayrollService {
       seconds: number;
       estimate: boolean;
       bonus: boolean;
+      recurring: boolean;
     }> = [];
     const monthDates = localDateKeysForIntervals(
       [{ startAt: startsAt, endAt: endsAt }],
@@ -503,11 +505,12 @@ export class PayrollService {
         timezone: organization.timezone,
         intervals,
         weeklyContextIntervals,
-        weeklyBonusEligibilityIntervals: clipPayableIntervals(
-          intervals,
-          version.effectiveFrom > startsAt ? version.effectiveFrom : startsAt,
-          endsAt,
-        ),
+        // A rule configured during an open month must immediately evaluate the
+        // month's already-recorded work. Base pay is already previewed for the
+        // whole open month; weekly bonus eligibility follows the same live
+        // policy so reaching the threshold before the setting was saved does
+        // not leave the employee stuck at zero until the next week.
+        weeklyBonusEligibilityIntervals: intervals,
         rules: parsedRules,
         includePendingAsEstimate: version.pendingReviewCountsInEstimate,
       });
@@ -521,6 +524,7 @@ export class PayrollService {
           seconds: component.seconds,
           estimate: component.estimate,
           bonus: component.type === "bonus",
+          recurring: false,
         })),
       );
       if (version.type === "hybrid") {
@@ -536,6 +540,7 @@ export class PayrollService {
               seconds: 0,
               estimate: false,
               bonus: false,
+              recurring: true,
             }),
           );
         }
@@ -565,6 +570,7 @@ export class PayrollService {
             !dateIntervals.some((interval) => interval.approvalStatus === "approved") &&
             dateIntervals.some((interval) => interval.approvalStatus === "pending_review"),
           bonus: false,
+          recurring: false,
         });
       }
     } else {
@@ -578,6 +584,7 @@ export class PayrollService {
           seconds: 0,
           estimate: needsReview,
           bonus: false,
+          recurring: true,
         }),
       );
     }
@@ -590,6 +597,9 @@ export class PayrollService {
         pendingSeconds: number;
         weeklyBonusSeconds: number;
         weeklyBonusEstimatedSeconds: number;
+        approvedBonusAmount: bigint;
+        pendingBonusAmount: bigint;
+        recurringAmount: bigint;
       }
     >(
       monthDates.map((date) => [
@@ -601,6 +611,9 @@ export class PayrollService {
           pendingSeconds: 0,
           weeklyBonusSeconds: 0,
           weeklyBonusEstimatedSeconds: 0,
+          approvedBonusAmount: 0n,
+          pendingBonusAmount: 0n,
+          recurringAmount: 0n,
         },
       ]),
     );
@@ -612,14 +625,23 @@ export class PayrollService {
         pendingSeconds: 0,
         weeklyBonusSeconds: 0,
         weeklyBonusEstimatedSeconds: 0,
+        approvedBonusAmount: 0n,
+        pendingBonusAmount: 0n,
+        recurringAmount: 0n,
       };
       const amount = decimalMicros(component.amount);
       if (component.estimate) current.pendingAmount += amount;
       else current.approvedAmount += amount;
       if (component.bonus) {
-        if (component.estimate) current.weeklyBonusEstimatedSeconds += component.seconds;
-        else current.weeklyBonusSeconds += component.seconds;
+        if (component.estimate) {
+          current.weeklyBonusEstimatedSeconds += component.seconds;
+          current.pendingBonusAmount += amount;
+        } else {
+          current.weeklyBonusSeconds += component.seconds;
+          current.approvedBonusAmount += amount;
+        }
       }
+      if (component.recurring) current.recurringAmount += amount;
       daily.set(component.date, current);
     }
     for (const [date, seconds] of workSecondsByLocalDate(intervals, organization.timezone)) {
@@ -646,25 +668,135 @@ export class PayrollService {
     );
     const today = localDateKey(new Date(), organization.timezone);
     const elapsedDates = monthDates.filter((date) => date <= today);
-    let actualCumulative = 0n;
-    const actualToToday = elapsedDates.reduce((total, date) => {
+    const futureDates = monthDates.filter((date) => date > today);
+    const toSafeMicros = (value: number) =>
+      BigInt(
+        Math.max(
+          0,
+          Math.round(Math.min(Number.MAX_SAFE_INTEGER, Number.isFinite(value) ? value : 0)),
+        ),
+      );
+    const variableAmountForecast = forecastCalendarSeries(
+      elapsedDates.map((date) => {
+        const amount = daily.get(date)!;
+        const bonusAmount = amount.approvedBonusAmount + amount.pendingBonusAmount;
+        const dailyTotal = amount.approvedAmount + amount.pendingAmount;
+        return {
+          date,
+          value: Number(
+            dailyTotal - bonusAmount - amount.recurringAmount > 0n
+              ? dailyTotal - bonusAmount - amount.recurringAmount
+              : 0n,
+          ),
+        };
+      }),
+      futureDates.length,
+    );
+    const eligibleSecondsForDate = (date: string) => {
       const amount = daily.get(date)!;
-      return total + amount.approvedAmount + amount.pendingAmount;
-    }, 0n);
-    const averagePerElapsedDay = elapsedDates.length
-      ? actualToToday / BigInt(elapsedDates.length)
-      : 0n;
+      return amount.approvedSeconds +
+        (version.pendingReviewCountsInEstimate ? amount.pendingSeconds : 0);
+    };
+    const workForecast = forecastCalendarSeries(
+      elapsedDates.map((date) => ({ date, value: eligibleSecondsForDate(date) })),
+      futureDates.length,
+    );
+    const variableForecastByDate = new Map(
+      variableAmountForecast.points.map((point) => [point.date, point]),
+    );
+    const workForecastByDate = new Map(
+      workForecast.points.map((point) => [point.date, point]),
+    );
+    const projectedWeeklyBonuses = (
+      mode: "lower" | "expected" | "upper",
+    ): Map<string, number> => {
+      const projected = new Map<string, number>();
+      if (!weeklyBonusRule) return projected;
+      const weeks = new Map<string, string[]>();
+      for (const date of monthDates) {
+        const weekStart = localWeekStartDate(date);
+        weeks.set(weekStart, [...(weeks.get(weekStart) ?? []), date]);
+      }
+      for (const dates of weeks.values()) {
+        const alreadyAwarded = dates.some((date) => {
+          const amount = daily.get(date)!;
+          return amount.weeklyBonusSeconds + amount.weeklyBonusEstimatedSeconds > 0;
+        });
+        if (alreadyAwarded) continue;
+        let cumulativeSeconds = 0;
+        for (const date of dates) {
+          const amount = daily.get(date)!;
+          const knownFuture =
+            date <= today || amount.approvedSeconds + amount.pendingSeconds > 0;
+          const forecast = workForecastByDate.get(date);
+          cumulativeSeconds += knownFuture
+            ? eligibleSecondsForDate(date)
+            : mode === "lower"
+              ? forecast?.lowerValue ?? 0
+              : mode === "upper"
+                ? forecast?.upperValue ?? 0
+                : forecast?.value ?? 0;
+          if (cumulativeSeconds >= weeklyBonusRule.thresholdSeconds) {
+            projected.set(date, weeklyBonusRule.rewardSeconds);
+            break;
+          }
+        }
+      }
+      return projected;
+    };
+    const expectedBonusByDate = projectedWeeklyBonuses("expected");
+    const lowerBonusByDate = projectedWeeklyBonuses("lower");
+    const upperBonusByDate = projectedWeeklyBonuses("upper");
+    const bonusAmountForSeconds = (seconds: number) =>
+      (decimalMicros(version.baseAmount) * BigInt(seconds)) / 3_600n;
+    let actualCumulative = 0n;
     let projectedCumulative = 0n;
+    let projectedLowerCumulative = 0n;
+    let projectedUpperCumulative = 0n;
     const salaryTimeline = monthDates.map((date) => {
       const amount = daily.get(date)!;
       const dailyTotal = amount.approvedAmount + amount.pendingAmount;
+      let projectedDaily = dailyTotal;
+      let forecastSource: "actual" | "known_future" | "calendar_model" = "actual";
       if (date <= today) {
         actualCumulative += dailyTotal;
         projectedCumulative = actualCumulative;
+        projectedLowerCumulative = actualCumulative;
+        projectedUpperCumulative = actualCumulative;
       } else {
-        // Prefer an already-recorded future fact/fixed allocation; only use
-        // the elapsed-day trend when that future date has no known amount.
-        projectedCumulative += dailyTotal !== 0n ? dailyTotal : averagePerElapsedDay;
+        const bonusAmount = amount.approvedBonusAmount + amount.pendingBonusAmount;
+        const variableKnown = dailyTotal - amount.recurringAmount - bonusAmount;
+        const hasKnownVariable =
+          amount.approvedSeconds + amount.pendingSeconds > 0 || variableKnown !== 0n;
+        const forecast = variableForecastByDate.get(date);
+        const expectedVariable = hasKnownVariable
+          ? variableKnown
+          : toSafeMicros(forecast?.value ?? 0);
+        const lowerVariable = hasKnownVariable
+          ? variableKnown
+          : toSafeMicros(forecast?.lowerValue ?? 0);
+        const upperVariable = hasKnownVariable
+          ? variableKnown
+          : toSafeMicros(forecast?.upperValue ?? 0);
+        projectedDaily =
+          amount.recurringAmount +
+          bonusAmount +
+          expectedVariable +
+          bonusAmountForSeconds(expectedBonusByDate.get(date) ?? 0);
+        const projectedDailyLower =
+          amount.recurringAmount +
+          bonusAmount +
+          lowerVariable +
+          bonusAmountForSeconds(lowerBonusByDate.get(date) ?? 0);
+        const projectedDailyUpper =
+          amount.recurringAmount +
+          bonusAmount +
+          upperVariable +
+          bonusAmountForSeconds(upperBonusByDate.get(date) ?? 0);
+        projectedCumulative += projectedDaily;
+        projectedLowerCumulative += projectedDailyLower;
+        projectedUpperCumulative += projectedDailyUpper;
+        forecastSource = hasKnownVariable ? "known_future" : "calendar_model";
       }
       return {
         date,
@@ -678,8 +810,14 @@ export class PayrollService {
           amount.weeklyBonusSeconds + amount.weeklyBonusEstimatedSeconds,
         weeklyBonusSeconds: amount.weeklyBonusSeconds,
         weeklyBonusEstimatedSeconds: amount.weeklyBonusEstimatedSeconds,
+        projectedBonusSeconds: expectedBonusByDate.get(date) ?? 0,
+        projectedDailyAmount: formatMicros(projectedDaily),
         actualCumulativeAmount: date <= today ? formatMicros(actualCumulative) : null,
         projectedCumulativeAmount: formatMicros(projectedCumulative),
+        projectedLowerCumulativeAmount: formatMicros(projectedLowerCumulative),
+        projectedUpperCumulativeAmount: formatMicros(projectedUpperCumulative),
+        forecastConfidence: variableForecastByDate.get(date)?.confidence ?? null,
+        forecastSource,
         forecast: date > today,
       };
     });
@@ -730,9 +868,23 @@ export class PayrollService {
       pendingSeconds,
       weeklyBonusSeconds,
       weeklyBonusEstimatedSeconds,
+      projectedWeeklyBonusSeconds: [...expectedBonusByDate.values()].reduce(
+        (total, seconds) => total + seconds,
+        0,
+      ),
       weeklyBonusRule,
       estimatedAmount,
       projectedPeriodAmount: formatMicros(projectedCumulative),
+      projection: {
+        method: variableAmountForecast.method,
+        sampleDays: variableAmountForecast.sampleDays,
+        nonZeroSampleDays: variableAmountForecast.nonZeroSampleDays,
+        horizonDays: futureDates.length,
+        includesKnownFutureRecords: futureDates.some((date) => {
+          const amount = daily.get(date)!;
+          return amount.approvedSeconds + amount.pendingSeconds > 0;
+        }),
+      },
       calculationBreakdown: {
         confirmedWorkAmount: formatMicros(calculationBreakdown.confirmedWorkAmount),
         pendingWorkAmount: formatMicros(calculationBreakdown.pendingWorkAmount),
@@ -1433,11 +1585,19 @@ export class PayrollService {
             timezone: period.timezone,
             intervals: versionIntervals,
             // Every version sees the final approved/pending state for the
-            // whole natural week. Eligibility is still constrained by
-            // `versionIntervals`, so a rule cannot award before it became
-            // effective, while an early estimated crossing cannot mask a
-            // later fully-approved crossing in another version segment.
+            // whole natural week; the period boundary still clips a week that
+            // straddles two payroll months into two independent reward spans.
             weeklyContextIntervals,
+            // Rule changes are versioned and auditable, but a newly enabled
+            // weekly reward is allowed to recognise earlier work in the same
+            // still-open payroll month. Limit eligibility to this version's
+            // segment end so an older version cannot claim a threshold reached
+            // later; the cross-version awarded set still prevents duplicates.
+            weeklyBonusEligibilityIntervals: clipPayableIntervals(
+              intervals,
+              period.startsAt,
+              segmentEnd,
+            ),
             excludedWeeklyBonusWeekStarts: [...awardedWeeklyBonusWeeks],
             rules: rulesByVersion.get(version.id) ?? [],
             includePendingAsEstimate: version.pendingReviewCountsInEstimate,
@@ -1581,7 +1741,7 @@ export class PayrollService {
     });
 
     const snapshotPayload = {
-      calculationVersion: "payroll-engine-v4-period-week-bonus",
+      calculationVersion: "payroll-engine-v5-live-month-week-bonus",
       // Only immutable calculation inputs belong in the idempotency hash.
       // Runtime fields such as status/updatedAt change when a calculation is
       // cancelled, and must not turn an exact retry into a duplicate batch.
@@ -1666,7 +1826,7 @@ export class PayrollService {
           status: calculatedItems.some((item) => item.needsReview)
             ? "review_required"
             : "ready",
-          calculationVersion: "payroll-engine-v4-period-week-bonus",
+          calculationVersion: "payroll-engine-v5-live-month-week-bonus",
           requestedBy: actor.membershipId,
           inputHash,
           startedAt: new Date(),

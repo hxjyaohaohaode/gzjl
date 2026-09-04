@@ -293,9 +293,15 @@ async function mockAuthenticatedWorkspace(
             { date: "2026-09-02", seconds: 12_600 },
           ],
           predicted: [
-            { date: "2026-09-03", seconds: 9_000, lowerSeconds: 6_000, upperSeconds: 12_000 },
-            { date: "2026-09-04", seconds: 9_300, lowerSeconds: 6_300, upperSeconds: 12_300 },
+            { date: "2026-09-03", seconds: 9_000, lowerSeconds: 6_000, upperSeconds: 12_000, confidence: "medium" },
+            { date: "2026-09-04", seconds: 9_300, lowerSeconds: 6_300, upperSeconds: 12_300, confidence: "medium" },
           ],
+          model: {
+            method: "weekday_recent_robust_v2",
+            sampleDays: 30,
+            nonZeroSampleDays: 18,
+            horizonDays: 7,
+          },
         },
         availableFilters: {
           members: [{ id: "00000000-0000-4000-8000-000000000002", label: "林知夏" }],
@@ -877,12 +883,20 @@ test("personal payroll renders reconciled totals, daily pay, period trend, and c
           pendingSeconds: 3_600,
           weeklyBonusSeconds: 0,
           weeklyBonusEstimatedSeconds: 18_000,
+          projectedWeeklyBonusSeconds: 18_000,
           weeklyBonusRule: {
             thresholdSeconds: 108_000,
             rewardSeconds: 18_000,
           },
           estimatedAmount: "1400.000000",
           projectedPeriodAmount: "3600.000000",
+          projection: {
+            method: "weekday_recent_robust_v2",
+            sampleDays: 4,
+            nonZeroSampleDays: 2,
+            horizonDays: 26,
+            includesKnownFutureRecords: false,
+          },
           calculationBreakdown: {
             confirmedWorkAmount: "800.000000",
             pendingWorkAmount: "100.000000",
@@ -920,8 +934,14 @@ test("personal payroll renders reconciled totals, daily pay, period trend, and c
               bonusSeconds: 0,
               weeklyBonusSeconds: 0,
               weeklyBonusEstimatedSeconds: 0,
+              projectedBonusSeconds: 0,
+              projectedDailyAmount: "400.000000",
               actualCumulativeAmount: "400.000000",
               projectedCumulativeAmount: "400.000000",
+              projectedLowerCumulativeAmount: "400.000000",
+              projectedUpperCumulativeAmount: "400.000000",
+              forecastConfidence: null,
+              forecastSource: "actual",
               forecast: false,
             },
             {
@@ -935,8 +955,14 @@ test("personal payroll renders reconciled totals, daily pay, period trend, and c
               bonusSeconds: 18_000,
               weeklyBonusSeconds: 0,
               weeklyBonusEstimatedSeconds: 18_000,
+              projectedBonusSeconds: 0,
+              projectedDailyAmount: "1000.000000",
               actualCumulativeAmount: "1400.000000",
               projectedCumulativeAmount: "1400.000000",
+              projectedLowerCumulativeAmount: "1400.000000",
+              projectedUpperCumulativeAmount: "1400.000000",
+              forecastConfidence: null,
+              forecastSource: "actual",
               forecast: false,
             },
             {
@@ -950,8 +976,14 @@ test("personal payroll renders reconciled totals, daily pay, period trend, and c
               bonusSeconds: 0,
               weeklyBonusSeconds: 0,
               weeklyBonusEstimatedSeconds: 0,
+              projectedBonusSeconds: 0,
+              projectedDailyAmount: "150.000000",
               actualCumulativeAmount: null,
-              projectedCumulativeAmount: "1350.000000",
+              projectedCumulativeAmount: "1550.000000",
+              projectedLowerCumulativeAmount: "1480.000000",
+              projectedUpperCumulativeAmount: "1650.000000",
+              forecastConfidence: "low",
+              forecastSource: "calendar_model",
               forecast: true,
             },
           ],
@@ -1035,9 +1067,9 @@ test("personal payroll renders reconciled totals, daily pay, period trend, and c
   await expect(page.getByRole("heading", { name: "我的薪资" })).toBeVisible();
   await expect(page.getByText("¥100.00 / 小时", { exact: true })).toBeVisible();
   await expect(page.getByText("本月实时预估", { exact: true })).toBeVisible();
-  await expect(page.getByText("本周已记录工时", { exact: true })).toBeVisible();
-  await expect(page.getByText("周奖励工时", { exact: true })).toBeVisible();
-  await expect(page.getByText(/另有 5 小时 0 分 待审核预估/)).toBeVisible();
+  await expect(page.getByText(/本周已记录工时 · 9月1日—9月6日（月界截断）/)).toBeVisible();
+  await expect(page.getByText("周奖励工时（含预估）", { exact: true })).toBeVisible();
+  await expect(page.getByText(/待审核预估 5 小时 0 分/)).toBeVisible();
   await expect(page.getByText("本月实时预估怎样计算", { exact: true })).toBeVisible();
   await expect(page.getByText(/¥800.00 已批准工作计薪/)).toBeVisible();
   await expect(page.getByText("每周工时", { exact: true })).toBeVisible();
@@ -2056,6 +2088,11 @@ test("analytics uses accessible, server-backed responsive chart containers", asy
   ).toBeVisible();
   await expect(page.getByRole("img", { name: "项目投入分布图" })).toBeVisible();
   await expect(page.getByRole("img", { name: "事实与未来工时预测带" })).toBeVisible();
+  await page.getByLabel("预测范围").selectOption("14");
+  await expect(page.getByRole("heading", { name: "事实与未来 14 天预测" })).toBeVisible();
+  await expect.poll(() => analyticsUrls.some((url) =>
+    new URL(url).searchParams.get("forecastDays") === "14",
+  )).toBe(true);
   await expect(page.getByRole("img", { name: "项目工作类型与审核流向桑基图" })).toBeVisible();
   await expect(page.getByRole("img", { name: "项目与工作类型旭日图" })).toBeVisible();
   await expect(page.getByRole("img", { name: "项目工时与加权进度图" })).toBeVisible();
@@ -4552,6 +4589,8 @@ test("employees see shared-project last work activity without coworkers' duratio
 }) => {
   await mockAuthenticatedWorkspace(page, { isOwner: false });
   const activityAt = "2026-09-04T05:00:00.000Z";
+  const sessionId = "00000000-0000-4000-8000-000000000091";
+  let evidenceFetched = false;
   await page.route("**/api/team-activity?**", (route) =>
     route.fulfill({
       json: {
@@ -4565,7 +4604,7 @@ test("employees see shared-project last work activity without coworkers' duratio
             projectNames: ["工作台正式版"],
             professionalIdentities: ["产品设计"],
             lastActivity: {
-              id: "00000000-0000-4000-8000-000000000091",
+              id: sessionId,
               membershipId: "00000000-0000-4000-8000-000000000090",
               displayName: "陈一",
               content: "完成移动端流程核对",
@@ -4581,7 +4620,7 @@ test("employees see shared-project last work activity without coworkers' duratio
         ],
         items: [
           {
-            id: "00000000-0000-4000-8000-000000000091",
+            id: sessionId,
             membershipId: "00000000-0000-4000-8000-000000000090",
             displayName: "陈一",
             content: "完成移动端流程核对",
@@ -4597,6 +4636,31 @@ test("employees see shared-project last work activity without coworkers' duratio
       },
     }),
   );
+  await page.route(`**/api/work-sessions/${sessionId}/attachments`, async (route) => {
+    evidenceFetched = true;
+    await route.fulfill({
+      json: {
+        items: [
+          {
+            id: "00000000-0000-4000-8000-000000000092",
+            kind: "text",
+            status: "available",
+            originalName: null,
+            externalUrl: null,
+            textContent: "完整验收证据：移动端、平板端与桌面端均已逐项核对。",
+            mimeType: null,
+            sizeBytes: null,
+            visibility: "project_visible",
+            note: "验收记录",
+            sha256: null,
+            version: 1,
+            uploadedAt: activityAt,
+            updatedAt: activityAt,
+          },
+        ],
+      },
+    });
+  });
   await page.goto("/login");
   await page.getByLabel("邮箱或手机号").fill("employee@example.test");
   await page.getByLabel("密码").fill("Employee-Secure-Password-123!");
@@ -4608,6 +4672,74 @@ test("employees see shared-project last work activity without coworkers' duratio
   await expect(page.getByText("完成移动端流程核对")).toBeVisible();
   await expect(page.getByText(/最后工作.*09.*04.*13:00/).first()).toBeVisible();
   await expect(page.getByText(/2\s*小时/)).toHaveCount(0);
+  await page.getByRole("button", { name: /陈一.*完成移动端流程核对/ }).click();
+  await expect.poll(() => evidenceFetched).toBe(true);
+  await expect(page.getByText("完整验收证据：移动端、平板端与桌面端均已逐项核对。", { exact: true })).toBeVisible();
+});
+
+test("approvers can inspect full work details and authorized evidence before deciding", async ({
+  page,
+}) => {
+  await mockAuthenticatedWorkspace(page);
+  const sessionId = "00000000-0000-4000-8000-000000000095";
+  await page.route("**/api/approvals?**", (route) =>
+    route.fulfill({
+      json: {
+        items: [{
+          request: {
+            id: "00000000-0000-4000-8000-000000000096",
+            priority: "normal",
+            requestedAt: "2026-09-04T06:00:00.000Z",
+            anomalyFlags: [],
+          },
+          session: {
+            id: sessionId,
+            content: "提交客户研究报告",
+            result: "已形成最终版",
+            startAt: "2026-09-04T01:00:00.000Z",
+            endAt: "2026-09-04T05:00:00.000Z",
+            netSeconds: 14_400,
+            version: 3,
+          },
+          requesterOrgUnitId: null,
+        }],
+      },
+    }),
+  );
+  await page.route("**/api/work-session-corrections/pending?**", (route) =>
+    route.fulfill({ json: { items: [] } }),
+  );
+  await page.route(`**/api/work-sessions/${sessionId}/attachments`, (route) =>
+    route.fulfill({
+      json: {
+        items: [{
+          id: "00000000-0000-4000-8000-000000000097",
+          kind: "url",
+          status: "available",
+          originalName: null,
+          externalUrl: "https://example.test/research/final",
+          mimeType: null,
+          sizeBytes: null,
+          visibility: "management_only",
+          note: "最终交付地址",
+          sha256: null,
+          version: 1,
+          uploadedAt: "2026-09-04T05:01:00.000Z",
+          updatedAt: "2026-09-04T05:01:00.000Z",
+        }],
+      },
+    }),
+  );
+
+  await page.goto("/login");
+  await page.getByLabel("邮箱或手机号").fill("owner@example.test");
+  await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+  await page.goto("/approvals");
+  await page.getByRole("button", { name: "查看工作与附件" }).click();
+  await expect(page.getByText("已形成最终版", { exact: true })).toBeVisible();
+  await expect(page.getByRole("link", { name: "https://example.test/research/final" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "批准" })).toBeVisible();
 });
 
 test("account switching never reuses another member's analytics cache", async ({
@@ -4697,7 +4829,16 @@ test("account switching never reuses another member's analytics cache", async ({
         flow: { nodes: [], links: [] },
         anomalies: [],
         projectHealth: [],
-        forecast: { observed: [], predicted: [] },
+        forecast: {
+          observed: [],
+          predicted: [],
+          model: {
+            method: "weekday_recent_robust_v2",
+            sampleDays: 0,
+            nonZeroSampleDays: 0,
+            horizonDays: 0,
+          },
+        },
         funnel: [
           { stage: "已记录", count },
           { stage: "已提交", count: 0 },

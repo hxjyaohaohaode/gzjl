@@ -15,7 +15,10 @@ import {
   workSessions,
   workTypes,
 } from "@workbench/db/schema";
-import type { PermissionGrant } from "@workbench/shared";
+import {
+  forecastCalendarSeries,
+  type PermissionGrant,
+} from "@workbench/shared";
 
 export interface AnalyticsActor {
   organizationId: string;
@@ -84,38 +87,15 @@ export function forecastDailySeries(
   lowerSeconds: number;
   upperSeconds: number;
 }> {
-  if (observed.length < 3 || horizonDays <= 0) return [];
-  const sample = observed.slice(-Math.min(28, observed.length));
-  const mean = sample.reduce((total, item) => total + item.seconds, 0) / sample.length;
-  const variance =
-    sample.reduce((total, item) => total + (item.seconds - mean) ** 2, 0) /
-    sample.length;
-  const deviation = Math.sqrt(variance);
-  const xMean = (sample.length - 1) / 2;
-  const covariance = sample.reduce(
-    (total, item, index) => total + (index - xMean) * (item.seconds - mean),
-    0,
-  );
-  const xVariance = sample.reduce(
-    (total, _item, index) => total + (index - xMean) ** 2,
-    0,
-  );
-  const rawSlope = xVariance > 0 ? covariance / xVariance : 0;
-  // A short noisy period must not create an explosive projection. Capping the
-  // daily slope to 35% of the observed mean keeps this an explanatory planning
-  // band rather than an invented performance claim.
-  const slopeLimit = Math.max(mean * 0.35, 3_600);
-  const slope = Math.max(-slopeLimit, Math.min(slopeLimit, rawSlope));
-  const lastDate = observed.at(-1)!.date;
-  return Array.from({ length: Math.min(14, horizonDays) }, (_, index) => {
-    const seconds = Math.max(0, mean + slope * (xMean + index + 1));
-    return {
-      date: addDateKey(lastDate, index + 1),
-      seconds: Math.round(seconds),
-      lowerSeconds: Math.round(Math.max(0, seconds - deviation)),
-      upperSeconds: Math.round(seconds + deviation),
-    };
-  });
+  return forecastCalendarSeries(
+    observed.map((item) => ({ date: item.date, value: item.seconds })),
+    horizonDays,
+  ).points.map((item) => ({
+    date: item.date,
+    seconds: item.value,
+    lowerSeconds: item.lowerValue,
+    upperSeconds: item.upperValue,
+  }));
 }
 
 export interface TimeInterval {
@@ -255,6 +235,7 @@ export class AnalyticsService {
     from: Date,
     to: Date,
     filters: AnalyticsFilters = {},
+    forecastDays = 7,
   ) {
     const [organization] = await this.db
       .select({ timezone: organizations.timezone })
@@ -547,7 +528,17 @@ export class AnalyticsService {
       })
       .sort((left, right) => right.blockedNodes - left.blockedNodes || right.seconds - left.seconds);
     const dailyObserved = fillDailySeries(from, to, timezone, byDay);
-    const forecast = forecastDailySeries(dailyObserved);
+    const forecastResult = forecastCalendarSeries(
+      dailyObserved.map((item) => ({ date: item.date, value: item.seconds })),
+      forecastDays,
+    );
+    const forecast = forecastResult.points.map((item) => ({
+      date: item.date,
+      seconds: item.value,
+      lowerSeconds: item.lowerValue,
+      upperSeconds: item.upperValue,
+      confidence: item.confidence,
+    }));
     const availableMembers = new Map<string, string>();
     const availableProjects = new Map<string, string>();
     const availableWorkTypes = new Map<string, string>();
@@ -575,9 +566,10 @@ export class AnalyticsService {
         approvalStates: [...new Set(baseRows.map((row) => row.session.approvalStatus))],
         sourceTypes: [...new Set(baseRows.map((row) => row.session.source))],
       },
-      byDay: [...byDay]
-        .map(([date, seconds]) => ({ date, seconds: Math.round(seconds) }))
-        .sort((left, right) => left.date.localeCompare(right.date)),
+      // Keep zero-work calendar days. Omitting them made the x-axis spacing
+      // misleading and caused both the heatmap and forecast to visually join
+      // work performed several days apart as if it were consecutive.
+      byDay: dailyObserved,
       byMember: [...byMember.values()]
         .map((item) => ({ ...item, seconds: Math.round(item.seconds) }))
         .sort((a, b) => b.seconds - a.seconds),
@@ -608,7 +600,16 @@ export class AnalyticsService {
         .map((item) => ({ ...item, seconds: Math.round(item.seconds) }))
         .sort((a, b) => b.count - a.count),
       projectHealth,
-      forecast: { observed: dailyObserved, predicted: forecast },
+      forecast: {
+        observed: dailyObserved,
+        predicted: forecast,
+        model: {
+          method: forecastResult.method,
+          sampleDays: forecastResult.sampleDays,
+          nonZeroSampleDays: forecastResult.nonZeroSampleDays,
+          horizonDays: forecast.length,
+        },
+      },
       funnel: [
         { stage: "已记录", count: includedSessionIds.size },
         { stage: "已提交", count: rows.filter((row) => includedSessionIds.has(row.session.id) && row.session.submissionStatus === "submitted").length },

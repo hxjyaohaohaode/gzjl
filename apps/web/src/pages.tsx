@@ -286,6 +286,27 @@ function formatDateTime(value: string | Date): string {
     second: "2-digit",
   }).format(new Date(value));
 }
+function addDateKey(value: string, days: number): string {
+  const date = new Date(`${value}T12:00:00.000Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+function shortDateKey(value: string): string {
+  const [, month = "", day = ""] = value.split("-");
+  return `${Number(month)}月${Number(day)}日`;
+}
+function payrollWeekRangeLabel(week: {
+  weekStartDate: string;
+  startsOn: string;
+  endsOn: string;
+}): string {
+  const naturalEnd = addDateKey(week.weekStartDate, 6);
+  const clipped =
+    week.startsOn !== week.weekStartDate || week.endsOn !== naturalEnd;
+  return `${shortDateKey(week.startsOn)}—${shortDateKey(week.endsOn)}${
+    clipped ? "（月界截断）" : ""
+  }`;
+}
 function formatDuration(seconds: number): string {
   const safeSeconds = Math.max(0, Math.floor(seconds));
   const hours = Math.floor(safeSeconds / 3600);
@@ -4232,6 +4253,92 @@ function EvidencePanel({ sessionId }: { sessionId: string }) {
   );
 }
 
+function ReadOnlyEvidenceList({ sessionId }: { sessionId: string }) {
+  const evidence = useQuery({
+    queryKey: ["evidence", sessionId],
+    queryFn: () =>
+      api<{ items: EvidenceAttachment[] }>(
+        `/api/work-sessions/${sessionId}/attachments`,
+      ),
+  });
+  const download = useMutation({
+    mutationFn: (id: string) =>
+      api<{ url: string }>(`/api/attachments/${id}/download`),
+    onSuccess: (data) => window.open(data.url, "_blank", "noopener,noreferrer"),
+  });
+  if (evidence.isPending) {
+    return <p className="evidence-readonly-state">正在读取附件证据…</p>;
+  }
+  if (evidence.error) return <ErrorMessage error={evidence.error} />;
+  if (!evidence.data?.items.length) {
+    return <p className="evidence-readonly-state">该记录没有你可见的附件证据。</p>;
+  }
+  return (
+    <div className="evidence-readonly-list" aria-label="完整附件证据">
+      {evidence.data.items.map((item) => (
+        <article className="evidence-readonly-item" key={item.id}>
+          <div className="evidence-readonly-head">
+            <div className="min-w-0">
+              <strong>
+                {item.kind === "file"
+                  ? item.originalName || "未命名文件"
+                  : item.kind === "url"
+                    ? "外部链接证据"
+                    : "文字证据"}
+              </strong>
+              <small>
+                {item.kind === "file"
+                  ? `${formatFileSize(item.sizeBytes)} · ${item.mimeType ?? "未知格式"}`
+                  : item.kind === "url"
+                    ? "点击后在新窗口打开"
+                    : "完整文字内容"}
+                {item.note ? ` · ${item.note}` : ""}
+              </small>
+            </div>
+            {item.kind === "file" ? (
+              <Button
+                disabled={download.isPending || item.status !== "available"}
+                onClick={() => download.mutate(item.id)}
+                size="compact"
+                variant="secondary"
+              >
+                <FileText size={14} />
+                查看文件
+              </Button>
+            ) : item.kind === "url" && item.externalUrl ? (
+              <a
+                className="evidence-readonly-link"
+                href={item.externalUrl}
+                rel="noreferrer"
+                target="_blank"
+              >
+                打开链接 <ExternalLink size={14} />
+              </a>
+            ) : null}
+          </div>
+          {item.kind === "url" && item.externalUrl ? (
+            <a
+              className="evidence-readonly-url"
+              href={item.externalUrl}
+              rel="noreferrer"
+              target="_blank"
+            >
+              {item.externalUrl}
+            </a>
+          ) : null}
+          {item.kind === "text" ? (
+            <p className="evidence-readonly-text">{item.textContent || "（空内容）"}</p>
+          ) : null}
+          {item.kind === "file" && item.status !== "available" ? (
+            <p className="evidence-readonly-state">该文件尚未完成安全核验，暂不可下载。</p>
+          ) : null}
+        </article>
+      ))}
+      <ErrorMessage error={download.error} />
+    </div>
+  );
+}
+
 function TimerProjectAssociation({
   projects,
   projectId,
@@ -6543,6 +6650,7 @@ function readCorrectionProposal(snapshot: unknown): {
 
 export function ApprovalsPage() {
   const queryClient = useQueryClient();
+  const [expandedApprovalId, setExpandedApprovalId] = useState<string | null>(null);
   const [correctionInputs, setCorrectionInputs] = useState<
     Record<string, { amount: string; reviewNote: string }>
   >({});
@@ -6677,7 +6785,21 @@ export function ApprovalsPage() {
                       </p>
                     ) : null}
                   </div>
-                  <div className="flex gap-2">
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      aria-expanded={expandedApprovalId === item.request.id}
+                      onClick={() =>
+                        setExpandedApprovalId((current) =>
+                          current === item.request.id ? null : item.request.id,
+                        )
+                      }
+                      variant="ghost"
+                    >
+                      <Paperclip size={17} />
+                      {expandedApprovalId === item.request.id
+                        ? "收起附件"
+                        : "查看工作与附件"}
+                    </Button>
                     <Button
                       disabled={decide.isPending}
                       onClick={() =>
@@ -6705,6 +6827,17 @@ export function ApprovalsPage() {
                     </Button>
                   </div>
                 </div>
+                {expandedApprovalId === item.request.id ? (
+                  <section className="approval-evidence-detail" aria-label="待审核工作与附件详情">
+                    <dl className="approval-fact-grid">
+                      <div><dt>工作内容</dt><dd>{item.session.content}</dd></div>
+                      <div><dt>工作结果</dt><dd>{item.session.result || "未填写"}</dd></div>
+                      <div><dt>完整时段</dt><dd>{formatDateTime(item.session.startAt)} – {formatDateTime(item.session.endAt)}</dd></div>
+                      <div><dt>净工时</dt><dd>{formatDuration(item.session.netSeconds)}</dd></div>
+                    </dl>
+                    <ReadOnlyEvidenceList sessionId={item.session.id} />
+                  </section>
+                ) : null}
               </CardContent>
             </Card>
           ))}
@@ -6920,12 +7053,20 @@ interface PayrollOwnResponse {
     pendingSeconds: number;
     weeklyBonusSeconds: number;
     weeklyBonusEstimatedSeconds: number;
+    projectedWeeklyBonusSeconds: number;
     weeklyBonusRule: null | {
       thresholdSeconds: number;
       rewardSeconds: number;
     };
     estimatedAmount: string;
     projectedPeriodAmount: string;
+    projection: {
+      method: "weekday_recent_robust_v2";
+      sampleDays: number;
+      nonZeroSampleDays: number;
+      horizonDays: number;
+      includesKnownFutureRecords: boolean;
+    };
     calculationBreakdown: {
       confirmedWorkAmount: string;
       pendingWorkAmount: string;
@@ -6962,8 +7103,14 @@ interface PayrollOwnResponse {
       bonusSeconds: number;
       weeklyBonusSeconds: number;
       weeklyBonusEstimatedSeconds: number;
+      projectedBonusSeconds: number;
+      projectedDailyAmount: string;
       actualCumulativeAmount: string | null;
       projectedCumulativeAmount: string;
+      projectedLowerCumulativeAmount: string;
+      projectedUpperCumulativeAmount: string;
+      forecastConfidence: "low" | "medium" | "high" | null;
+      forecastSource: "actual" | "known_future" | "calendar_model";
       forecast: boolean;
     }>;
     includesPending: boolean;
@@ -7908,7 +8055,7 @@ export function PayrollPage({ me }: { me: Me }) {
       animationDuration: 180,
       animationDurationUpdate: 160,
       legend: { bottom: 0, textStyle: { color: chartPalette.textMuted } },
-      grid: { left: 66, right: 50, top: 24, bottom: 62, containLabel: false },
+      grid: { left: 18, right: 18, top: 24, bottom: 62, containLabel: true },
       tooltip: {
         trigger: "axis",
         confine: true,
@@ -7962,6 +8109,20 @@ export function PayrollPage({ me }: { me: Me }) {
           itemStyle: { color: hexWithAlpha(chartPalette.warning, 0.62), borderRadius: [5, 5, 0, 0] },
         },
         {
+          type: "bar",
+          name: "未来日薪预测",
+          stack: "daily-pay",
+          data: timeline.map((item) =>
+            item.forecast ? Number(item.projectedDailyAmount) : null,
+          ),
+          itemStyle: {
+            color: hexWithAlpha(chartPalette.accent, 0.28),
+            borderRadius: [5, 5, 0, 0],
+            borderColor: hexWithAlpha(chartPalette.accent, 0.7),
+            borderWidth: 1,
+          },
+        },
+        {
           type: "line",
           name: "每日有效工时",
           yAxisIndex: 1,
@@ -7977,7 +8138,9 @@ export function PayrollPage({ me }: { me: Me }) {
           yAxisIndex: 1,
           symbol: "diamond",
           symbolSize: 8,
-          data: timeline.map((item) => item.bonusSeconds / 3_600),
+          data: timeline.map(
+            (item) => (item.bonusSeconds + item.projectedBonusSeconds) / 3_600,
+          ),
           lineStyle: { color: chartPalette.warning, width: 2 },
           itemStyle: { color: chartPalette.warning },
         },
@@ -7989,19 +8152,47 @@ export function PayrollPage({ me }: { me: Me }) {
     const timeline = preview?.salaryTimeline ?? [];
     const currency = preview?.currency ?? "CNY";
     const lastActualIndex = timeline.findLastIndex((item) => !item.forecast);
+    const futureBandBase = timeline.map((item, index) =>
+      item.forecast || index === lastActualIndex
+        ? Number(item.projectedLowerCumulativeAmount)
+        : null,
+    );
+    const futureBandWidth = timeline.map((item, index) =>
+      item.forecast || index === lastActualIndex
+        ? Math.max(
+            0,
+            Number(item.projectedUpperCumulativeAmount) -
+              Number(item.projectedLowerCumulativeAmount),
+          )
+        : null,
+    );
     return {
       animationDuration: 180,
       animationDurationUpdate: 160,
       legend: { bottom: 0, textStyle: { color: chartPalette.textMuted } },
-      grid: { left: 68, right: 20, top: 24, bottom: 62 },
+      grid: { left: 18, right: 16, top: 24, bottom: 62, containLabel: true },
       tooltip: {
         trigger: "axis",
         confine: true,
         backgroundColor: chartPalette.surface,
         borderColor: chartPalette.border,
         textStyle: { color: chartPalette.text },
-        valueFormatter: (value: string | number) =>
-          formatPayrollMoney(currency, String(value)),
+        formatter: (items: Array<{ dataIndex?: number }>) => {
+          const index = Number(items[0]?.dataIndex ?? 0);
+          const item = timeline[index];
+          if (!item) return "";
+          if (!item.forecast) {
+            return `${item.date}<br/>已发生累计：${formatPayrollMoney(currency, item.actualCumulativeAmount ?? "0")}`;
+          }
+          return [
+            item.date,
+            `${item.forecastSource === "known_future" ? "已录入未来记录" : "模型预测"}：${formatPayrollMoney(currency, item.projectedCumulativeAmount)}`,
+            `预测区间：${formatPayrollMoney(currency, item.projectedLowerCumulativeAmount)} – ${formatPayrollMoney(currency, item.projectedUpperCumulativeAmount)}`,
+            item.projectedBonusSeconds
+              ? `预计在本日触发周奖励：${formatDuration(item.projectedBonusSeconds)}`
+              : null,
+          ].filter(Boolean).join("<br/>");
+        },
       },
       xAxis: {
         type: "category",
@@ -8038,7 +8229,29 @@ export function PayrollPage({ me }: { me: Me }) {
         },
         {
           type: "line",
-          name: "未来趋势预测",
+          name: "预测区间下界",
+          stack: "salary-confidence",
+          symbol: "none",
+          silent: true,
+          data: futureBandBase,
+          lineStyle: { opacity: 0 },
+          areaStyle: { opacity: 0 },
+          tooltip: { show: false },
+        },
+        {
+          type: "line",
+          name: "预测区间",
+          stack: "salary-confidence",
+          symbol: "none",
+          silent: true,
+          data: futureBandWidth,
+          lineStyle: { opacity: 0 },
+          areaStyle: { color: hexWithAlpha(chartPalette.warning, 0.2) },
+          tooltip: { show: false },
+        },
+        {
+          type: "line",
+          name: "月末趋势预测",
           smooth: 0.2,
           showSymbol: false,
           data: timeline.map((item, index) =>
@@ -8064,6 +8277,7 @@ export function PayrollPage({ me }: { me: Me }) {
   const activeSalaryDays = (livePreview?.salaryTimeline ?? []).filter(
     (day) => day.workedSeconds + day.bonusSeconds > 0,
   );
+  const monthEndForecast = livePreview?.salaryTimeline.at(-1) ?? null;
   return (
     <>
       <PageHeader
@@ -8073,11 +8287,11 @@ export function PayrollPage({ me }: { me: Me }) {
       {!isPayrollManager && livePreview ? (
         <section className="mb-4 grid gap-2.5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4" aria-label="本月实时薪资">
           <Card><CardContent><StatusLine label={livePreview.planType === "hourly" || livePreview.planType === "hybrid" ? "基础时薪" : compensationTypeLabels[livePreview.planType]} value={`${money(livePreview.currency, livePreview.baseAmount)}${livePreview.planType === "hourly" || livePreview.planType === "hybrid" ? " / 小时" : ""}`} /></CardContent></Card>
-          <Card><CardContent><StatusLine label="本周已记录工时" value={formatDuration(livePreview.currentWeek?.totalSeconds ?? 0)} /><p className="mt-1 text-xs text-[var(--text-muted)]">已批准 {formatDuration(livePreview.currentWeek?.approvedSeconds ?? 0)}{livePreview.currentWeek?.pendingSeconds ? ` · 待审核 ${formatDuration(livePreview.currentWeek.pendingSeconds)}` : ""}</p></CardContent></Card>
+          <Card><CardContent><StatusLine label={livePreview.currentWeek ? `本周已记录工时 · ${payrollWeekRangeLabel(livePreview.currentWeek)}` : "本周已记录工时"} value={formatDuration(livePreview.currentWeek?.totalSeconds ?? 0)} /><p className="mt-1 text-xs text-[var(--text-muted)]">已批准 {formatDuration(livePreview.currentWeek?.approvedSeconds ?? 0)}{livePreview.currentWeek?.pendingSeconds ? ` · 待审核 ${formatDuration(livePreview.currentWeek.pendingSeconds)}` : ""}</p></CardContent></Card>
           <Card><CardContent><StatusLine label="本月总工时" value={formatDuration(livePreview.approvedSeconds + livePreview.pendingSeconds)} /><p className="mt-1 text-xs text-[var(--text-muted)]">已批准 {formatDuration(livePreview.approvedSeconds)}{livePreview.pendingSeconds ? ` · 待审核 ${formatDuration(livePreview.pendingSeconds)}` : ""}</p></CardContent></Card>
-          <Card><CardContent><StatusLine label="周奖励工时" value={formatDuration(livePreview.weeklyBonusSeconds)} /><p className="mt-1 text-xs text-[var(--text-muted)]">{livePreview.weeklyBonusEstimatedSeconds ? `另有 ${formatDuration(livePreview.weeklyBonusEstimatedSeconds)} 待审核预估` : "仅显示已达到阈值的确认奖励"}</p></CardContent></Card>
+          <Card><CardContent><StatusLine label={livePreview.weeklyBonusEstimatedSeconds ? "周奖励工时（含预估）" : "周奖励工时"} value={formatDuration(livePreview.weeklyBonusSeconds + livePreview.weeklyBonusEstimatedSeconds)} /><p className="mt-1 text-xs text-[var(--text-muted)]">已确认 {formatDuration(livePreview.weeklyBonusSeconds)}{livePreview.weeklyBonusEstimatedSeconds ? ` · 待审核预估 ${formatDuration(livePreview.weeklyBonusEstimatedSeconds)}` : ""}</p></CardContent></Card>
           <Card><CardContent><StatusLine label="本月实时预估" value={money(livePreview.currency, livePreview.estimatedAmount)} /></CardContent></Card>
-          <Card><CardContent><StatusLine label="月末趋势预测" value={money(livePreview.currency, livePreview.projectedPeriodAmount)} /></CardContent></Card>
+          <Card><CardContent><StatusLine label="月末趋势预测" value={money(livePreview.currency, livePreview.projectedPeriodAmount)} />{monthEndForecast ? <p className="mt-1 text-xs text-[var(--text-muted)]">合理区间 {money(livePreview.currency, monthEndForecast.projectedLowerCumulativeAmount)} – {money(livePreview.currency, monthEndForecast.projectedUpperCumulativeAmount)}{livePreview.projectedWeeklyBonusSeconds ? ` · 另预计奖励 ${formatDuration(livePreview.projectedWeeklyBonusSeconds)}` : ""}</p> : null}</CardContent></Card>
           <Card><CardContent><StatusLine label="预计发薪" value={formatDateTime(livePreview.period.cutoffAt)} /></CardContent></Card>
         </section>
       ) : null}
@@ -8116,7 +8330,12 @@ export function PayrollPage({ me }: { me: Me }) {
           </Card>
           <Card className="analytics-chart-card">
             <CardHeader><h2 className="font-bold">薪资发展与月末预测</h2><Badge tone="warning">预测不锁定</Badge></CardHeader>
-            <CardContent><AnalyticsChart ariaLabel="本月薪资累计与未来预测" option={liveForecastOption} /></CardContent>
+            <CardContent>
+              <AnalyticsChart ariaLabel="本月薪资累计与未来预测" option={liveForecastOption} />
+              <p className="salary-forecast-note">
+                按星期模式、近 14 日加权趋势与历史波动预测；已保留未来已录入记录，并把预计周奖励单独加入。样本 {livePreview?.projection.sampleDays ?? 0} 天（有工时 {livePreview?.projection.nonZeroSampleDays ?? 0} 天），预测 {livePreview?.projection.horizonDays ?? 0} 天。
+              </p>
+            </CardContent>
           </Card>
         </section>
       ) : null}
@@ -8127,7 +8346,7 @@ export function PayrollPage({ me }: { me: Me }) {
             <CardContent className="divide-y divide-[var(--border)]">
               {activeSalaryWeeks.map((week) => (
                 <div className="grid gap-1 py-3 text-sm sm:grid-cols-[1fr_auto] sm:items-center" key={`${week.weekStartDate}-${week.startsOn}`}>
-                  <div><p className="font-semibold">{week.startsOn.slice(5)} 至 {week.endsOn.slice(5)}</p><p className="text-xs text-[var(--text-muted)]">已批准 {formatDuration(week.approvedSeconds)}{week.pendingSeconds ? ` · 待审核 ${formatDuration(week.pendingSeconds)}` : ""}</p></div>
+                  <div><p className="font-semibold">{payrollWeekRangeLabel(week)}</p><p className="text-xs text-[var(--text-muted)]">已批准 {formatDuration(week.approvedSeconds)}{week.pendingSeconds ? ` · 待审核 ${formatDuration(week.pendingSeconds)}` : ""}</p></div>
                   <p className="font-semibold tabular-nums">总工时 {formatDuration(week.approvedSeconds + week.pendingSeconds)}{week.weeklyBonusSeconds ? ` · 奖励 ${formatDuration(week.weeklyBonusSeconds)}` : week.weeklyBonusEstimatedSeconds ? ` · 可能奖励 ${formatDuration(week.weeklyBonusEstimatedSeconds)}` : ""}</p>
                 </div>
               ))}
@@ -8850,6 +9069,7 @@ interface TeamActivityResponse {
   members: TeamMemberActivity[];
 }
 export function TeamPage() {
+  const [expandedActivityId, setExpandedActivityId] = useState<string | null>(null);
   const activity = useQuery({
     queryKey: ["team-activity"],
     queryFn: () =>
@@ -8907,24 +9127,54 @@ export function TeamPage() {
               </div>
               {activity.data.items.map((item) => (
                 <article className="team-activity-item" key={item.id}>
-                  <span className="team-member-avatar">
-                    {item.displayName.slice(0, 1)}
-                  </span>
-                  <div className="min-w-0">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <strong>{item.displayName}</strong>
-                      {item.projectName ? (
-                        <Badge tone="info">{item.projectName}</Badge>
-                      ) : null}
-                    </div>
-                    <p>{item.content}</p>
-                    {item.result ? <small>结果：{item.result}</small> : null}
-                    <time dateTime={item.activityAt}>
-                      {item.hasFullTiming && item.startAt && item.netSeconds !== null
-                        ? `${formatDateTime(item.startAt)} · ${formatDuration(item.netSeconds)}`
-                        : `最后工作 ${formatDateTime(item.activityAt)}`}
-                    </time>
-                  </div>
+                  <button
+                    aria-expanded={expandedActivityId === item.id}
+                    className="team-activity-summary"
+                    onClick={() =>
+                      setExpandedActivityId((current) =>
+                        current === item.id ? null : item.id,
+                      )
+                    }
+                    type="button"
+                  >
+                    <span className="team-member-avatar">
+                      {item.displayName.slice(0, 1)}
+                    </span>
+                    <span className="min-w-0 flex-1 text-left">
+                      <span className="flex flex-wrap items-center gap-2">
+                        <strong>{item.displayName}</strong>
+                        {item.projectName ? (
+                          <Badge tone="info">{item.projectName}</Badge>
+                        ) : null}
+                      </span>
+                      <span className="team-activity-content">{item.content}</span>
+                      {item.result ? <small>结果：{item.result}</small> : null}
+                      <time dateTime={item.activityAt}>
+                        {item.hasFullTiming && item.startAt && item.netSeconds !== null
+                          ? `${formatDateTime(item.startAt)} · ${formatDuration(item.netSeconds)}`
+                          : `最后工作 ${formatDateTime(item.activityAt)}`}
+                      </time>
+                    </span>
+                    <ChevronRight
+                      className={expandedActivityId === item.id ? "rotate-90" : ""}
+                      size={17}
+                    />
+                  </button>
+                  {expandedActivityId === item.id ? (
+                    <section className="team-activity-detail" aria-label="完整工作与附件详情">
+                      <dl className="approval-fact-grid">
+                        <div><dt>工作内容</dt><dd>{item.content}</dd></div>
+                        <div><dt>工作结果</dt><dd>{item.result || "未填写"}</dd></div>
+                        {item.hasFullTiming && item.startAt && item.endAt ? (
+                          <div><dt>完整时段</dt><dd>{formatDateTime(item.startAt)} – {formatDateTime(item.endAt)}</dd></div>
+                        ) : null}
+                        {item.netSeconds !== null ? (
+                          <div><dt>净工时</dt><dd>{formatDuration(item.netSeconds)}</dd></div>
+                        ) : null}
+                      </dl>
+                      <ReadOnlyEvidenceList sessionId={item.id} />
+                    </section>
+                  ) : null}
                 </article>
               ))}
             </section>
@@ -9013,7 +9263,14 @@ interface AnalyticsSummary {
       seconds: number;
       lowerSeconds: number;
       upperSeconds: number;
+      confidence: "low" | "medium" | "high";
     }>;
+    model: {
+      method: "weekday_recent_robust_v2";
+      sampleDays: number;
+      nonZeroSampleDays: number;
+      horizonDays: number;
+    };
   };
   availableFilters: {
     members: Array<{ id: string; label: string }>;
@@ -9337,10 +9594,15 @@ function BackgroundExportPanel({ from, to }: { from: Date; to: Date }) {
 
 export function AnalyticsPage({ me }: { me: Me }) {
   const [days, setDays] = useState(30);
+  const [forecastDays, setForecastDays] = useState(7);
   const [filters, setFilters] = useState<AnalyticsFilterState>(emptyAnalyticsFilters);
   const [filtersOpen, setFiltersOpen] = useState(false);
   const chartPalette = useChartPalette();
-  const to = useMemo(() => new Date(), []);
+  const to = useMemo(() => {
+    const timezone = getOrganizationTimezone();
+    const localToday = toZonedInputValue(new Date(), timezone).slice(0, 10);
+    return zonedInputToDate(`${addDateKey(localToday, 1)}T00:00:00`, timezone);
+  }, []);
   const from = useMemo(
     () => new Date(to.getTime() - days * 86_400_000),
     [days, to],
@@ -9349,6 +9611,7 @@ export function AnalyticsPage({ me }: { me: Me }) {
     const query = new URLSearchParams({
       from: from.toISOString(),
       to: to.toISOString(),
+      forecastDays: String(forecastDays),
     });
     if (filters.projectId) query.set("projectIds", filters.projectId);
     if (filters.workTypeId) query.set("workTypeIds", filters.workTypeId);
@@ -9357,9 +9620,9 @@ export function AnalyticsPage({ me }: { me: Me }) {
     if (filters.approvalState) query.set("approvalStates", filters.approvalState);
     if (filters.sourceType) query.set("sourceTypes", filters.sourceType);
     return `/api/analytics/summary?${query.toString()}`;
-  }, [filters, from, to]);
+  }, [filters, forecastDays, from, to]);
   const analytics = useQuery({
-    queryKey: ["analytics", me.user.membershipId, days, filters],
+    queryKey: ["analytics", me.user.membershipId, days, forecastDays, filters],
     queryFn: () => api<AnalyticsSummary>(analyticsUrl),
     placeholderData: (previous) => previous,
     refetchOnWindowFocus: false,
@@ -9371,7 +9634,7 @@ export function AnalyticsPage({ me }: { me: Me }) {
   const trendOption = useMemo<EChartsCoreOption>(
     () => ({
       animationDuration: 240,
-      grid: { left: 52, right: 20, top: 24, bottom: 56 },
+      grid: { left: 20, right: 18, top: 24, bottom: 56, containLabel: true },
       tooltip: {
         trigger: "axis",
         confine: true,
@@ -9398,7 +9661,12 @@ export function AnalyticsPage({ me }: { me: Me }) {
         splitLine: { lineStyle: { color: chartPalette.grid } },
       },
       dataZoom: [
-        { type: "inside", filterMode: "none" },
+        {
+          type: "inside",
+          filterMode: "none",
+          startValue: Math.max(0, (analytics.data?.byDay.length ?? 0) - 30),
+          endValue: Math.max(0, (analytics.data?.byDay.length ?? 1) - 1),
+        },
         {
           type: "slider",
           height: 18,
@@ -9426,7 +9694,7 @@ export function AnalyticsPage({ me }: { me: Me }) {
   const projectOption = useMemo<EChartsCoreOption>(
     () => ({
       animationDuration: 240,
-      grid: { left: 110, right: 24, top: 20, bottom: 24 },
+      grid: { left: 16, right: 20, top: 20, bottom: 24, containLabel: true },
       tooltip: {
         trigger: "axis",
         confine: true,
@@ -9473,7 +9741,7 @@ export function AnalyticsPage({ me }: { me: Me }) {
   );
   const rhythmOption = useMemo<EChartsCoreOption>(() => ({
     animationDuration: 240,
-    grid: { left: 52, right: 18, top: 32, bottom: 40 },
+    grid: { left: 18, right: 14, top: 32, bottom: 40, containLabel: true },
     tooltip: { trigger: "axis", confine: true, backgroundColor: chartPalette.surface, borderColor: chartPalette.border, textStyle: { color: chartPalette.text }, valueFormatter: (value: string | number) => formatDuration(Number(value)) },
     xAxis: { type: "category", data: analytics.data?.byHour.map((item) => `${String(item.hour).padStart(2, "0")}:00`) ?? [], axisLabel: { interval: 2, color: chartPalette.textSubtle }, axisLine: { lineStyle: { color: chartPalette.border } } },
     yAxis: { type: "value", min: 0, max: durationAxisMax(analytics.data?.byHour.map((item) => item.seconds) ?? []), axisLabel: { formatter: formatDurationAxis, color: chartPalette.textSubtle }, splitLine: { lineStyle: { color: chartPalette.grid } } },
@@ -9501,7 +9769,7 @@ export function AnalyticsPage({ me }: { me: Me }) {
     series: [{ type: "funnel", left: "4%", width: "68%", top: 18, bottom: 18, minSize: "24%", maxSize: "100%", sort: "none", gap: 4, label: { color: chartPalette.text, formatter: "{b} {c}" }, labelLine: { length: 8 }, itemStyle: { borderColor: chartPalette.surface, borderWidth: 2 }, data: analytics.data?.funnel.map((item) => ({ name: item.stage, value: item.count })) ?? [] }],
   }), [analytics.data?.funnel, chartPalette]);
   const forecastOption = useMemo<EChartsCoreOption>(() => {
-    const observed = analytics.data?.forecast.observed ?? [];
+    const observed = (analytics.data?.forecast.observed ?? []).slice(-42);
     const predicted = analytics.data?.forecast.predicted ?? [];
     const labels = [...observed.map((item) => item.date.slice(5)), ...predicted.map((item) => item.date.slice(5))];
     const observedPadding = Array.from({ length: observed.length }, () => null);
@@ -9515,7 +9783,7 @@ export function AnalyticsPage({ me }: { me: Me }) {
       animationDuration: 240,
       animationDurationUpdate: 180,
       legend: { bottom: 2, textStyle: { color: chartPalette.textMuted } },
-      grid: { left: 54, right: 18, top: 24, bottom: 66 },
+      grid: { left: 18, right: 14, top: 24, bottom: 66, containLabel: true },
       tooltip: {
         trigger: "axis",
         confine: true,
@@ -9532,6 +9800,7 @@ export function AnalyticsPage({ me }: { me: Me }) {
             prediction.date,
             `程序预测：${formatDuration(prediction.seconds)}`,
             `合理区间：${formatDuration(prediction.lowerSeconds)} – ${formatDuration(prediction.upperSeconds)}`,
+            `置信等级：${prediction.confidence === "high" ? "较高" : prediction.confidence === "medium" ? "中等" : "较低"}`,
           ].join("<br/>");
         },
       },
@@ -9551,7 +9820,23 @@ export function AnalyticsPage({ me }: { me: Me }) {
         axisLabel: { formatter: formatDurationAxis, color: chartPalette.textSubtle },
         splitLine: { lineStyle: { color: chartPalette.grid } },
       },
-      dataZoom: [{ type: "inside", filterMode: "none" }],
+      dataZoom: [
+        {
+          type: "inside",
+          filterMode: "none",
+          startValue: Math.max(0, labels.length - Math.max(forecastDays + 21, 28)),
+          endValue: Math.max(0, labels.length - 1),
+        },
+        {
+          type: "slider",
+          filterMode: "none",
+          height: 16,
+          bottom: 12,
+          borderColor: "transparent",
+          fillerColor: hexWithAlpha(chartPalette.accent, 0.12),
+          handleStyle: { color: chartPalette.accent },
+        },
+      ],
       series: [
         {
           type: "line",
@@ -9592,7 +9877,7 @@ export function AnalyticsPage({ me }: { me: Me }) {
         },
       ],
     };
-  }, [analytics.data?.forecast, chartPalette]);
+  }, [analytics.data?.forecast, chartPalette, forecastDays]);
   const sankeyOption = useMemo<EChartsCoreOption>(() => {
     const nodes = analytics.data?.flow.nodes ?? [];
     const labels = new Map(nodes.map((node) => [node.id, node.label]));
@@ -9687,7 +9972,7 @@ export function AnalyticsPage({ me }: { me: Me }) {
   }, [analytics.data?.projectWorkTypes, chartPalette]);
   const memberOption = useMemo<EChartsCoreOption>(() => ({
     animationDuration: 220,
-    grid: { left: 92, right: 18, top: 18, bottom: 28 },
+    grid: { left: 16, right: 14, top: 18, bottom: 28, containLabel: true },
     tooltip: { trigger: "axis", confine: true, axisPointer: { type: "shadow" }, backgroundColor: chartPalette.surface, borderColor: chartPalette.border, textStyle: { color: chartPalette.text }, valueFormatter: (value: string | number) => formatDuration(Number(value)) },
     xAxis: { type: "value", min: 0, max: durationAxisMax(analytics.data?.byMember.map((item) => item.seconds) ?? []), axisLabel: { formatter: formatDurationAxis, color: chartPalette.textSubtle }, splitLine: { lineStyle: { color: chartPalette.grid } } },
     yAxis: { type: "category", data: analytics.data?.byMember.map((item) => item.displayName) ?? [], axisLabel: { width: 76, overflow: "truncate", color: chartPalette.textMuted }, axisLine: { lineStyle: { color: chartPalette.border } } },
@@ -9697,7 +9982,7 @@ export function AnalyticsPage({ me }: { me: Me }) {
     animationDuration: 240,
     animationDurationUpdate: 180,
     legend: { bottom: 0, textStyle: { color: chartPalette.textMuted } },
-    grid: { left: 54, right: 54, top: 28, bottom: 68 },
+    grid: { left: 16, right: 18, top: 28, bottom: 68, containLabel: true },
     tooltip: {
       trigger: "axis",
       confine: true,
@@ -9722,7 +10007,7 @@ export function AnalyticsPage({ me }: { me: Me }) {
   }), [analytics.data?.projectHealth, chartPalette]);
   const anomalyOption = useMemo<EChartsCoreOption>(() => ({
     animationDuration: 220,
-    grid: { left: 150, right: 20, top: 18, bottom: 28 },
+    grid: { left: 16, right: 14, top: 18, bottom: 28, containLabel: true },
     tooltip: { trigger: "axis", confine: true, axisPointer: { type: "shadow" }, backgroundColor: chartPalette.surface, borderColor: chartPalette.border, textStyle: { color: chartPalette.text } },
     xAxis: { type: "value", minInterval: 1, axisLabel: { color: chartPalette.textSubtle }, splitLine: { lineStyle: { color: chartPalette.grid } } },
     yAxis: { type: "category", data: analytics.data?.anomalies.map((item) => item.category === "net_duration_under_60_seconds" ? "不足 1 分钟" : item.category === "gross_duration_over_16_hours" ? "超过 16 小时" : item.category) ?? [], axisLabel: { width: 136, overflow: "truncate", color: chartPalette.textMuted }, axisLine: { lineStyle: { color: chartPalette.border } } },
@@ -9841,7 +10126,7 @@ export function AnalyticsPage({ me }: { me: Me }) {
                 </div>
               </CardHeader>
               <CardContent>
-                {analytics.data.byDay.length ? (
+                {analytics.data.totals.totalSeconds > 0 ? (
                   <AnalyticsChart
                     ariaLabel="每日净工时趋势图"
                     option={trendOption}
@@ -9891,7 +10176,7 @@ export function AnalyticsPage({ me }: { me: Me }) {
             </Card>
             <Card className="analytics-chart-card">
               <CardHeader><div><p className="app-section-label">日历密度</p><h2 className="mt-2 font-extrabold tracking-[-0.025em]">工作记录热力图</h2></div></CardHeader>
-              <CardContent>{analytics.data.byDay.length ? <AnalyticsChart ariaLabel="工作记录日历热力图" option={heatmapOption} /> : <EmptyState description="该区间没有工时。" icon={<CalendarDays />} title="没有热力数据" />}</CardContent>
+              <CardContent>{analytics.data.totals.totalSeconds > 0 ? <AnalyticsChart ariaLabel="工作记录日历热力图" option={heatmapOption} /> : <EmptyState description="该区间没有工时。" icon={<CalendarDays />} title="没有热力数据" />}</CardContent>
             </Card>
             <Card className="analytics-chart-card">
               <CardHeader><div><p className="app-section-label">审核结构</p><h2 className="mt-2 font-extrabold tracking-[-0.025em]">审核状态分布</h2></div></CardHeader>
@@ -9905,11 +10190,26 @@ export function AnalyticsPage({ me }: { me: Me }) {
           <div className="mt-5 grid gap-5 xl:grid-cols-2">
             <Card className="analytics-chart-card">
               <CardHeader>
-                <div><p className="app-section-label">趋势边界</p><h2 className="mt-2 font-extrabold tracking-[-0.025em]">事实与未来 7 天预测</h2></div>
-                <Badge tone="warning">预测不参与薪资或考核</Badge>
+                <div><p className="app-section-label">趋势边界</p><h2 className="mt-2 font-extrabold tracking-[-0.025em]">事实与未来 {forecastDays} 天预测</h2></div>
+                <select
+                  aria-label="预测范围"
+                  className={`${fieldClass} min-h-9 w-auto py-1`}
+                  onChange={(event) => setForecastDays(Number(event.target.value))}
+                  value={forecastDays}
+                >
+                  <option value={3}>未来 3 天</option>
+                  <option value={7}>未来 7 天</option>
+                  <option value={14}>未来 14 天</option>
+                  <option value={30}>未来 30 天</option>
+                </select>
               </CardHeader>
               <CardContent>
-                {analytics.data.forecast.predicted.length ? <AnalyticsChart ariaLabel="事实与未来工时预测带" option={forecastOption} /> : <EmptyState description="至少需要 3 个自然日才能计算预测区间。" icon={<CalendarDays />} title="样本不足" />}
+                {analytics.data.forecast.predicted.length ? <AnalyticsChart ariaLabel="事实与未来工时预测带" option={forecastOption} /> : <EmptyState description="至少需要 3 个自然日且其中 2 天有工时，才能计算预测区间。" icon={<CalendarDays />} title="样本不足" />}
+                {analytics.data.forecast.predicted.length ? (
+                  <p className="analytics-model-note">
+                    按同星期、工作日/周末模式、近 14 日加权趋势与历史波动计算；零工时日也属于真实样本。样本 {analytics.data.forecast.model.sampleDays} 天（有工时 {analytics.data.forecast.model.nonZeroSampleDays} 天）。预测仅供排期，不进入薪资或考核。
+                  </p>
+                ) : null}
               </CardContent>
             </Card>
             <Card className="analytics-chart-card">
