@@ -9593,6 +9593,7 @@ function BackgroundExportPanel({ from, to }: { from: Date; to: Date }) {
 }
 
 export function AnalyticsPage({ me }: { me: Me }) {
+  const queryClient = useQueryClient();
   const [days, setDays] = useState(30);
   const [forecastDays, setForecastDays] = useState(7);
   const [filters, setFilters] = useState<AnalyticsFilterState>(emptyAnalyticsFilters);
@@ -9631,6 +9632,24 @@ export function AnalyticsPage({ me }: { me: Me }) {
   const activeFilterCount = Object.values(filters).filter(Boolean).length;
   const changeFilter = (key: keyof AnalyticsFilterState, value: string) =>
     setFilters((current) => ({ ...current, [key]: value }));
+  const clearFilters = () => {
+    // Returning to the cached unfiltered key inside staleTime used to skip the
+    // server reconciliation request. Mark that exact snapshot stale first so
+    // clearing filters always observes facts that arrived while a filtered
+    // view was open, without reintroducing periodic chart refetch flicker.
+    void queryClient.invalidateQueries({
+      exact: true,
+      queryKey: [
+        "analytics",
+        me.user.membershipId,
+        days,
+        forecastDays,
+        emptyAnalyticsFilters,
+      ],
+      refetchType: "none",
+    });
+    setFilters(emptyAnalyticsFilters);
+  };
   const trendOption = useMemo<EChartsCoreOption>(
     () => ({
       animationDuration: 240,
@@ -10038,7 +10057,7 @@ export function AnalyticsPage({ me }: { me: Me }) {
               <option value={90}>最近 90 天</option>
             </select>
             {activeFilterCount ? (
-              <Button onClick={() => setFilters(emptyAnalyticsFilters)} size="compact" variant="secondary">
+              <Button onClick={clearFilters} size="compact" variant="secondary">
                 清除筛选 · {activeFilterCount}
               </Button>
             ) : null}
