@@ -33,6 +33,11 @@ import {
 } from "lucide-react";
 import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
+import {
+  calculateNodeScheduleProgress,
+  calculatePlannedHours,
+  calculateProjectProgressSummary,
+} from "@workbench/shared";
 import { Badge, Button, Card, CardContent, cn } from "@workbench/ui";
 
 import { api, type Me } from "./api.js";
@@ -53,6 +58,7 @@ type NodeType = "phase" | "milestone" | "task" | "deliverable" | "decision";
 type ProjectProgressMode =
   | "manual"
   | "weighted_children"
+  | "time_weighted_children"
   | "milestone_based";
 
 interface Project {
@@ -285,6 +291,7 @@ function progressModeLabel(mode: ProjectProgressMode | undefined): string {
     {
       manual: "手动进度",
       weighted_children: "按子节点权重",
+      time_weighted_children: "按工期 × 权重",
       milestone_based: "按里程碑",
     }[mode ?? "manual"] ?? "手动进度"
   );
@@ -304,22 +311,23 @@ function safeProgress(value: string | number): number {
 }
 
 function summarizeProgress(nodes: ProjectNode[]): number {
-  if (!nodes.length) return 0;
-  const roots = nodes.filter(
-    (node) => !node.parentId || !nodes.some((candidate) => candidate.id === node.parentId),
+  return Math.round(projectProgressSummary(nodes).executionProgress);
+}
+
+function projectProgressSummary(nodes: ProjectNode[]) {
+  return calculateProjectProgressSummary(
+    nodes.map((node) => ({
+      id: node.id,
+      parentId: node.parentId,
+      type: node.type,
+      status: node.status,
+      progress: safeProgress(node.progress),
+      progressMode: node.progressMode,
+      weight: Math.max(0, Number(node.weight) || 0),
+      startAt: node.startAt,
+      dueAt: node.dueAt,
+    })),
   );
-  const basis = roots.length ? roots : nodes;
-  const weighted = basis.reduce(
-    (summary, node) => {
-      const weight = Math.max(0, Number(node.weight) || 1);
-      return {
-        total: summary.total + safeProgress(node.progress) * weight,
-        weight: summary.weight + weight,
-      };
-    },
-    { total: 0, weight: 0 },
-  );
-  return Math.round(weighted.weight ? weighted.total / weighted.weight : 0);
 }
 
 function flattenProjectTree(nodes: ProjectNode[]): Array<{ node: ProjectNode; depth: number }> {
@@ -737,7 +745,10 @@ function ProjectOverview({
   branches: Branch[];
   assigneesByNodeId: Map<string, ProjectNodeAssignee[]>;
 }) {
-  const progress = summarizeProgress(nodes);
+  const summary = projectProgressSummary(nodes);
+  const progress = Math.round(summary.executionProgress);
+  const scheduleProgress =
+    summary.scheduleProgress === null ? null : Math.round(summary.scheduleProgress);
   const contributors = new Set(
     [...assigneesByNodeId.values()].flat().map((assignee) => assignee.membershipId),
   ).size;
@@ -756,8 +767,13 @@ function ProjectOverview({
         </span>
       </div>
       <div className="project-overview-progress">
-        <span><small>项目结构进度</small><strong>{progress}%</strong></span>
+        <span><small>实际完成进度</small><strong>{progress}%</strong></span>
         <i><span style={{ width: `${progress}%`, background: project.color }} /></i>
+        <span className="project-overview-schedule-label">
+          <small>计划时间进度 · {summary.scheduledLeafCount}/{summary.leafCount} 个末级节点已排期</small>
+          <strong>{scheduleProgress === null ? "未排期" : `${scheduleProgress}%`}</strong>
+        </span>
+        <i className="is-schedule"><span style={{ width: `${scheduleProgress ?? 0}%` }} /></i>
       </div>
       <dl className="project-overview-stats">
         <div><dt><GitBranch size={14} />活跃分支</dt><dd>{branches.length}</dd></div>
@@ -1344,6 +1360,8 @@ function NodeInspectorContent({
   const visibleContributors = new Set(
     linkedWorkItems.map((session) => session.membershipId),
   ).size;
+  const scheduleProgress = calculateNodeScheduleProgress(node);
+  const plannedHours = calculatePlannedHours(node);
   return (
     <aside
       aria-label={`${node.title} 节点详情`}
@@ -1397,6 +1415,11 @@ function NodeInspectorContent({
             <span>
               进度：{Number(node.progress)}% · {progressModeLabel(node.progressMode)}
             </span>
+            <span>
+              时间进度：{scheduleProgress === null ? "未形成完整排期" : `${Math.round(scheduleProgress)}%`}
+              {plannedHours === null ? "" : ` · 计划 ${formatProjectWorkDuration(Math.round(plannedHours * 3600))}`}
+            </span>
+            <span>基础权重：{Number(node.weight)}</span>
           </div>
         </section>
         <section className="project-inspector-section">
@@ -1605,6 +1628,7 @@ function NodeInspectorContent({
                     >
                       <option value="manual">手动填写</option>
                       <option value="weighted_children">按子节点权重汇总</option>
+                      <option value="time_weighted_children">按子节点工期 × 权重汇总</option>
                       <option value="milestone_based">按里程碑汇总</option>
                     </select>
                   </Field>
@@ -1631,7 +1655,7 @@ function NodeInspectorContent({
                     />
                   </Field>
                   <Field
-                    hint="用于上级的“按子节点权重”进度汇总；设为 0 时不参与加权。"
+                    hint="用于上级汇总；“工期 × 权重”模式还会乘以计划工时，设为 0 时不参与。"
                     label="节点权重"
                   >
                     <input
@@ -2003,6 +2027,12 @@ export function ProjectDetailPage({ me }: { me: Me }) {
   const [branchSourceNodeId, setBranchSourceNodeId] = useState<string | null>(null);
   const [showBranchManager, setShowBranchManager] = useState(false);
   const [showRecycle, setShowRecycle] = useState(false);
+  const [relationSourceNodeId, setRelationSourceNodeId] = useState<string | null>(null);
+  const [quickRelation, setQuickRelation] = useState<{
+    targetNodeId: string;
+    type: ProjectEdgeType;
+    label: string;
+  }>({ targetNodeId: "", type: "depends_on", label: "" });
   const [nodeForm, setNodeForm] = useState({
     parentId: "",
     branchId: "",
@@ -2069,7 +2099,7 @@ export function ProjectDetailPage({ me }: { me: Me }) {
         activeBranches.find((branch) => branch.isDefault) ?? activeBranches[0];
       const branch = nodeForm.branchId || defaultBranch?.id;
       if (!branch) throw new Error("该项目没有可写入的分支。");
-      return api(`/api/projects/${projectId}/nodes`, {
+      return api<{ node: ProjectNode }>(`/api/projects/${projectId}/nodes`, {
         method: "POST",
         body: {
           branchId: branch,
@@ -2093,7 +2123,7 @@ export function ProjectDetailPage({ me }: { me: Me }) {
         },
       });
     },
-    onSuccess: async () => {
+    onSuccess: async (result: { node: ProjectNode }) => {
       setShowCreate(false);
       setNodeForm((current) => ({
         ...current,
@@ -2106,6 +2136,28 @@ export function ProjectDetailPage({ me }: { me: Me }) {
         dueAt: "",
       }));
       await refresh();
+      setSelectedNodeId(result.node.id);
+    },
+  });
+  const createQuickRelation = useMutation({
+    mutationFn: () => {
+      if (!relationSourceNodeId) throw new Error("请先选择关系起点。");
+      return api(`/api/projects/${projectId}/edges`, {
+        method: "POST",
+        body: {
+          sourceNodeId: relationSourceNodeId,
+          targetNodeId: quickRelation.targetNodeId,
+          type: quickRelation.type,
+          label: quickRelation.label.trim() || undefined,
+        },
+      });
+    },
+    onSuccess: async () => {
+      const sourceId = relationSourceNodeId;
+      setRelationSourceNodeId(null);
+      setQuickRelation({ targetNodeId: "", type: "depends_on", label: "" });
+      await refresh();
+      setSelectedNodeId(sourceId);
     },
   });
   const createBranch = useMutation({
@@ -2248,6 +2300,7 @@ export function ProjectDetailPage({ me }: { me: Me }) {
           // hierarchy edge on the all-structure canvas so the work line is
           // visually attached to the node it came from.
           parentId: sourceVisible ? branch.sourceNodeId! : node.parentId,
+          branchName: branch?.name ?? "未知分支",
           assignees: assigneesByNodeId.get(node.id) ?? [],
         };
       }),
@@ -2255,6 +2308,8 @@ export function ProjectDetailPage({ me }: { me: Me }) {
   );
   const selected = allNodes.find((node) => node.id === selectedNodeId) ?? null;
   const branchSource = allNodes.find((node) => node.id === branchSourceNodeId) ?? null;
+  const relationSource =
+    allNodes.find((node) => node.id === relationSourceNodeId) ?? null;
   const openCreateFor = (parentId: string | null, targetBranchId?: string) => {
     setNodeForm((current) => ({
       ...current,
@@ -2462,12 +2517,23 @@ export function ProjectDetailPage({ me }: { me: Me }) {
             selectedBranchId={branchId}
           />
           {showCreate && canManage ? (
-            <Card className="project-create-panel">
+            <>
+            <button
+              aria-label="关闭新增节点"
+              className="project-composer-backdrop"
+              onClick={() => setShowCreate(false)}
+              type="button"
+            />
+            <Card aria-modal="true" className="project-create-panel project-quick-composer" role="dialog">
               <CardContent>
                 <div className="project-create-panel-head">
                   <div>
                     <p className="app-section-label">新增节点</p>
-                    <h2>将新的项目事实放进正确的分支、层级与时间范围。</h2>
+                    <h2>
+                      {nodeForm.parentId
+                        ? `在“${allNodes.find((node) => node.id === nodeForm.parentId)?.title ?? "当前节点"}”下新增`
+                        : "新增项目根节点"}
+                    </h2>
                   </div>
                   <Button
                     onClick={() => setShowCreate(false)}
@@ -2487,6 +2553,7 @@ export function ProjectDetailPage({ me }: { me: Me }) {
                   <Field label="节点标题">
                     <input
                       className={fieldClass}
+                      autoFocus
                       maxLength={300}
                       onChange={(event) =>
                         setNodeForm({ ...nodeForm, title: event.target.value })
@@ -2521,6 +2588,9 @@ export function ProjectDetailPage({ me }: { me: Me }) {
                       ))}
                     </select>
                   </Field>
+                  <details className="project-create-advanced">
+                    <summary>更多设置：进度、权重、分支、排期与说明</summary>
+                    <div>
                   <Field label="进度计算">
                     <select
                       className={fieldClass}
@@ -2535,6 +2605,7 @@ export function ProjectDetailPage({ me }: { me: Me }) {
                     >
                       <option value="manual">手动填写</option>
                       <option value="weighted_children">按子节点权重汇总</option>
+                      <option value="time_weighted_children">按子节点工期 × 权重汇总</option>
                       <option value="milestone_based">按里程碑汇总</option>
                     </select>
                   </Field>
@@ -2562,7 +2633,7 @@ export function ProjectDetailPage({ me }: { me: Me }) {
                     />
                   </Field>
                   <Field
-                    hint="用于上级的加权汇总；0 表示不参与。"
+                    hint="用于上级汇总；工期权重模式会再乘以计划工时。0 表示不参与。"
                     label="节点权重"
                   >
                     <input
@@ -2663,6 +2734,8 @@ export function ProjectDetailPage({ me }: { me: Me }) {
                       />
                     </Field>
                   </div>
+                    </div>
+                  </details>
                   <div className="flex items-end justify-end">
                     <Button
                       disabled={createNode.isPending || !nodeForm.title.trim()}
@@ -2675,6 +2748,83 @@ export function ProjectDetailPage({ me }: { me: Me }) {
                 <ErrorMessage error={createNode.error} />
               </CardContent>
             </Card>
+            </>
+          ) : null}
+          {relationSource && canManage ? (
+            <>
+              <button
+                aria-label="关闭新增关联"
+                className="project-composer-backdrop"
+                onClick={() => setRelationSourceNodeId(null)}
+                type="button"
+              />
+              <Card aria-modal="true" className="project-create-panel project-quick-composer" role="dialog">
+                <CardContent>
+                  <div className="project-create-panel-head">
+                    <div>
+                      <p className="app-section-label">快捷关联</p>
+                      <h2>从“{relationSource.title}”建立一条清晰关系</h2>
+                    </div>
+                    <Button onClick={() => setRelationSourceNodeId(null)} size="compact" variant="ghost">
+                      关闭
+                    </Button>
+                  </div>
+                  <form
+                    className="project-quick-relation-form"
+                    onSubmit={(event) => {
+                      event.preventDefault();
+                      createQuickRelation.mutate();
+                    }}
+                  >
+                    <Field label="关系含义">
+                      <select
+                        aria-label="关系含义"
+                        className={fieldClass}
+                        onChange={(event) => setQuickRelation({ ...quickRelation, type: event.target.value as ProjectEdgeType })}
+                        value={quickRelation.type}
+                      >
+                        <option value="depends_on">当前节点依赖目标节点</option>
+                        <option value="blocks">当前节点阻塞目标节点</option>
+                        <option value="relates_to">与目标节点关联（无方向）</option>
+                        <option value="replaces">当前节点替代目标节点</option>
+                        <option value="merges_into">当前节点合并到目标节点</option>
+                      </select>
+                    </Field>
+                    <Field label="目标节点">
+                      <select
+                        aria-label="目标节点"
+                        autoFocus
+                        className={fieldClass}
+                        onChange={(event) => setQuickRelation({ ...quickRelation, targetNodeId: event.target.value })}
+                        required
+                        value={quickRelation.targetNodeId}
+                      >
+                        <option value="">选择目标节点</option>
+                        {allNodes
+                          .filter((node) => node.id !== relationSource.id)
+                          .map((node) => (
+                            <option key={node.id} value={node.id}>{node.title}</option>
+                          ))}
+                      </select>
+                    </Field>
+                    <Field hint="可选" label="说明">
+                      <input
+                        className={fieldClass}
+                        maxLength={160}
+                        onChange={(event) => setQuickRelation({ ...quickRelation, label: event.target.value })}
+                        placeholder="例如：完成后才能开始"
+                        value={quickRelation.label}
+                      />
+                    </Field>
+                    <Button disabled={createQuickRelation.isPending || !quickRelation.targetNodeId} type="submit">
+                      <Link2 size={15} />
+                      {createQuickRelation.isPending ? "正在连接…" : "创建关联"}
+                    </Button>
+                  </form>
+                  <ErrorMessage error={createQuickRelation.error} />
+                </CardContent>
+              </Card>
+            </>
           ) : null}
           {showTeam ? (
             <ProjectTeamPanel
@@ -3132,6 +3282,14 @@ export function ProjectDetailPage({ me }: { me: Me }) {
                     edges={visibleEdges}
                     nodes={visibleCanvasNodes}
                     onAddChild={(node) => openCreateFor(node.id, node.branchId)}
+                    onAddRelation={(node) => {
+                      setSelectedNodeId(null);
+                      setRelationSourceNodeId(node.id);
+                    }}
+                    onDeriveBranch={(node) => {
+                      setBranchSourceNodeId(node.id);
+                      setShowBranch(true);
+                    }}
                     onNodeSelect={setSelectedNodeId}
                     selectedNodeId={selectedNodeId}
                   />

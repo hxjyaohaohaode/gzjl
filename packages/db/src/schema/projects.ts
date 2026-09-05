@@ -47,6 +47,7 @@ export const projectNodeStatusEnum = pgEnum("project_node_status", [
 export const progressModeEnum = pgEnum("progress_mode", [
   "manual",
   "weighted_children",
+  "time_weighted_children",
   "milestone_based",
 ]);
 export const projectEdgeTypeEnum = pgEnum("project_edge_type", [

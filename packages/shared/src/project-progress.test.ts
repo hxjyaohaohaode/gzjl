@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   calculateDerivedProjectProgress,
+  calculateNodeScheduleProgress,
+  calculateProjectProgressSummary,
   ProjectProgressCycleError,
   type ProjectProgressNode,
 } from "./project-progress.js";
@@ -89,5 +91,66 @@ describe("calculateDerivedProjectProgress", () => {
         node({ id: "b", parentId: "a", progress: 20 }),
       ]),
     ).toThrow(ProjectProgressCycleError);
+  });
+
+  it("weights children by both explicit priority and planned duration", () => {
+    const result = calculateDerivedProjectProgress([
+      node({ id: "root", progressMode: "time_weighted_children" }),
+      node({
+        id: "short",
+        parentId: "root",
+        progress: 100,
+        weight: 1,
+        startAt: "2026-09-01T00:00:00.000Z",
+        dueAt: "2026-09-02T00:00:00.000Z",
+      }),
+      node({
+        id: "long",
+        parentId: "root",
+        progress: 0,
+        weight: 2,
+        startAt: "2026-09-01T00:00:00.000Z",
+        dueAt: "2026-09-03T00:00:00.000Z",
+      }),
+    ]);
+
+    expect(result.get("root")).toBe(20);
+  });
+});
+
+describe("project schedule progress", () => {
+  it("keeps elapsed schedule progress separate from execution progress", () => {
+    const scheduledNode = node({
+      id: "scheduled",
+      progress: 25,
+      startAt: "2026-09-01T00:00:00.000Z",
+      dueAt: "2026-09-11T00:00:00.000Z",
+    });
+    expect(
+      calculateNodeScheduleProgress(
+        scheduledNode,
+        "2026-09-06T00:00:00.000Z",
+      ),
+    ).toBe(50);
+
+    const summary = calculateProjectProgressSummary(
+      [
+        scheduledNode,
+        node({
+          id: "longer",
+          progress: 75,
+          weight: 1,
+          startAt: "2026-09-01T00:00:00.000Z",
+          dueAt: "2026-09-21T00:00:00.000Z",
+        }),
+      ],
+      "2026-09-06T00:00:00.000Z",
+    );
+    expect(summary).toEqual({
+      executionProgress: 58.33,
+      scheduleProgress: 33.33,
+      leafCount: 2,
+      scheduledLeafCount: 2,
+    });
   });
 });

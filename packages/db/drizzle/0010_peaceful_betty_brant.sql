@@ -1,0 +1,1 @@
+ALTER TYPE "public"."progress_mode" ADD VALUE 'time_weighted_children' BEFORE 'milestone_based';

@@ -9,6 +9,10 @@ import {
   type Edge,
   type Node,
 } from "@xyflow/react";
+import {
+  calculateNodeScheduleProgress,
+  calculatePlannedHours,
+} from "@workbench/shared";
 import { useMemo } from "react";
 import type { CSSProperties } from "react";
 
@@ -21,12 +25,21 @@ interface ProjectCanvasNode {
   branchId: string;
   parentId: string | null;
   title: string;
+  description?: string | null;
   status: string;
   progress: string;
+  weight?: string;
   version: number;
   sortOrder: number;
   type: string;
-  progressMode?: "manual" | "weighted_children" | "milestone_based";
+  progressMode?:
+    | "manual"
+    | "weighted_children"
+    | "time_weighted_children"
+    | "milestone_based";
+  startAt?: string | null;
+  dueAt?: string | null;
+  branchName?: string;
   assignees?: Array<{
     membershipId: string;
     displayName: string;
@@ -66,6 +79,8 @@ function nodeTypeLabel(type: string): string {
 function progressModeLabel(mode: ProjectCanvasNode["progressMode"]): string {
   return mode === "weighted_children"
     ? "子节点"
+    : mode === "time_weighted_children"
+      ? "工期 × 权重"
     : mode === "milestone_based"
       ? "里程碑"
       : "手动";
@@ -108,7 +123,7 @@ function layoutTree(nodes: ProjectCanvasNode[]): Map<string, { x: number; y: num
     const known = positions.get(id);
     if (known) return known;
     if (visiting.has(id)) {
-      const cycleFallback = { x: nextColumn * 292, y: depth * 188 };
+      const cycleFallback = { x: nextColumn * 306, y: depth * 236 };
       nextColumn += 1;
       return cycleFallback;
     }
@@ -117,8 +132,8 @@ function layoutTree(nodes: ProjectCanvasNode[]): Map<string, { x: number; y: num
     const childPositions = childIds.map((childId) => visit(childId, depth + 1));
     const x = childPositions.length
       ? (childPositions[0]!.x + childPositions[childPositions.length - 1]!.x) / 2
-      : nextColumn++ * 292;
-    const position = { x, y: depth * 188 };
+      : nextColumn++ * 306;
+    const position = { x, y: depth * 236 };
     positions.set(id, position);
     visiting.delete(id);
     return position;
@@ -145,6 +160,8 @@ export default function ProjectCanvas({
   canManage = false,
   selectedNodeId,
   onAddChild,
+  onAddRelation,
+  onDeriveBranch,
   onNodeSelect,
 }: {
   nodes: ProjectCanvasNode[];
@@ -153,6 +170,8 @@ export default function ProjectCanvas({
   canManage?: boolean;
   selectedNodeId?: string | null;
   onAddChild?: (node: ProjectCanvasNode) => void;
+  onAddRelation?: (node: ProjectCanvasNode) => void;
+  onDeriveBranch?: (node: ProjectCanvasNode) => void;
   onNodeSelect?: (nodeId: string) => void;
 }) {
   const projectAccent = accessibleAccent(accent);
@@ -180,6 +199,8 @@ export default function ProjectCanvas({
             ? "var(--success)"
             : projectAccent;
       const childCount = directChildCount.get(node.id) ?? 0;
+      const scheduleProgress = calculateNodeScheduleProgress(node);
+      const plannedHours = calculatePlannedHours(node);
       return {
         id: node.id,
         ariaLabel: `${node.title}，${statusLabel(node.status)}，进度 ${progress}%${childCount ? `，${childCount} 个直接子节点` : "，末级节点"}`,
@@ -191,17 +212,35 @@ export default function ProjectCanvas({
               style={{ "--node-accent": nodeAccent } as CSSProperties}
             >
               <div className="project-flow-node-top">
-                <span className="project-flow-node-kind">{nodeTypeLabel(node.type)}</span>
+                <span className="project-flow-node-kind">
+                  {nodeTypeLabel(node.type)} · {node.branchName ?? "项目节点"}
+                </span>
                 <strong className="text-[0.74rem] tabular-nums text-[var(--node-accent)]">
                   {progress}%
                 </strong>
               </div>
               <p className="project-flow-node-title">{node.title}</p>
+              {node.description ? (
+                <p className="project-flow-node-description">{node.description}</p>
+              ) : null}
               <div className="project-flow-node-progress">
                 <span style={{ width: `${progress}%` }} />
               </div>
+              <div className="project-flow-node-schedule">
+                <span>
+                  <small>时间进度</small>
+                  <strong>{scheduleProgress === null ? "未排期" : `${Math.round(scheduleProgress)}%`}</strong>
+                </span>
+                <i><span style={{ width: `${scheduleProgress ?? 0}%` }} /></i>
+                <small>
+                  {node.startAt || node.dueAt
+                    ? `${node.startAt ? new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric" }).format(new Date(node.startAt)) : "未定"} – ${node.dueAt ? new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric" }).format(new Date(node.dueAt)) : "未定"}`
+                    : "尚未设置开始与截止时间"}
+                  {plannedHours === null ? "" : ` · ${Math.max(1, Math.round(plannedHours / 24))} 天`}
+                </small>
+              </div>
               <div className="project-flow-node-assignees">
-                <span>{progressModeLabel(node.progressMode)}</span>
+                <span>{progressModeLabel(node.progressMode)} · 权重 {Number(node.weight ?? 1)}</span>
                 {node.assignees?.length ? (
                   <span
                     aria-label={`协作者：${node.assignees.map((assignee) => assignee.displayName).join("、")}`}
@@ -237,20 +276,39 @@ export default function ProjectCanvas({
                 </span>
                 <span>
                   v{node.version}
-                  {canManage ? (
-                    <button
-                      aria-label={`在 ${node.title} 下新建子节点`}
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        onAddChild?.(node);
-                      }}
-                      type="button"
-                    >
-                      ＋ 子节点
-                    </button>
-                  ) : null}
                 </span>
               </div>
+              {canManage ? (
+                <div className="project-flow-node-actions" aria-label={`${node.title} 快捷操作`}>
+                  <button
+                    aria-label={`在 ${node.title} 下新建子节点`}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      onAddChild?.(node);
+                    }}
+                    title="新增下级节点"
+                    type="button"
+                  >＋</button>
+                  <button
+                    aria-label={`从 ${node.title} 建立节点关联`}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      onAddRelation?.(node);
+                    }}
+                    title="建立节点关联"
+                    type="button"
+                  >↗</button>
+                  <button
+                    aria-label={`从 ${node.title} 派生工作线`}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      onDeriveBranch?.(node);
+                    }}
+                    title="派生并行工作线"
+                    type="button"
+                  >⑂</button>
+                </div>
+              ) : null}
             </div>
           ),
         },
@@ -258,19 +316,37 @@ export default function ProjectCanvas({
           background: "transparent",
           border: "none",
           padding: 0,
-          width: 226,
+          width: 246,
         },
         sourcePosition: Position.Bottom,
         targetPosition: Position.Top,
       };
     });
-  }, [canManage, nodes, onAddChild, projectAccent, selectedNodeId]);
+  }, [
+    canManage,
+    nodes,
+    onAddChild,
+    onAddRelation,
+    onDeriveBranch,
+    projectAccent,
+    selectedNodeId,
+  ]);
 
   const flowEdges = useMemo<Edge[]>(
     () => {
       const visibleNodeIds = new Set(nodes.map((node) => node.id));
+      const relationPairKeys = new Set(
+        edges.map((edge) =>
+          [edge.sourceNodeId, edge.targetNodeId].sort().join("::"),
+        ),
+      );
       const hierarchy = nodes
-        .filter((node) => node.parentId && visibleNodeIds.has(node.parentId))
+        .filter(
+          (node) =>
+            node.parentId &&
+            visibleNodeIds.has(node.parentId) &&
+            !relationPairKeys.has([node.id, node.parentId].sort().join("::")),
+        )
         .map((node) => ({
           id: `hierarchy-${node.id}`,
           source: node.parentId!,
@@ -281,7 +357,14 @@ export default function ProjectCanvas({
             strokeWidth: 1.8,
           },
         }));
-      const relationships = edges.map((edge) => {
+      const seenRelationships = new Set<string>();
+      const relationships = edges.flatMap((edge) => {
+        const symmetricKey =
+          edge.type === "relates_to"
+            ? `${edge.type}:${[edge.sourceNodeId, edge.targetNodeId].sort().join("::")}`
+            : `${edge.type}:${edge.sourceNodeId}:${edge.targetNodeId}`;
+        if (seenRelationships.has(symmetricKey)) return [];
+        seenRelationships.add(symmetricKey);
         const blocks = edge.type === "blocks";
         const structural =
           edge.type === "replaces" || edge.type === "merges_into";
@@ -290,17 +373,27 @@ export default function ProjectCanvas({
           : structural
             ? "var(--text-muted)"
             : projectAccent;
-        return {
+        const source =
+          edge.type === "depends_on" ? edge.targetNodeId : edge.sourceNodeId;
+        const target =
+          edge.type === "depends_on" ? edge.sourceNodeId : edge.targetNodeId;
+        return [{
           id: `relation-${edge.id}`,
-          source: edge.sourceNodeId,
-          target: edge.targetNodeId,
+          source,
+          target,
           label: edge.label ?? relationshipLabel(edge.type),
           animated: blocks,
-          markerEnd: { type: MarkerType.ArrowClosed, color },
+          ...(edge.type === "relates_to"
+            ? {}
+            : { markerEnd: { type: MarkerType.ArrowClosed, color } }),
           style: {
             stroke: color,
             strokeWidth: blocks ? 2.2 : structural ? 1.25 : 1.65,
-            strokeDasharray: structural ? "5 5" : undefined,
+            ...(edge.type === "relates_to"
+              ? { strokeDasharray: "3 5" }
+              : structural
+                ? { strokeDasharray: "5 5" }
+                : {}),
             opacity: blocks ? 0.92 : structural ? 0.58 : 0.76,
           },
           labelStyle: {
@@ -309,7 +402,7 @@ export default function ProjectCanvas({
             fontWeight: 700,
           },
           labelBgStyle: { fill: "var(--surface)", fillOpacity: 0.94 },
-        };
+        }];
       });
       return [...hierarchy, ...relationships];
     },
@@ -331,7 +424,6 @@ export default function ProjectCanvas({
         nodesDraggable={false}
         minZoom={0.15}
         maxZoom={2.5}
-        onlyRenderVisibleElements
         onNodeClick={(_, node) => onNodeSelect?.(node.id)}
         panOnDrag
         panOnScroll

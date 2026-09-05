@@ -71,6 +71,13 @@
       "when": 1788514771967,
       "tag": "0009_spooky_skin",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1788626873902,
+      "tag": "0010_peaceful_betty_brant",
+      "breakpoints": true
     }
   ]
 }

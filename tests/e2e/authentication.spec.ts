@@ -2925,6 +2925,90 @@ test("project tree renders a pannable canvas with a list fallback", async ({
   await expect(page.getByText(/任务 · .*v1/)).toBeVisible();
 });
 
+test("project canvas card actions create children and relations without reopening the full editor", async ({
+  page,
+}) => {
+  await mockAuthenticatedWorkspace(page);
+  const projectId = "00000000-0000-4000-8000-000000000004";
+  const rootNodeId = "00000000-0000-4000-8000-000000000006";
+  const childNodeId = "00000000-0000-4000-8000-000000000007";
+  let nodeCreated = false;
+  let relationCreated = false;
+  await page.route(`**/api/projects/${projectId}/nodes`, async (route) => {
+    expect(route.request().method()).toBe("POST");
+    expect(route.request().postDataJSON()).toMatchObject({
+      branchId: "00000000-0000-4000-8000-000000000005",
+      parentId: rootNodeId,
+      type: "task",
+      title: "直接从连接点新增",
+    });
+    nodeCreated = true;
+    await route.fulfill({
+      status: 201,
+      json: {
+        node: {
+          id: "00000000-0000-4000-8000-000000000019",
+          branchId: "00000000-0000-4000-8000-000000000005",
+          parentId: rootNodeId,
+          type: "task",
+          title: "直接从连接点新增",
+          status: "not_started",
+          progress: "0",
+          progressMode: "manual",
+          weight: "1",
+          version: 1,
+          sortOrder: 2,
+          startAt: null,
+          dueAt: null,
+        },
+      },
+    });
+  });
+  await page.route(`**/api/projects/${projectId}/edges`, async (route) => {
+    expect(route.request().method()).toBe("POST");
+    expect(route.request().postDataJSON()).toEqual({
+      sourceNodeId: rootNodeId,
+      targetNodeId: childNodeId,
+      type: "depends_on",
+    });
+    relationCreated = true;
+    await route.fulfill({
+      status: 201,
+      json: { edge: { id: "00000000-0000-4000-8000-000000000018" } },
+    });
+  });
+
+  await page.goto("/login");
+  await page.getByLabel("邮箱或手机号").fill("owner@example.test");
+  await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+  await page.goto(`/projects/${projectId}`);
+
+  await page
+    .getByRole("button", { name: "在 工作台正式版 下新建子节点" })
+    .click();
+  const createDialog = page.getByRole("dialog");
+  await expect(createDialog.getByText("在“工作台正式版”下新增")).toBeVisible();
+  await expect(createDialog.getByLabel("进度计算")).not.toBeVisible();
+  await createDialog.getByLabel("节点标题").fill("直接从连接点新增");
+  await createDialog.getByRole("button", { name: "创建版本化节点" }).click();
+  await expect.poll(() => nodeCreated).toBe(true);
+
+  // The shared fixture deliberately returns a static tree snapshot. Reload to
+  // model the next server-confirmed canvas state before exercising the second
+  // independent quick action.
+  await page.reload();
+
+  await page
+    .getByRole("button", { name: "从 工作台正式版 建立节点关联" })
+    .click();
+  const relationDialog = page.getByRole("dialog");
+  await expect(relationDialog.getByText("快捷关联", { exact: true })).toBeVisible();
+  await relationDialog.getByLabel("目标节点", { exact: true }).selectOption(childNodeId);
+  await relationDialog.getByRole("button", { name: "创建关联" }).click();
+  await expect.poll(() => relationCreated).toBe(true);
+});
+
 test("command palette only navigates through authorized workspace destinations", async ({
   page,
 }) => {

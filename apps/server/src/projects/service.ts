@@ -78,7 +78,11 @@ export interface CreateNodeInput {
   title: string;
   description?: string | undefined;
   progress?: number | undefined;
-  progressMode?: "manual" | "weighted_children" | "milestone_based";
+  progressMode?:
+    | "manual"
+    | "weighted_children"
+    | "time_weighted_children"
+    | "milestone_based";
   weight?: number | undefined;
   startAt?: Date | undefined;
   dueAt?: Date | undefined;
@@ -98,6 +102,7 @@ export interface ProjectMemberInput {
 type ProjectProgressMode =
   | "manual"
   | "weighted_children"
+  | "time_weighted_children"
   | "milestone_based";
 
 /** The subset shared by the root Drizzle client and a transaction client. */
@@ -1120,9 +1125,22 @@ export class ProjectService {
         .where(
           and(
             eq(projectEdges.projectId, projectId),
-            eq(projectEdges.sourceNodeId, input.sourceNodeId),
-            eq(projectEdges.targetNodeId, input.targetNodeId),
             eq(projectEdges.type, input.type),
+            input.type === "relates_to"
+              ? or(
+                  and(
+                    eq(projectEdges.sourceNodeId, input.sourceNodeId),
+                    eq(projectEdges.targetNodeId, input.targetNodeId),
+                  ),
+                  and(
+                    eq(projectEdges.sourceNodeId, input.targetNodeId),
+                    eq(projectEdges.targetNodeId, input.sourceNodeId),
+                  ),
+                )
+              : and(
+                  eq(projectEdges.sourceNodeId, input.sourceNodeId),
+                  eq(projectEdges.targetNodeId, input.targetNodeId),
+                ),
             isNull(projectEdges.deletedAt),
           ),
         )
@@ -1145,26 +1163,33 @@ export class ProjectService {
             ),
           );
         const adjacency = new Map<string, string[]>();
+        const executionDirection = (edge: {
+          sourceNodeId: string;
+          targetNodeId: string;
+          type: string;
+        }): [string, string] =>
+          edge.type === "depends_on"
+            ? [edge.targetNodeId, edge.sourceNodeId]
+            : [edge.sourceNodeId, edge.targetNodeId];
         activeEdges
           .filter(
             (edge) => edge.type === "depends_on" || edge.type === "blocks",
           )
-          .forEach((edge) =>
-            adjacency.set(edge.sourceNodeId, [
-              ...(adjacency.get(edge.sourceNodeId) ?? []),
-              edge.targetNodeId,
-            ]),
-          );
+          .forEach((edge) => {
+            const [from, to] = executionDirection(edge);
+            adjacency.set(from, [...(adjacency.get(from) ?? []), to]);
+          });
+        const [newFrom, newTo] = executionDirection(input);
         const visited = new Set<string>();
-        const reachesSource = (nodeId: string): boolean => {
-          if (nodeId === input.sourceNodeId) return true;
+        const reachesNewFrom = (nodeId: string): boolean => {
+          if (nodeId === newFrom) return true;
           if (visited.has(nodeId)) return false;
           visited.add(nodeId);
-          return (adjacency.get(nodeId) ?? []).some(reachesSource);
+          return (adjacency.get(nodeId) ?? []).some(reachesNewFrom);
         };
-        if (reachesSource(input.targetNodeId))
+        if (reachesNewFrom(newTo))
           throw new ProjectTreeValidationError(
-            "该依赖会形成循环，请调整关联方向或使用“关联”关系。",
+            "该执行关系会形成循环，请调整关联方向或使用“关联”关系。",
           );
       }
 
@@ -2474,6 +2499,8 @@ export class ProjectService {
           progress: Number(node.progress),
           progressMode: node.progressMode,
           weight: Number(node.weight),
+          startAt: node.startAt,
+          dueAt: node.dueAt,
         })),
       );
     } catch (error) {
@@ -2510,7 +2537,9 @@ export class ProjectService {
         updated,
         node.progressMode === "weighted_children"
           ? "根据子节点权重自动汇总进度"
-          : "根据里程碑自动汇总进度",
+          : node.progressMode === "time_weighted_children"
+            ? "根据子节点工期与权重自动汇总进度"
+            : "根据里程碑自动汇总进度",
         actor.membershipId,
       );
       await db.insert(projectActivityLog).values({

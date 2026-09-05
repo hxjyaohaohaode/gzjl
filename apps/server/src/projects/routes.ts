@@ -60,7 +60,12 @@ const createNodeSchema = z.object({
   description: z.string().trim().max(20_000).optional(),
   progress: z.number().min(0).max(100).optional(),
   progressMode: z
-    .enum(["manual", "weighted_children", "milestone_based"])
+    .enum([
+      "manual",
+      "weighted_children",
+      "time_weighted_children",
+      "milestone_based",
+    ])
     .default("manual"),
   weight: z.number().min(0).max(1_000_000).default(1),
   startAt: z.iso.datetime({ offset: true }).optional(),
@@ -121,7 +126,12 @@ const updateNodeSchema = z
       .optional(),
     progress: z.number().min(0).max(100).optional(),
     progressMode: z
-      .enum(["manual", "weighted_children", "milestone_based"])
+      .enum([
+        "manual",
+        "weighted_children",
+        "time_weighted_children",
+        "milestone_based",
+      ])
       .optional(),
     weight: z.number().min(0).max(1_000_000).optional(),
     startAt: z.iso.datetime({ offset: true }).nullable().optional(),

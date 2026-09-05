@@ -177,4 +177,54 @@ describe("project node derived work-line transaction", () => {
       }),
     ).rejects.toBeInstanceOf(ProjectTreeValidationError);
   });
+
+  it("normalizes dependency direction and rejects a mixed dependency cycle", async () => {
+    const { actor, service, project, branch, root } = await createFixture();
+    const task = await service.createNode(actor, project.id, {
+      branchId: branch.id,
+      parentId: root.id,
+      type: "task",
+      title: "后续任务",
+      progress: 0,
+      sortOrder: 1,
+    });
+
+    await service.createEdge(actor, project.id, {
+      sourceNodeId: task.id,
+      targetNodeId: root.id,
+      type: "depends_on",
+    });
+    await expect(
+      service.createEdge(actor, project.id, {
+        sourceNodeId: task.id,
+        targetNodeId: root.id,
+        type: "blocks",
+      }),
+    ).rejects.toThrowError("该执行关系会形成循环");
+  });
+
+  it("treats relates-to as an undirected relationship", async () => {
+    const { actor, service, project, branch, root } = await createFixture();
+    const task = await service.createNode(actor, project.id, {
+      branchId: branch.id,
+      parentId: root.id,
+      type: "task",
+      title: "关联任务",
+      progress: 0,
+      sortOrder: 1,
+    });
+
+    await service.createEdge(actor, project.id, {
+      sourceNodeId: root.id,
+      targetNodeId: task.id,
+      type: "relates_to",
+    });
+    await expect(
+      service.createEdge(actor, project.id, {
+        sourceNodeId: task.id,
+        targetNodeId: root.id,
+        type: "relates_to",
+      }),
+    ).rejects.toThrowError("相同的节点关联已经存在");
+  });
 });
