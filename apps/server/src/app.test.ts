@@ -29,6 +29,7 @@ const config: ServerConfig = {
   AI_MAX_RETRIES: 3,
   S3_REGION: "auto",
   S3_FORCE_PATH_STYLE: false,
+  S3_UPLOAD_INTEGRITY_MODE: "download_sha256",
   SIGNED_URL_TTL_SECONDS: 900,
   ATTACHMENT_MAX_BYTES: 20 * 1024 * 1024,
   SMTP_PORT: 587,

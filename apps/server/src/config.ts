@@ -56,6 +56,9 @@ const serverConfigSchema = z.object({
   S3_ACCESS_KEY_ID: z.string().min(1).optional(),
   S3_SECRET_ACCESS_KEY: z.string().min(1).optional(),
   S3_FORCE_PATH_STYLE: booleanString.default(false),
+  S3_UPLOAD_INTEGRITY_MODE: z
+    .enum(["provider_checksum", "download_sha256"])
+    .default("download_sha256"),
   SIGNED_URL_TTL_SECONDS: z.coerce.number().int().min(60).max(3_600).default(900),
   // Single-part presigned S3 PUT supports up to 5 GiB. Deployments may set a
   // lower organization-wide ceiling for cost and device constraints; the

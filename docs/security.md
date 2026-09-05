@@ -28,4 +28,4 @@ TOTP 共享密钥只在设置开始时通过已认证的 HTTPS 会话展示一�
 
 对象存储必须使用独立、最小权限的 bucket 凭据；bucket 只允许预签名 PUT/GET 所需动作，不设置公开读取。`S3_ENDPOINT` 是服务端签名端点；`S3_BROWSER_ORIGIN` 是浏览器实际访问预签名 PUT URL 的精确 origin，并且是生产 CSP 中唯一允许的对象存储直传 origin。二者在虚拟主机式 bucket 中可能不同。没有完整对象存储配置或缺少该浏览器 origin 时，链接/文本证据可用，文件上传会明确返回不可用而不回退到本地磁盘。文件格式不以 MIME 白名单阻断：浏览器声明的类型仅作受控元数据记录，实际对象一律作为 `application/octet-stream` 保存和下载，并以 `Content-Disposition: attachment` 强制下载，防止 HTML、SVG、脚本或其他活跃内容在工作台 origin 中渲染。每次上传都记录 SHA-256；网络或存储暂时失败会保留待上传状态并允许使用同一附件记录重新签发短时 PUT URL，只有已经验证的大小/哈希不一致才进入隔离状态。
 
-对象存储 CORS 只允许 `WEB_ORIGIN`，方法限于 `PUT` 和 `GET`，请求头限于 `content-type`、`x-amz-checksum-sha256` 与签名所需的 `x-amz-*`；不要使用 `*` origin 或将 bucket 配为公开。上传签名有效期为 15 分钟，下载签名有效期为 5 分钟。
+对象存储 CORS 只允许 `WEB_ORIGIN`，并覆盖预签名上传所需的 `PUT`、`content-type` 与签名后的 `x-amz-meta-*` 请求头；不要使用 `*` origin 或将 bucket 配为公开。默认 `download_sha256` 模式会在上传后由服务端流式读取实际对象并重新计算 SHA-256，适配不提供 AWS flexible-checksum 响应头的 S3 兼容服务；仅在供应商明确支持时才使用 `provider_checksum`。上传签名有效期为 15 分钟，下载签名有效期为 5 分钟。

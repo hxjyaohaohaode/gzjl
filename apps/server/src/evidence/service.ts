@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import {
   GetObjectCommand,
@@ -73,6 +73,7 @@ interface ObjectStoreConfig {
   accessKeyId: string;
   secretAccessKey: string;
   forcePathStyle: boolean;
+  uploadIntegrityMode: "provider_checksum" | "download_sha256";
   signedUrlTtlSeconds: number;
 }
 
@@ -98,6 +99,8 @@ class ObjectStore {
     sha256Hex: string,
   ) {
     const checksum = Buffer.from(sha256Hex, "hex").toString("base64");
+    const useProviderChecksum =
+      this.config.uploadIntegrityMode === "provider_checksum";
     const command = new PutObjectCommand({
       Bucket: this.config.bucket,
       Key: objectKey,
@@ -107,7 +110,7 @@ class ObjectStore {
       // available in authenticated metadata, while the object is opaque.
       ContentType: genericBinaryMimeType,
       ContentLength: sizeBytes,
-      ChecksumSHA256: checksum,
+      ...(useProviderChecksum ? { ChecksumSHA256: checksum } : {}),
       Metadata: { sha256: sha256Hex, "declared-mime": declaredMimeType },
     });
     return {
@@ -116,7 +119,9 @@ class ObjectStore {
       }),
       requiredHeaders: {
         "content-type": genericBinaryMimeType,
-        "x-amz-checksum-sha256": checksum,
+        ...(useProviderChecksum
+          ? { "x-amz-checksum-sha256": checksum }
+          : {}),
         // Metadata is part of the signed PutObject command. Returning every
         // signed header is essential: omitting one lets some S3-compatible
         // providers reject the browser PUT with SignatureDoesNotMatch.
@@ -131,12 +136,39 @@ class ObjectStore {
     const result = await this.client.send(
       new HeadObjectCommand({ Bucket: this.config.bucket, Key: objectKey }),
     );
-    const expectedChecksum = Buffer.from(sha256Hex, "hex").toString("base64");
     if (result.ContentLength !== sizeBytes) {
       throw new EvidenceValidationError("上传文件大小与登记信息不一致。");
     }
-    if (result.ChecksumSHA256 !== expectedChecksum && result.Metadata?.sha256 !== sha256Hex) {
-      throw new EvidenceValidationError("对象存储未返回可验证的 SHA-256，文件已隔离。");
+    if (result.Metadata?.sha256 !== sha256Hex) {
+      throw new EvidenceValidationError("对象存储中的 SHA-256 元数据与登记信息不一致。");
+    }
+    if (this.config.uploadIntegrityMode === "provider_checksum") {
+      const expectedChecksum = Buffer.from(sha256Hex, "hex").toString("base64");
+      if (result.ChecksumSHA256 !== expectedChecksum) {
+        throw new EvidenceValidationError("对象存储未返回匹配的 SHA-256 校验值，文件已隔离。");
+      }
+      return;
+    }
+
+    // Some S3-compatible providers (including Backblaze B2) implement the
+    // common object operations but do not advertise x-amz-checksum-sha256 on
+    // presigned PUT/HEAD. Stream the just-uploaded object through the API and
+    // compare its actual bytes with the browser's digest instead of weakening
+    // verification to metadata-only trust.
+    const downloaded = await this.client.send(
+      new GetObjectCommand({ Bucket: this.config.bucket, Key: objectKey }),
+    );
+    if (!downloaded.Body) {
+      throw new EvidenceValidationError("对象存储未返回可校验的文件内容。");
+    }
+    const bodyStream = downloaded.Body as unknown as AsyncIterable<Uint8Array>;
+    if (typeof bodyStream[Symbol.asyncIterator] !== "function") {
+      throw new EvidenceValidationError("对象存储返回的文件内容无法进行流式校验。");
+    }
+    const hash = createHash("sha256");
+    for await (const chunk of bodyStream) hash.update(chunk);
+    if (hash.digest("hex") !== sha256Hex) {
+      throw new EvidenceValidationError("对象存储中的文件内容与登记的 SHA-256 不一致。");
     }
   }
 
@@ -202,6 +234,7 @@ export class EvidenceService {
           accessKeyId: config.S3_ACCESS_KEY_ID!,
           secretAccessKey: config.S3_SECRET_ACCESS_KEY!,
           forcePathStyle: config.S3_FORCE_PATH_STYLE,
+          uploadIntegrityMode: config.S3_UPLOAD_INTEGRITY_MODE,
           signedUrlTtlSeconds: config.SIGNED_URL_TTL_SECONDS,
         })
       : null;

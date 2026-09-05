@@ -1,4 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { createHash } from "node:crypto";
+import { Readable } from "node:stream";
+
+import { describe, expect, it, vi } from "vitest";
 import type { Database } from "@workbench/db";
 
 import type { ServerConfig } from "../config.js";
@@ -26,6 +29,7 @@ const config: ServerConfig = {
   AI_MAX_RETRIES: 2,
   S3_REGION: "auto",
   S3_FORCE_PATH_STYLE: false,
+  S3_UPLOAD_INTEGRITY_MODE: "download_sha256",
   SIGNED_URL_TTL_SECONDS: 900,
   ATTACHMENT_MAX_BYTES: 100 * 1024 * 1024,
   SMTP_PORT: 587,
@@ -83,14 +87,13 @@ describe("evidence storage capabilities", () => {
       };
     }).store;
 
-    await expect(
-      store.createUploadUrl(
-        "organization/member/evidence.tracebundle",
-        "application/x-acme-work-proof",
-        1,
-        "a".repeat(64),
-      ),
-    ).resolves.toMatchObject({
+    const intent = await store.createUploadUrl(
+      "organization/member/evidence.tracebundle",
+      "application/x-acme-work-proof",
+      1,
+      "a".repeat(64),
+    );
+    expect(intent).toMatchObject({
       expiresInSeconds: 900,
       requiredHeaders: {
         "content-type": "application/octet-stream",
@@ -98,6 +101,72 @@ describe("evidence storage capabilities", () => {
         "x-amz-meta-declared-mime": "application/x-acme-work-proof",
       },
     });
+    expect(intent.requiredHeaders).not.toHaveProperty("x-amz-checksum-sha256");
+  });
+
+  it("streams uploaded bytes for SHA-256 verification when the provider does not expose checksum headers", async () => {
+    const service = new EvidenceService({} as Database, {
+      ...config,
+      S3_ENDPOINT: "https://storage.example.test",
+      S3_REGION: "us-east-005",
+      S3_BUCKET: "private-evidence",
+      S3_ACCESS_KEY_ID: "test-access-key",
+      S3_SECRET_ACCESS_KEY: "test-secret-key",
+      S3_FORCE_PATH_STYLE: true,
+    });
+    const store = (service as unknown as {
+      store: {
+        client: { send: (command: unknown) => Promise<unknown> };
+        verify(objectKey: string, sizeBytes: number, sha256: string): Promise<void>;
+      };
+    }).store;
+    const body = Buffer.from("backblaze-compatible-proof");
+    const sha256 = createHash("sha256").update(body).digest("hex");
+    const send = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ContentLength: body.length,
+        Metadata: { sha256 },
+      })
+      .mockResolvedValueOnce({ Body: Readable.from([body]) });
+    store.client.send = send;
+
+    await expect(
+      store.verify("organization/member/proof.bin", body.length, sha256),
+    ).resolves.toBeUndefined();
+    expect(send).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects an object whose metadata matches but whose actual bytes do not", async () => {
+    const service = new EvidenceService({} as Database, {
+      ...config,
+      S3_ENDPOINT: "https://storage.example.test",
+      S3_REGION: "us-east-005",
+      S3_BUCKET: "private-evidence",
+      S3_ACCESS_KEY_ID: "test-access-key",
+      S3_SECRET_ACCESS_KEY: "test-secret-key",
+      S3_FORCE_PATH_STYLE: true,
+    });
+    const store = (service as unknown as {
+      store: {
+        client: { send: (command: unknown) => Promise<unknown> };
+        verify(objectKey: string, sizeBytes: number, sha256: string): Promise<void>;
+      };
+    }).store;
+    const registeredBody = Buffer.from("registered-proof");
+    const storedBody = Buffer.from("substituted-proof");
+    const sha256 = createHash("sha256").update(registeredBody).digest("hex");
+    store.client.send = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ContentLength: storedBody.length,
+        Metadata: { sha256 },
+      })
+      .mockResolvedValueOnce({ Body: Readable.from([storedBody]) });
+
+    await expect(
+      store.verify("organization/member/proof.bin", storedBody.length, sha256),
+    ).rejects.toThrow("文件内容与登记的 SHA-256 不一致");
   });
 
   it("does not advertise direct production uploads until their exact browser origin is allow-listed", () => {

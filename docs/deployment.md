@@ -27,45 +27,43 @@ Render 的 `RENDER_EXTERNAL_URL` 会自动提供 Web Service 的 `onrender.com` 
 
 启用 Push 时，在本地运行 `pnpm dlx web-push generate-vapid-keys --json`。把 `publicKey` 填入 Web 的 `VAPID_PUBLIC_KEY`；再把同一个 `publicKey` 和匹配的 `privateKey` 分别填入 Worker 的 `VAPID_PUBLIC_KEY`、`VAPID_PRIVATE_KEY`，并填写 `VAPID_SUBJECT=mailto:实际运维邮箱`。`PUSH_SUBSCRIPTION_ENCRYPTION_KEY` 已由 Blueprint 自动生成并由 Worker 私有引用，不要手工替换。Render 的规则是：现有 Blueprint 会忽略后来新增的 `sync:false` 项，所以既有服务必须在各自 **Environment** 页面手工添加上述值；未添加时 Push 会安全保持关闭，不影响站内通知或 Worker 启动。保存后等 Web 与 Worker 都完成部署，成员进入 **通知设置 → 启用本设备推送**，授权浏览器并逐类打开推送。不要轮换 VAPID 私钥，除非接受所有现有浏览器重新订阅；常规注销、浏览器撤权与 Push 服务 404/410 会自动清理，不需要管理员查看或复制 endpoint。
 
-文件证据使用公司自己的私有 S3 兼容桶，绝不能改用 Render 临时文件系统。设置表格中的 S3 变量后，保持桶私有并允许 `WEB_ORIGIN` 对签名对象发起 `PUT` / `GET`；CORS 请求头至少包含 `content-type`、`x-amz-checksum-sha256` 及签名所需 `x-amz-*`。`S3_BROWSER_ORIGIN` 必须填浏览器实际访问的预签名 PUT URL 的 **origin**（协议与主机，不能带路径）；它可能与 SDK 使用的 `S3_ENDPOINT` 不同，例如虚拟主机式 bucket 域名。生产 PWA 只允许该精确 origin 进行对象存储连接，少填时会明确禁用文件上传而不是上传到一半被 CSP 阻断。工作台支持一次选择任意数量的文件并逐件上传，失败项可重试而不会重复创建证据；`SIGNED_URL_TTL_SECONDS` 默认 900 秒，下载链接始终不超过 300 秒。`ATTACHMENT_MAX_BYTES` 是每件文件上限（Blueprint 默认 100 MiB、上限 5 GiB），不是附件数量上限。支持任意工作文件格式，所有下载均被强制为二进制附件。
+文件证据使用公司的私有 S3 兼容桶，不能放入 Render 临时文件系统。`S3_BROWSER_ORIGIN` 必须填写浏览器实际访问的预签名 PUT URL 的 **origin**（协议与主机，不能带路径）；生产 PWA 只允许该精确 origin 进行对象存储连接。工作台支持一次选择任意数量的文件并逐件上传，失败项可重试而不会重复创建证据；`SIGNED_URL_TTL_SECONDS` 默认 900 秒，下载链接始终不超过 300 秒。`ATTACHMENT_MAX_BYTES` 是每件文件上限（Blueprint 默认 100 MiB、上限 5 GiB），不是附件数量上限。所有下载均被强制为二进制附件。
 
-## 最简单的附件方案：Cloudflare R2
+## 当前附件方案：Backblaze B2
 
-不需要购买或维护私人服务器。R2 是独立的私有对象存储，浏览器拿到短时预签名地址后直接上传证据；Worker 将后台生成的 CSV/JSON/XLSX/PDF 写入同一个私有桶。Render 只负责签名、权限校验、哈希核验、后台生成和保存元数据，不依赖临时磁盘，因此重新部署或扩容不会丢附件或已完成的导出。导出对象保留 24 小时，生产桶仍应配置独立生命周期规则作为最终兜底。
+B2 是独立的私有对象存储，浏览器通过短时预签名地址直接上传证据，Worker 将 CSV、JSON、XLSX 和 PDF 后台导出写入同一个私有桶。Render 只负责签名、权限校验、实际字节哈希核验、任务生成和元数据，因此重新部署或扩容不会丢失对象。
 
-1. 在 Cloudflare 控制台打开 **R2 Object Storage**，创建一个 Standard bucket，例如 `gzjl-evidence`。不要开启 public development URL，也不要设置公开读取。
-2. 在 R2 的 **Manage R2 API Tokens** 创建只针对这个 bucket 的 Object Read & Write token。保存一次性显示的 `Access Key ID` 和 `Secret Access Key`，不要把它们提交到 Git。
-3. 复制 Cloudflare 账户 ID，组成同一个地址：`https://<ACCOUNT_ID>.r2.cloudflarestorage.com`。
-4. 给 bucket 添加下面的 CORS。`AllowedOrigins` 必须写实际工作台地址；当前部署为 `https://gzjl-hxjyaohaohaode-web.onrender.com`。
+当前生产配置如下：
 
-```json
-[
-  {
-    "AllowedOrigins": [
-      "https://gzjl-hxjyaohaohaode-web.onrender.com"
-    ],
-    "AllowedMethods": ["GET", "HEAD", "PUT"],
-    "AllowedHeaders": ["content-type", "x-amz-checksum-sha256", "x-amz-*"],
-    "ExposeHeaders": ["etag"],
-    "MaxAgeSeconds": 3600
-  }
-]
-```
+| 项目 | 值 |
+| --- | --- |
+| Bucket | `gzjl-evidence-a7k3`，Private |
+| S3 endpoint | `https://s3.us-east-005.backblazeb2.com` |
+| Region | `us-east-005` |
+| 工作台 origin | `https://gzjl-hxjyaohaohaode-web.onrender.com` |
+| 生命周期 | Keep only the last version |
+| Object Lock | Disabled |
 
-5. 打开 Render 的 `gzjl-hxjyaohaohaode-web` → **Environment**，填写并保存：
+1. 在 **Application Keys** 创建名为 `workbench-render` 的独立 key，只选择 `gzjl-evidence-a7k3`，能力选择 **Read and Write**，并勾选 **Allow List All Bucket Names**（S3 SDK 列桶兼容所需）。B2 的 Master Application Key 不能用于 S3-compatible API；`keyID` 对应 `S3_ACCESS_KEY_ID`，只显示一次的 `applicationKey` 对应 `S3_SECRET_ACCESS_KEY`。
+2. Bucket 保持 **Private**，开启 B2 默认服务端加密。生命周期保持 **Keep only the last version**，防止被替换的旧版本无限计费。当前导出对象还会在完成 24 小时后由 Worker 清理。
+3. 在 bucket 的 **CORS Rules** 选择只共享给以下 origin，并填写 `https://gzjl-hxjyaohaohaode-web.onrender.com`。不要选择所有 origin 或所有 HTTPS origin。B2 控制台的精确 origin 规则允许预签名 PUT 所需的 `content-type` 与 `x-amz-meta-*` 请求头。
+4. 打开 Render 的 `gzjl-hxjyaohaohaode-web` → **Environment**，填写并保存：
 
 | Render 变量 | 填写值 |
 | --- | --- |
-| `S3_ENDPOINT` | `https://<ACCOUNT_ID>.r2.cloudflarestorage.com` |
-| `S3_BROWSER_ORIGIN` | 与 `S3_ENDPOINT` 完全相同 |
-| `S3_BUCKET` | `gzjl-evidence`（或实际 bucket 名） |
-| `S3_ACCESS_KEY_ID` | R2 token 的 Access Key ID |
-| `S3_SECRET_ACCESS_KEY` | R2 token 的 Secret Access Key |
-| `S3_REGION` | `auto` |
+| `S3_ENDPOINT` | `https://s3.us-east-005.backblazeb2.com` |
+| `S3_BROWSER_ORIGIN` | `https://s3.us-east-005.backblazeb2.com` |
+| `S3_BUCKET` | `gzjl-evidence-a7k3` |
+| `S3_ACCESS_KEY_ID` | `workbench-render` 的 `keyID` |
+| `S3_SECRET_ACCESS_KEY` | `workbench-render` 的 `applicationKey` |
+| `S3_REGION` | `us-east-005` |
 | `S3_FORCE_PATH_STYLE` | `true` |
+| `S3_UPLOAD_INTEGRITY_MODE` | `download_sha256` |
 
-6. Render 自动重新部署后，登录工作台，进入 **工作记录**，展开任意一条真实记录的 **证据**，多选文件并点击 **上传队列**。上传成功后刷新页面仍应看到附件，并可下载；如果能力提示仍不可用，先检查 Web 服务日志是否指出缺少哪一项变量。
+`download_sha256` 模式不会要求 B2 不支持的 `x-amz-checksum-sha256` 签名头。浏览器仍先计算 SHA-256；上传后 Web 服务通过私有凭据流式读取对象并重新计算摘要，只有实际内容、大小和签名元数据全部匹配才把附件标记为可用。这个校验多一次对象读取，用少量带宽换取真实的端到端完整性验证。
 
-安全验收：R2 bucket 必须保持 private；员工浏览器永远不能看到 R2 API 密钥；预签名上传地址 15 分钟失效，下载地址最多 5 分钟失效；删除附件只做业务软删除并保留审计，存储对象的生命周期清理应由后续受控清理任务处理。
+5. Render 保存环境变量并完成 Web、Worker 重新部署后，登录工作台上传一个小型测试文件，刷新页面确认附件仍存在且可下载；随后创建 CSV 后台导出，确认任务完成并能获得短时下载链接。若能力提示仍不可用，检查 Web 服务日志列出的缺失变量，并确认 Worker 使用 Web 服务的同桶私有引用。
+
+安全验收：B2 bucket 保持 private；员工浏览器只能看到短时预签名 URL，不能看到 B2 API key；预签名上传地址 15 分钟失效，下载地址最多 5 分钟失效；Master Application Key 已轮换作废，Render 只持有单 bucket 的独立 key；默认服务端加密已开启；业务数据库与对象存储共同让多端在刷新或实时事件到达后看到同一附件和导出状态。
 
 以后若绑定自定义域名，应将 `WEB_ORIGIN` 和 `PUBLIC_APP_URL` 改为该域名的同一 HTTPS origin，并在对象存储 CORS 中替换为该精确域名。不要在证书生效前修改它们。

@@ -76,12 +76,18 @@ services:
       # copied one-time link and therefore works without mail/SMS; automatic
       # delivery always reports an unconfigured integration explicitly.
       - key: S3_REGION
-        value: auto
+        # Backblaze B2 signs requests with the region embedded in the endpoint.
+        # Keep this value aligned with s3.<region>.backblazeb2.com.
+        value: us-east-005
       - key: S3_FORCE_PATH_STYLE
-        # Cloudflare R2 is the documented zero-server setup. Path-style URLs
-        # keep the SDK signing endpoint and browser upload origin identical,
-        # which removes one easy-to-miss bucket-subdomain calculation.
+        # Path-style URLs keep the SDK signing endpoint and browser upload
+        # origin identical for the documented Backblaze B2 deployment.
         value: "true"
+      - key: S3_UPLOAD_INTEGRITY_MODE
+        # B2 does not expose the AWS flexible-checksum headers used by the
+        # strict provider mode. The Web service streams each new object once
+        # and compares its actual bytes with the browser-computed SHA-256.
+        value: download_sha256
       # File attachments are a core production capability. On a new Blueprint,
       # Render asks for these private object-storage values instead of putting
       # placeholders or secrets in Git. For an existing service, add the same
