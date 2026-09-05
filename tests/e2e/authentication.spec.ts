@@ -2903,7 +2903,7 @@ test("many long work updates never force the mobile workspace into desktop width
 
 test("project tree renders a pannable canvas with a list fallback", async ({
   page,
-}) => {
+}, testInfo) => {
   await mockAuthenticatedWorkspace(page);
   await page.goto("/login");
   await page.getByLabel("邮箱或手机号").fill("owner@example.test");
@@ -2921,6 +2921,65 @@ test("project tree renders a pannable canvas with a list fallback", async ({
     .first()
     .evaluate((element) => Number.parseFloat(getComputedStyle(element).fontSize));
   expect(nodeTitleFontSize).toBeGreaterThanOrEqual(13);
+
+  const draggedNode = page.locator(".react-flow__node").first();
+  const stationaryNode = page.locator(".react-flow__node").nth(1);
+  const dragHandle = draggedNode.locator(".project-flow-node-title");
+  await draggedNode.scrollIntoViewIfNeeded();
+  const [draggedBefore, stationaryBefore, handleBox, viewportTransform] =
+    await Promise.all([
+      draggedNode.boundingBox(),
+      stationaryNode.boundingBox(),
+      dragHandle.boundingBox(),
+      page.locator(".react-flow__viewport").getAttribute("style"),
+    ]);
+  expect(draggedBefore).not.toBeNull();
+  expect(stationaryBefore).not.toBeNull();
+  expect(handleBox).not.toBeNull();
+  const startX = handleBox!.x + handleBox!.width / 2;
+  const startY = handleBox!.y + handleBox!.height / 2;
+  const deltaX = testInfo.project.name.startsWith("mobile") ? -72 : 72;
+  if (testInfo.project.name.startsWith("mobile")) {
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send("Input.dispatchTouchEvent", {
+      type: "touchStart",
+      touchPoints: [{ x: startX, y: startY }],
+    });
+    for (let step = 1; step <= 8; step += 1) {
+      await cdp.send("Input.dispatchTouchEvent", {
+        type: "touchMove",
+        touchPoints: [
+          {
+            x: startX + (deltaX * step) / 8,
+            y: startY + (36 * step) / 8,
+          },
+        ],
+      });
+    }
+    await cdp.send("Input.dispatchTouchEvent", {
+      type: "touchEnd",
+      touchPoints: [],
+    });
+    await cdp.detach();
+  } else {
+    await page.mouse.move(startX, startY);
+    await page.mouse.down();
+    await page.mouse.move(startX + deltaX, startY + 36, { steps: 8 });
+    await page.mouse.up();
+  }
+  await expect
+    .poll(async () =>
+      Math.abs(((await draggedNode.boundingBox())?.x ?? 0) - draggedBefore!.x),
+    )
+    .toBeGreaterThan(45);
+  const stationaryAfter = await stationaryNode.boundingBox();
+  expect(Math.abs(stationaryAfter!.x - stationaryBefore!.x)).toBeLessThan(2);
+  expect(Math.abs(stationaryAfter!.y - stationaryBefore!.y)).toBeLessThan(2);
+  await expect(page.locator(".react-flow__viewport")).toHaveAttribute(
+    "style",
+    viewportTransform ?? "",
+  );
+
   await page.getByRole("button", { name: "列表", exact: true }).click();
   await expect(page.getByText(/任务 · .*v1/)).toBeVisible();
 });

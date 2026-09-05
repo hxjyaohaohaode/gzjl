@@ -6,6 +6,7 @@ import {
   Panel,
   Position,
   ReactFlow,
+  useNodesState,
   type Edge,
   type Node,
 } from "@xyflow/react";
@@ -13,7 +14,7 @@ import {
   calculateNodeScheduleProgress,
   calculatePlannedHours,
 } from "@workbench/shared";
-import { useMemo } from "react";
+import { useEffect, useMemo } from "react";
 import type { CSSProperties } from "react";
 
 import "@xyflow/react/dist/style.css";
@@ -279,7 +280,7 @@ export default function ProjectCanvas({
                 </span>
               </div>
               {canManage ? (
-                <div className="project-flow-node-actions" aria-label={`${node.title} 快捷操作`}>
+                <div className="nodrag nopan project-flow-node-actions" aria-label={`${node.title} 快捷操作`}>
                   <button
                     aria-label={`在 ${node.title} 下新建子节点`}
                     onClick={(event) => {
@@ -331,6 +332,20 @@ export default function ProjectCanvas({
     projectAccent,
     selectedNodeId,
   ]);
+
+  const [canvasNodes, setCanvasNodes, onNodesChange] = useNodesState(flowNodes);
+
+  useEffect(() => {
+    setCanvasNodes((currentNodes) => {
+      const currentById = new Map(currentNodes.map((node) => [node.id, node]));
+      return flowNodes.map((node) => {
+        const current = currentById.get(node.id);
+        return current
+          ? { ...current, ...node, position: current.position }
+          : node;
+      });
+    });
+  }, [flowNodes, setCanvasNodes]);
 
   const flowEdges = useMemo<Edge[]>(
     () => {
@@ -419,12 +434,13 @@ export default function ProjectCanvas({
         elementsSelectable
         fitView
         fitViewOptions={{ padding: 0.27 }}
-        nodes={flowNodes}
+        nodes={canvasNodes}
         nodesConnectable={false}
-        nodesDraggable={false}
+        nodesDraggable
         minZoom={0.15}
         maxZoom={2.5}
         onNodeClick={(_, node) => onNodeSelect?.(node.id)}
+        onNodesChange={onNodesChange}
         panOnDrag
         panOnScroll
         preventScrolling
@@ -449,7 +465,7 @@ export default function ProjectCanvas({
             <i data-kind="block" />
             阻塞
           </span>
-          <small>拖拽空白处平移 · 滚轮缩放 · 点击节点查看详情</small>
+          <small>拖动节点自由排布 · 拖拽空白处平移 · 滚轮缩放 · 点击节点查看详情</small>
         </Panel>
         <Controls showInteractive={false} />
         <MiniMap
