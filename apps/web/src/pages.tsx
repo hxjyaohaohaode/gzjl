@@ -3185,6 +3185,16 @@ function DirectEvidenceFields({
       <span className="sr-only" id="direct-evidence-file-help">
         支持 PDF、TXT、README、ZIP、Office 文档、图片、音视频及其他任意文件格式
       </span>
+      {value.files.length ? (
+        <div className="evidence-local-preview-grid" aria-label="待上传证据详情">
+          {value.files.map((file, index) => (
+            <LocalEvidenceFilePreview
+              file={file}
+              key={`${file.name}-${file.lastModified}-${index}`}
+            />
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -3714,6 +3724,118 @@ function evidenceAccessHref(item: EvidenceAttachment, mode: "preview" | "downloa
   return `/api/attachments/${encodeURIComponent(item.id)}/open?mode=${mode}`;
 }
 
+type EvidencePreviewKind = "image" | "video" | "audio" | "document" | "text" | "download";
+
+function evidencePreviewKind(
+  mimeType: string | null | undefined,
+  name: string | null | undefined,
+): EvidencePreviewKind {
+  const mime = (mimeType ?? "").toLowerCase();
+  const fileName = (name ?? "").trim().toLowerCase();
+  if (mime.startsWith("image/") && mime !== "image/svg+xml") return "image";
+  if (mime.startsWith("video/")) return "video";
+  if (mime.startsWith("audio/")) return "audio";
+  if (mime === "application/pdf" || fileName.endsWith(".pdf")) return "document";
+  if (
+    mime === "application/json" ||
+    mime === "text/plain" ||
+    mime === "text/markdown" ||
+    mime === "text/csv" ||
+    /(?:^readme$|^license$|\.(?:txt|md|markdown|log|csv|json))$/u.test(fileName)
+  )
+    return "text";
+  return "download";
+}
+
+function EvidenceInlinePreview({ item }: { item: EvidenceAttachment }) {
+  if (!evidenceCanPreview(item)) return null;
+  const previewUrl = evidenceAccessHref(item, "preview");
+  const kind = evidencePreviewKind(item.mimeType, item.originalName);
+  if (kind === "image") {
+    return (
+      <a className="evidence-inline-image-link" href={previewUrl} rel="noopener noreferrer" target="_blank">
+        <img
+          alt={item.originalName ? `证据图片：${item.originalName}` : "证据图片"}
+          className="evidence-inline-image"
+          loading="lazy"
+          src={previewUrl}
+        />
+      </a>
+    );
+  }
+  if (kind === "video") {
+    return <video className="evidence-inline-media" controls preload="metadata" src={previewUrl} />;
+  }
+  if (kind === "audio") {
+    return <audio className="evidence-inline-audio" controls preload="metadata" src={previewUrl} />;
+  }
+  if (kind === "document" || kind === "text") {
+    return (
+      <iframe
+        className="evidence-inline-document"
+        loading="lazy"
+        sandbox=""
+        src={previewUrl}
+        title={`附件内容：${item.originalName || "文件证据"}`}
+      />
+    );
+  }
+  return null;
+}
+
+function LocalEvidenceFilePreview({
+  file,
+  hideHeader = false,
+}: {
+  file: File;
+  hideHeader?: boolean;
+}) {
+  const [textPreview, setTextPreview] = useState<string | null>(null);
+  const [objectUrl, setObjectUrl] = useState("");
+  const kind = evidencePreviewKind(file.type, file.name);
+  useEffect(() => {
+    if (!["image", "video", "audio", "document"].includes(kind)) return;
+    const next = URL.createObjectURL(file);
+    const frame = window.requestAnimationFrame(() => setObjectUrl(next));
+    return () => {
+      window.cancelAnimationFrame(frame);
+      URL.revokeObjectURL(next);
+    };
+  }, [file, kind]);
+  useEffect(() => {
+    let active = true;
+    if (kind !== "text" || file.size > 1_000_000) return;
+    void file.text().then((value) => {
+      if (active) setTextPreview(value.slice(0, 8_000));
+    });
+    return () => {
+      active = false;
+    };
+  }, [file, kind]);
+  return (
+    <article className="evidence-local-preview">
+      {!hideHeader ? (
+        <header>
+          <span><strong>{file.name}</strong><small>{file.type || "未知格式"} · {formatFileSize(file.size)} · 修改于 {new Date(file.lastModified).toLocaleString("zh-CN")}</small></span>
+          <Badge tone={kind === "download" ? "neutral" : "info"}>{kind === "download" ? "上传后下载查看" : "可预览"}</Badge>
+        </header>
+      ) : null}
+      {kind === "image" && objectUrl ? <img alt={`待上传图片：${file.name}`} src={objectUrl} /> : null}
+      {kind === "video" && objectUrl ? <video controls preload="metadata" src={objectUrl} /> : null}
+      {kind === "audio" && objectUrl ? <audio controls preload="metadata" src={objectUrl} /> : null}
+      {kind === "document" && objectUrl ? <iframe sandbox="" src={objectUrl} title={`待上传 PDF：${file.name}`} /> : null}
+      {kind === "text" ? (
+        <pre>
+          {file.size > 1_000_000
+            ? "文本文件超过 1 MB，上传后可在平台查看或下载。"
+            : textPreview ?? "正在读取文本预览…"}
+        </pre>
+      ) : null}
+      {kind === "download" ? <p>浏览器不适合直接展示此格式；文件仍会完整上传，完成核验后可查看详细元数据并安全下载。</p> : null}
+    </article>
+  );
+}
+
 function EvidenceFileActions({ item }: { item: EvidenceAttachment }) {
   if (item.kind !== "file") return null;
   if (item.status !== "available") {
@@ -4064,43 +4186,46 @@ function EvidencePanel({ sessionId }: { sessionId: string }) {
             </select>
           </div>
           {queuedFiles.length ? (
-            <div className="space-y-1" role="status">
+            <div className="evidence-upload-queue" role="status">
               {queuedFiles.map((queued) => (
-                <div
-                  className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-[var(--surface)] px-3 py-2 text-xs"
-                  key={queued.id}
-                >
-                  <span className="min-w-0 flex-1 truncate">
-                    <strong>{queued.file.name}</strong> · {formatFileSize(queued.file.size)} · {evidenceUploadStateLabel(queued.state)}
-                    {queued.error ? `：${queued.error}` : ""}
-                  </span>
-                  <span className="flex shrink-0 gap-1">
-                    {queued.state === "failed" ? (
-                      <Button
-                        disabled={upload.isPending}
-                        onClick={() => upload.mutate([queued.id])}
-                        size="compact"
-                        variant="secondary"
-                      >
-                        重试
-                      </Button>
-                    ) : null}
-                    {queued.state === "queued" || queued.state === "failed" ? (
-                      <Button
-                        disabled={upload.isPending}
-                        onClick={() =>
-                          setQueuedFiles((current) =>
-                            current.filter((item) => item.id !== queued.id),
-                          )
-                        }
-                        size="compact"
-                        variant="ghost"
-                      >
-                        移除
-                      </Button>
-                    ) : null}
-                  </span>
-                </div>
+                <article className="evidence-upload-queue-item" key={queued.id}>
+                  <div className="evidence-upload-queue-head">
+                    <span className="min-w-0 flex-1">
+                      <strong>{queued.file.name}</strong>
+                      <small>
+                        {formatFileSize(queued.file.size)} · {evidenceUploadStateLabel(queued.state)}
+                        {queued.error ? `：${queued.error}` : ""}
+                      </small>
+                    </span>
+                    <span className="flex shrink-0 gap-1">
+                      {queued.state === "failed" ? (
+                        <Button
+                          disabled={upload.isPending}
+                          onClick={() => upload.mutate([queued.id])}
+                          size="compact"
+                          variant="secondary"
+                        >
+                          重试
+                        </Button>
+                      ) : null}
+                      {queued.state === "queued" || queued.state === "failed" ? (
+                        <Button
+                          disabled={upload.isPending}
+                          onClick={() =>
+                            setQueuedFiles((current) =>
+                              current.filter((item) => item.id !== queued.id),
+                            )
+                          }
+                          size="compact"
+                          variant="ghost"
+                        >
+                          移除
+                        </Button>
+                      ) : null}
+                    </span>
+                  </div>
+                  <LocalEvidenceFilePreview file={queued.file} hideHeader />
+                </article>
               ))}
               {queuedFiles.some((item) => item.state === "complete") ? (
                 <Button
@@ -4254,6 +4379,9 @@ function EvidencePanel({ sessionId }: { sessionId: string }) {
                       </Button>
                     </span>
                   </div>
+                  {item.kind === "file" && item.status === "available" ? (
+                    <EvidenceInlinePreview item={item} />
+                  ) : null}
                   <details className="evidence-metadata-details">
                     <summary>查看内容详情</summary>
                     <dl>
@@ -4360,6 +4488,9 @@ function ReadOnlyEvidenceList({ sessionId }: { sessionId: string }) {
           ) : null}
           {item.kind === "text" ? (
             <p className="evidence-readonly-text">{item.textContent || "（空内容）"}</p>
+          ) : null}
+          {item.kind === "file" && item.status === "available" ? (
+            <EvidenceInlinePreview item={item} />
           ) : null}
           <dl className="evidence-readonly-metadata">
             <div><dt>上传时间</dt><dd>{formatDateTime(item.uploadedAt)}</dd></div>
@@ -7179,10 +7310,15 @@ interface PayrollOwnResponse {
     estimatedAmount: string;
     projectedPeriodAmount: string;
     projection: {
-      method: "weekday_recent_robust_v2";
+      method: "adaptive_weekday_backtest_v3";
       sampleDays: number;
       nonZeroSampleDays: number;
       horizonDays: number;
+      validationPoints: number;
+      validationWape: number | null;
+      intervalCoverage: number | null;
+      seasonalityStrength: number;
+      trendPerDay: number;
       includesKnownFutureRecords: boolean;
     };
     calculationBreakdown: {
@@ -8451,7 +8587,7 @@ export function PayrollPage({ me }: { me: Me }) {
             <CardContent>
               <AnalyticsChart ariaLabel="本月薪资累计与未来预测" option={liveForecastOption} />
               <p className="salary-forecast-note">
-                按星期模式、近 14 日加权趋势与历史波动预测；已保留未来已录入记录，并把预计周奖励单独加入。样本 {livePreview?.projection.sampleDays ?? 0} 天（有工时 {livePreview?.projection.nonZeroSampleDays ?? 0} 天），预测 {livePreview?.projection.horizonDays ?? 0} 天。
+                自适应组合星期规律、工作日/周末、指数平滑和稳健趋势，并用最近 {livePreview?.projection.validationPoints ?? 0} 个历史日做滚动回测与区间校准；已录入的未来记录和周奖励单独精确计算。样本 {livePreview?.projection.sampleDays ?? 0} 天（有工时 {livePreview?.projection.nonZeroSampleDays ?? 0} 天），预测 {livePreview?.projection.horizonDays ?? 0} 天{livePreview?.projection.validationWape !== null && livePreview?.projection.validationWape !== undefined ? ` · 回测加权误差 ${(livePreview.projection.validationWape * 100).toFixed(1)}%` : ""}。
               </p>
             </CardContent>
           </Card>
@@ -9384,10 +9520,15 @@ interface AnalyticsSummary {
       confidence: "low" | "medium" | "high";
     }>;
     model: {
-      method: "weekday_recent_robust_v2";
+      method: "adaptive_weekday_backtest_v3";
       sampleDays: number;
       nonZeroSampleDays: number;
       horizonDays: number;
+      validationPoints: number;
+      validationWape: number | null;
+      intervalCoverage: number | null;
+      seasonalityStrength: number;
+      trendPerDay: number;
     };
   };
   availableFilters: {
@@ -10341,10 +10482,10 @@ export function AnalyticsPage({ me }: { me: Me }) {
                 </select>
               </CardHeader>
               <CardContent>
-                {analytics.data.forecast.predicted.length ? <AnalyticsChart ariaLabel="事实与未来工时预测带" option={forecastOption} /> : <EmptyState description="至少需要 3 个自然日且其中 2 天有工时，才能计算预测区间。" icon={<CalendarDays />} title="样本不足" />}
+                {analytics.data.forecast.predicted.length ? <AnalyticsChart ariaLabel="事实与未来工时预测带" option={forecastOption} /> : <EmptyState description="至少需要 7 个连续自然日且其中 2 天有工时，才能识别星期规律并计算预测区间。" icon={<CalendarDays />} title="样本不足" />}
                 {analytics.data.forecast.predicted.length ? (
                   <p className="analytics-model-note">
-                    按同星期、工作日/周末模式、近 14 日加权趋势与历史波动计算；零工时日也属于真实样本。样本 {analytics.data.forecast.model.sampleDays} 天（有工时 {analytics.data.forecast.model.nonZeroSampleDays} 天）。预测仅供排期，不进入薪资或考核。
+                    由星期季节性、工作日/周末、指数平滑和 Theil-Sen 稳健趋势组成；各模型权重由最近 {analytics.data.forecast.model.validationPoints} 个历史日滚动回测自动确定，90% 经验残差和模型分歧共同形成区间。零工时日保留为真实样本。样本 {analytics.data.forecast.model.sampleDays} 天（有工时 {analytics.data.forecast.model.nonZeroSampleDays} 天）{analytics.data.forecast.model.validationWape !== null ? ` · 回测加权误差 ${(analytics.data.forecast.model.validationWape * 100).toFixed(1)}%` : ""}{analytics.data.forecast.model.intervalCoverage !== null ? ` · 区间历史覆盖率 ${(analytics.data.forecast.model.intervalCoverage * 100).toFixed(0)}%` : ""}。预测仅供排期，不进入薪资或考核。
                   </p>
                 ) : null}
               </CardContent>

@@ -155,6 +155,16 @@ export function assertValidBranchParent(input: {
   }
 }
 
+export function resolveMergedNodeParentId(
+  sourceParentId: string | null,
+  clonedIdBySourceId: ReadonlyMap<string, string>,
+  mergeAnchorId: string | null,
+): string | null {
+  return sourceParentId
+    ? (clonedIdBySourceId.get(sourceParentId) ?? null)
+    : mergeAnchorId;
+}
+
 export interface CreateEdgeInput {
   sourceNodeId: string;
   targetNodeId: string;
@@ -1263,23 +1273,49 @@ export class ProjectService {
           "父分支不属于当前项目或已被删除。",
         );
     }
+    const sourceNode = input.sourceNodeId
+      ? (
+          await this.db
+            .select({
+              id: projectNodes.id,
+              branchId: projectNodes.branchId,
+              title: projectNodes.title,
+              startAt: projectNodes.startAt,
+              dueAt: projectNodes.dueAt,
+            })
+            .from(projectNodes)
+            .innerJoin(
+              projectBranches,
+              eq(projectBranches.id, projectNodes.branchId),
+            )
+            .where(
+              and(
+                eq(projectNodes.id, input.sourceNodeId),
+                eq(projectNodes.projectId, projectId),
+                isNull(projectNodes.deletedAt),
+                isNull(projectBranches.deletedAt),
+                isNull(projectBranches.archivedAt),
+              ),
+            )
+            .limit(1)
+        )[0]
+      : undefined;
     if (input.sourceNodeId) {
-      const [source] = await this.db
-        .select({ id: projectNodes.id })
-        .from(projectNodes)
-        .where(
-          and(
-            eq(projectNodes.id, input.sourceNodeId),
-            eq(projectNodes.projectId, projectId),
-            isNull(projectNodes.deletedAt),
-          ),
-        )
-        .limit(1);
-      if (!source)
+      if (!sourceNode)
         throw new ProjectTreeValidationError(
           "分支来源节点不属于当前项目或已被删除。",
         );
+      if (
+        input.parentBranchId &&
+        input.parentBranchId !== sourceNode.branchId
+      ) {
+        throw new ProjectTreeValidationError(
+          "派生工作线必须挂载在来源节点所在的分支下。",
+        );
+      }
     }
+    const effectiveParentBranchId =
+      input.parentBranchId ?? sourceNode?.branchId;
     return this.db.transaction(async (tx) => {
       const [branch] = await tx
         .insert(projectBranches)
@@ -1287,12 +1323,50 @@ export class ProjectService {
           projectId,
           name: input.name,
           description: input.description,
-          parentBranchId: input.parentBranchId,
+          parentBranchId: effectiveParentBranchId,
           sourceNodeId: input.sourceNodeId,
           createdBy: actor.membershipId,
         })
         .returning();
       if (!branch) throw new Error("Failed to create project branch");
+
+      // A work line derived from a node must immediately have a visible entry
+      // node. Previously the branch existed only as metadata, so it looked
+      // detached in the canvas/timeline and an empty branch merged no content.
+      const [entryNode] = sourceNode
+        ? await tx
+            .insert(projectNodes)
+            .values({
+              projectId,
+              branchId: branch.id,
+              parentId: null,
+              type: "task",
+              title: input.name,
+              description:
+                input.description ?? `从“${sourceNode.title}”派生的工作线入口`,
+              status: "not_started",
+              progress: "0",
+              progressMode: "manual",
+              weight: "1",
+              sortOrder: 0,
+              startAt: sourceNode.startAt,
+              dueAt: sourceNode.dueAt,
+              metadata: {
+                derivedFromNodeId: sourceNode.id,
+                derivedFromNodeTitle: sourceNode.title,
+              },
+              createdBy: actor.membershipId,
+            })
+            .returning()
+        : [];
+      if (entryNode) {
+        await this.recordNodeVersion(
+          tx,
+          entryNode,
+          `从“${sourceNode!.title}”派生工作线`,
+          actor.membershipId,
+        );
+      }
       await tx.insert(projectBranchVersions).values({
         branchId: branch.id,
         version: 1,
@@ -1308,8 +1382,9 @@ export class ProjectService {
         entityId: branch.id,
         entityVersion: 1,
         details: {
-          parentBranchId: input.parentBranchId ?? null,
+          parentBranchId: effectiveParentBranchId ?? null,
           sourceNodeId: input.sourceNodeId ?? null,
+          entryNodeId: entryNode?.id ?? null,
         },
       });
       await tx.insert(auditLogs).values({
@@ -1615,6 +1690,20 @@ export class ProjectService {
           ),
         )
         .orderBy(asc(projectNodes.createdAt), asc(projectNodes.sortOrder));
+      const [mergeAnchor] = source.sourceNodeId
+        ? await tx
+            .select({ id: projectNodes.id })
+            .from(projectNodes)
+            .where(
+              and(
+                eq(projectNodes.id, source.sourceNodeId),
+                eq(projectNodes.projectId, projectId),
+                eq(projectNodes.branchId, targetBranchId),
+                isNull(projectNodes.deletedAt),
+              ),
+            )
+            .limit(1)
+        : [];
       const sourceNodeIds = new Set(sourceNodes.map((node) => node.id));
       const clonedIdBySourceId = new Map<string, string>();
       const pendingNodes = new Map(sourceNodes.map((node) => [node.id, node]));
@@ -1633,9 +1722,11 @@ export class ProjectService {
           .values({
             projectId,
             branchId: targetBranchId,
-            parentId: next.parentId
-              ? (clonedIdBySourceId.get(next.parentId) ?? null)
-              : null,
+            parentId: resolveMergedNodeParentId(
+              next.parentId,
+              clonedIdBySourceId,
+              mergeAnchor?.id ?? null,
+            ),
             type: next.type,
             title: next.title,
             description: next.description,
@@ -1655,6 +1746,37 @@ export class ProjectService {
         clonedIdBySourceId.set(next.id, clone.id);
         pendingNodes.delete(next.id);
         clonedNodes.push(clone);
+      }
+
+      // Legacy branches could be created without any node. Merging one used
+      // to report success while copying zero visible content. Preserve the
+      // branch as a real child node when its source is in the target branch.
+      if (!sourceNodes.length && mergeAnchor) {
+        const [materialized] = await tx
+          .insert(projectNodes)
+          .values({
+            projectId,
+            branchId: targetBranchId,
+            parentId: mergeAnchor.id,
+            type: "task",
+            title: source.name,
+            description:
+              source.description ?? `由已合并工作线“${source.name}”生成`,
+            status: "not_started",
+            progress: "0",
+            progressMode: "manual",
+            weight: "1",
+            sortOrder: 0,
+            metadata: {
+              mergedFromBranchId: source.id,
+              mergedFromEmptyBranch: true,
+            },
+            createdBy: actor.membershipId,
+          })
+          .returning();
+        if (!materialized)
+          throw new Error("Failed to materialize empty project branch");
+        clonedNodes.push(materialized);
       }
 
       const sourceEdges = (
@@ -1769,6 +1891,7 @@ export class ProjectService {
           copiedNodeCount: clonedNodes.length,
           copiedEdgeCount: sourceEdges.length,
           copiedAssigneeCount: sourceAssignments.length,
+          attachedToNodeId: mergeAnchor?.id ?? null,
         },
       });
       await tx.insert(auditLogs).values({

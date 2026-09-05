@@ -46,6 +46,7 @@ export default function AnalyticsChart({
   const chartRef = useRef<echarts.EChartsType | null>(null);
   const onDataSelectRef = useRef(onDataSelect);
   const optionSignatureRef = useRef("");
+  const compactTypographyRef = useRef<boolean | null>(null);
   const scrollPositionRef = useRef({ x: 0, y: 0 });
   const ownedFullscreenRef = useRef(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -71,7 +72,20 @@ export default function AnalyticsChart({
     let resizeFrame = 0;
     const observer = new ResizeObserver(() => {
       window.cancelAnimationFrame(resizeFrame);
-      resizeFrame = window.requestAnimationFrame(() => chart.resize());
+      resizeFrame = window.requestAnimationFrame(() => {
+        chart.resize();
+        const compact = element.clientWidth < 520;
+        if (compactTypographyRef.current !== compact) {
+          compactTypographyRef.current = compact;
+          chart.setOption({
+            textStyle: {
+              fontFamily:
+                '"SF Pro Text", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif',
+              fontSize: compact ? 12 : 13,
+            },
+          });
+        }
+      });
     });
     observer.observe(element);
     return () => {
@@ -93,7 +107,16 @@ export default function AnalyticsChart({
     const signature = JSON.stringify(option);
     if (signature === optionSignatureRef.current) return;
     optionSignatureRef.current = signature;
-    chart.setOption(option, {
+    const compact = (container.current?.clientWidth ?? 0) < 520;
+    compactTypographyRef.current = compact;
+    chart.setOption({
+      textStyle: {
+        fontFamily:
+          '"SF Pro Text", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif',
+        fontSize: compact ? 12 : 13,
+      },
+      ...option,
+    }, {
       lazyUpdate: true,
       notMerge: false,
     });

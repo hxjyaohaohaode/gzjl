@@ -150,6 +150,15 @@ describe("service probes", () => {
       expect(root.headers["content-security-policy"]).toContain(
         "connect-src 'self' https://private-evidence.storage.example.test",
       );
+      expect(root.headers["content-security-policy"]).toContain(
+        "img-src 'self' data: blob: https://private-evidence.storage.example.test",
+      );
+      expect(root.headers["content-security-policy"]).toContain(
+        "media-src 'self' blob: https://private-evidence.storage.example.test",
+      );
+      expect(root.headers["content-security-policy"]).toContain(
+        "frame-src 'self' blob: https://private-evidence.storage.example.test",
+      );
       expect(root.headers["cache-control"]).toBe(
         "no-cache, no-store, must-revalidate",
       );

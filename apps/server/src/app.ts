@@ -112,6 +112,28 @@ export async function buildApp({
                   ? [new URL(config.S3_BROWSER_ORIGIN).origin]
                   : []),
               ],
+              imgSrc: [
+                "'self'",
+                "data:",
+                "blob:",
+                ...(config.S3_BROWSER_ORIGIN
+                  ? [new URL(config.S3_BROWSER_ORIGIN).origin]
+                  : []),
+              ],
+              mediaSrc: [
+                "'self'",
+                "blob:",
+                ...(config.S3_BROWSER_ORIGIN
+                  ? [new URL(config.S3_BROWSER_ORIGIN).origin]
+                  : []),
+              ],
+              frameSrc: [
+                "'self'",
+                "blob:",
+                ...(config.S3_BROWSER_ORIGIN
+                  ? [new URL(config.S3_BROWSER_ORIGIN).origin]
+                  : []),
+              ],
             },
           },
         }

@@ -132,12 +132,24 @@ describe("analytics local-time allocation", () => {
   });
 
   it("keeps deterministic forecasts nonnegative and visually separable as a band", () => {
-    const forecast = forecastDailySeries([
-      { date: "2026-09-01", seconds: 3_600 },
-      { date: "2026-09-02", seconds: 7_200 },
-      { date: "2026-09-03", seconds: 0 },
-      { date: "2026-09-04", seconds: 10_800 },
-    ]);
+    expect(
+      forecastDailySeries([
+        { date: "2026-09-01", seconds: 3_600 },
+        { date: "2026-09-02", seconds: 7_200 },
+        { date: "2026-09-03", seconds: 0 },
+        { date: "2026-09-04", seconds: 10_800 },
+      ]),
+    ).toEqual([]);
+    const forecast = forecastDailySeries(
+      Array.from({ length: 14 }, (_, index) => {
+        const date = new Date(Date.UTC(2026, 7, 22 + index, 12));
+        const day = date.getUTCDay();
+        return {
+          date: date.toISOString().slice(0, 10),
+          seconds: day === 0 || day === 6 ? 0 : 3_600 + index * 240,
+        };
+      }),
+    );
 
     expect(forecast).toHaveLength(7);
     expect(forecast[0]?.date).toBe("2026-09-05");

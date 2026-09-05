@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   assertValidBranchParent,
   ProjectTreeValidationError,
+  resolveMergedNodeParentId,
 } from "./service.js";
 
 const activeBranches = [
@@ -63,5 +64,22 @@ describe("project branch parent validation", () => {
         activeBranches,
       }),
     ).toThrowError("目标父分支不属于当前项目或已归档。");
+  });
+});
+
+describe("project branch merge anchoring", () => {
+  it("attaches source roots to the derivation node and keeps descendants under their cloned parent", () => {
+    const clonedIds = new Map([["source-root", "cloned-root"]]);
+
+    expect(resolveMergedNodeParentId(null, clonedIds, "origin-node")).toBe(
+      "origin-node",
+    );
+    expect(
+      resolveMergedNodeParentId("source-root", clonedIds, "origin-node"),
+    ).toBe("cloned-root");
+  });
+
+  it("keeps a source root at target root when no matching derivation node exists", () => {
+    expect(resolveMergedNodeParentId(null, new Map(), null)).toBeNull();
   });
 });

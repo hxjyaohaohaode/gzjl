@@ -608,6 +608,11 @@ export class AnalyticsService {
           sampleDays: forecastResult.sampleDays,
           nonZeroSampleDays: forecastResult.nonZeroSampleDays,
           horizonDays: forecast.length,
+          validationPoints: forecastResult.validationPoints,
+          validationWape: forecastResult.validationWape,
+          intervalCoverage: forecastResult.intervalCoverage,
+          seasonalityStrength: forecastResult.seasonalityStrength,
+          trendPerDay: forecastResult.trendPerDay,
         },
       },
       funnel: [

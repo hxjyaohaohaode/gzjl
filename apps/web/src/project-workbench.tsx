@@ -351,6 +351,40 @@ function flattenProjectTree(nodes: ProjectNode[]): Array<{ node: ProjectNode; de
   return ordered;
 }
 
+function flattenBranchTree(branches: Branch[]): Array<{ branch: Branch; depth: number }> {
+  const branchIds = new Set(branches.map((branch) => branch.id));
+  const children = new Map<string, Branch[]>();
+  branches.forEach((branch) => {
+    const parentKey =
+      branch.parentBranchId && branchIds.has(branch.parentBranchId)
+        ? branch.parentBranchId
+        : "";
+    children.set(parentKey, [...(children.get(parentKey) ?? []), branch]);
+  });
+  children.forEach((siblings) =>
+    siblings.sort(
+      (left, right) =>
+        Number(right.isDefault) - Number(left.isDefault) ||
+        left.name.localeCompare(right.name, "zh-CN"),
+    ),
+  );
+  const ordered: Array<{ branch: Branch; depth: number }> = [];
+  const visited = new Set<string>();
+  const visit = (parentId: string, depth: number) => {
+    (children.get(parentId) ?? []).forEach((branch) => {
+      if (visited.has(branch.id)) return;
+      visited.add(branch.id);
+      ordered.push({ branch, depth });
+      visit(branch.id, depth + 1);
+    });
+  };
+  visit("", 0);
+  branches.forEach((branch) => {
+    if (!visited.has(branch.id)) ordered.push({ branch, depth: 0 });
+  });
+  return ordered;
+}
+
 function AssigneeAvatarGroup({
   assignees,
   className,
@@ -427,14 +461,23 @@ function Timeline({
     : startMs + 6 * DAY_MS;
   const start = new Date(startMs);
   const end = new Date(endMs);
-  const rangeStart = new Date(
+  const naturalRangeStart = new Date(
     start.getFullYear(),
     start.getMonth(),
     start.getDate(),
   );
-  const rangeEnd = new Date(
-    Math.max(end.getTime(), rangeStart.getTime() + 6 * DAY_MS),
+  const naturalRangeEnd = new Date(
+    Math.max(end.getTime(), naturalRangeStart.getTime() + 6 * DAY_MS),
   );
+  const paddingDays = Math.max(
+    1,
+    Math.min(
+      7,
+      Math.round((naturalRangeEnd.getTime() - naturalRangeStart.getTime()) / DAY_MS / 18),
+    ),
+  );
+  const rangeStart = new Date(naturalRangeStart.getTime() - paddingDays * DAY_MS);
+  const rangeEnd = new Date(naturalRangeEnd.getTime() + paddingDays * DAY_MS);
   const rangeDays = Math.max(
     1,
     Math.ceil((rangeEnd.getTime() - rangeStart.getTime()) / DAY_MS) + 1,
@@ -462,14 +505,21 @@ function Timeline({
       3,
       offset(node.dueAt ?? node.startAt) - offset(node.startAt ?? node.dueAt),
     );
-  const timelineBranches = branches.filter((branch) =>
-    nodes.some((node) => node.branchId === branch.id),
+  const timelineBranches = flattenBranchTree(
+    branches.filter((branch) => nodes.some((node) => node.branchId === branch.id)),
   );
+  const todayOffset = offset(new Date().toISOString());
+  const todayVisible = todayOffset > 0 && todayOffset < 100;
   return (
     <div className="project-timeline">
       <div className="project-timeline-head">
         <div className="project-timeline-label">分支 / 工作节点</div>
         <div className="project-timeline-days">
+          {todayVisible ? (
+            <i className="project-timeline-today" style={{ left: `${todayOffset}%` }}>
+              <span>今天</span>
+            </i>
+          ) : null}
           {ticks.map((day) => (
             <span key={day.toISOString()}>
               {new Intl.DateTimeFormat("zh-CN", {
@@ -481,17 +531,26 @@ function Timeline({
         </div>
       </div>
       <div className="project-timeline-rows">
-        {timelineBranches.map((branch) => {
+        {timelineBranches.map(({ branch, depth }) => {
           const branchNodes = nodes.filter((node) => node.branchId === branch.id);
+          const parentBranch = branches.find((candidate) => candidate.id === branch.parentBranchId);
+          const sourceNode = nodes.find((node) => node.id === branch.sourceNodeId);
           return (
             <section className="project-timeline-branch" key={branch.id}>
-              <div className="project-timeline-branch-head">
+              <div className="project-timeline-branch-head" style={{ paddingLeft: `${0.8 + Math.min(depth, 5) * 1.15}rem` }}>
                 <span>
                   <GitBranch size={14} />
                   <strong>{branch.name}</strong>
                   {branch.isDefault ? <em>主线</em> : null}
                 </span>
-                <small>{branchNodes.length} 个节点 · {summarizeProgress(branchNodes)}%</small>
+                <small>
+                  {sourceNode
+                    ? `从“${sourceNode.title}”派生`
+                    : parentBranch
+                      ? `挂载于 ${parentBranch.name}`
+                      : "项目根级"}
+                  {` · ${branchNodes.length} 个节点 · ${summarizeProgress(branchNodes)}%`}
+                </small>
               </div>
               {flattenProjectTree(branchNodes).map(({ node, depth }) => {
                 const progress = safeProgress(node.progress);
@@ -733,9 +792,10 @@ function ProjectBranchRail({
         <span><strong>全部结构</strong><small>{branches.length} 条分支并行</small></span>
         <em>{summarizeProgress(nodes)}%</em>
       </button>
-      {branches.map((branch) => {
+      {flattenBranchTree(branches).map(({ branch, depth }) => {
         const branchNodes = nodes.filter((node) => node.branchId === branch.id);
         const parent = branches.find((candidate) => candidate.id === branch.parentBranchId);
+        const source = nodes.find((node) => node.id === branch.sourceNodeId);
         const progress = summarizeProgress(branchNodes);
         return (
           <button
@@ -743,12 +803,20 @@ function ProjectBranchRail({
             className={cn("project-branch-card", selectedBranchId === branch.id && "is-selected")}
             key={branch.id}
             onClick={() => onSelect(branch.id)}
+            style={{ marginLeft: `${Math.min(depth, 5) * 0.48}rem` }}
             type="button"
           >
             <span className="project-branch-card-icon"><GitBranch size={17} /></span>
             <span>
               <strong>{branch.name}{branch.isDefault ? <i>主线</i> : null}</strong>
-              <small>{parent ? `挂载于 ${parent.name}` : "项目根分支"} · {branchNodes.length} 节点</small>
+              <small>
+                {source
+                  ? `从“${source.title}”派生`
+                  : parent
+                    ? `挂载于 ${parent.name}`
+                    : "项目根工作线"}
+                {` · ${branchNodes.length} 节点`}
+              </small>
             </span>
             <em>{progress}%</em>
             <span className="project-branch-card-progress"><i style={{ width: `${progress}%` }} /></span>
@@ -1072,6 +1140,7 @@ function NodeInspectorContent({
   projectId,
   canManage,
   onClose,
+  onDeriveBranch,
   onOpenRecycle,
 }: {
   node: ProjectNode;
@@ -1080,6 +1149,7 @@ function NodeInspectorContent({
   projectId: string;
   canManage: boolean;
   onClose: () => void;
+  onDeriveBranch?: () => void;
   onOpenRecycle?: () => void;
 }) {
   const queryClient = useQueryClient();
@@ -1285,6 +1355,17 @@ function NodeInspectorContent({
           <h2>{node.title}</h2>
         </div>
         <div className="flex shrink-0 items-center gap-1">
+          {canManage && onDeriveBranch ? (
+            <Button
+              aria-label={`从 ${node.title} 派生工作线`}
+              onClick={onDeriveBranch}
+              size="compact"
+              variant="secondary"
+            >
+              <GitBranch size={14} />
+              派生
+            </Button>
+          ) : null}
           {canManage && onOpenRecycle ? (
             <Button
               aria-label="打开项目回收站"
@@ -1880,6 +1961,7 @@ function NodeInspector({
   projectId,
   canManage,
   onClose,
+  onDeriveBranch,
   onOpenRecycle,
 }: {
   node: ProjectNode;
@@ -1888,6 +1970,7 @@ function NodeInspector({
   projectId: string;
   canManage: boolean;
   onClose: () => void;
+  onDeriveBranch?: () => void;
   onOpenRecycle?: () => void;
 }) {
   return (
@@ -1898,6 +1981,7 @@ function NodeInspector({
       nodes={nodes}
       assignees={assignees}
       onClose={onClose}
+      {...(onDeriveBranch ? { onDeriveBranch } : {})}
       {...(onOpenRecycle ? { onOpenRecycle } : {})}
       projectId={projectId}
     />
@@ -1916,6 +2000,7 @@ export function ProjectDetailPage({ me }: { me: Me }) {
   const [showCreate, setShowCreate] = useState(false);
   const [showTeam, setShowTeam] = useState(false);
   const [showBranch, setShowBranch] = useState(false);
+  const [branchSourceNodeId, setBranchSourceNodeId] = useState<string | null>(null);
   const [showBranchManager, setShowBranchManager] = useState(false);
   const [showRecycle, setShowRecycle] = useState(false);
   const [nodeForm, setNodeForm] = useState({
@@ -2025,7 +2110,7 @@ export function ProjectDetailPage({ me }: { me: Me }) {
   });
   const createBranch = useMutation({
     mutationFn: () => {
-      const sourceNode = allNodes.find((node) => node.id === selectedNodeId);
+      const sourceNode = allNodes.find((node) => node.id === branchSourceNodeId);
       const parentBranchId = sourceNode?.branchId ??
         (branchId !== "all" ? branchId : activeBranches.find((branch) => branch.isDefault)?.id);
       return api(`/api/projects/${projectId}/branches`, {
@@ -2033,12 +2118,13 @@ export function ProjectDetailPage({ me }: { me: Me }) {
         body: {
           name: branchName,
           parentBranchId,
-          sourceNodeId: selectedNodeId ?? undefined,
+          sourceNodeId: branchSourceNodeId ?? undefined,
         },
       });
     },
     onSuccess: async () => {
       setShowBranch(false);
+      setBranchSourceNodeId(null);
       setBranchName("");
       await refresh();
     },
@@ -2106,8 +2192,8 @@ export function ProjectDetailPage({ me }: { me: Me }) {
           targetBranchId,
         },
       }),
-    onSuccess: async (_, { branch }) => {
-      if (branchId === branch.id) setBranchId("all");
+    onSuccess: async (_, { targetBranchId }) => {
+      setBranchId(targetBranchId);
       setMergeSourceBranchId(null);
       setMergeTargetBranchId("");
       setSelectedNodeId(null);
@@ -2147,13 +2233,28 @@ export function ProjectDetailPage({ me }: { me: Me }) {
   }, [tree.data?.nodeAssignees]);
   const visibleCanvasNodes = useMemo(
     () =>
-      visibleNodes.map((node) => ({
-        ...node,
-        assignees: assigneesByNodeId.get(node.id) ?? [],
-      })),
-    [assigneesByNodeId, visibleNodes],
+      visibleNodes.map((node) => {
+        const branch = activeBranches.find(
+          (candidate) => candidate.id === node.branchId,
+        );
+        const sourceVisible =
+          !node.parentId &&
+          branch?.sourceNodeId &&
+          visibleNodes.some((candidate) => candidate.id === branch.sourceNodeId);
+        return {
+          ...node,
+          // Cross-branch derivation is metadata in the database because a
+          // node parent must stay inside its own branch. Project it as a
+          // hierarchy edge on the all-structure canvas so the work line is
+          // visually attached to the node it came from.
+          parentId: sourceVisible ? branch.sourceNodeId! : node.parentId,
+          assignees: assigneesByNodeId.get(node.id) ?? [],
+        };
+      }),
+    [activeBranches, assigneesByNodeId, visibleNodes],
   );
   const selected = allNodes.find((node) => node.id === selectedNodeId) ?? null;
+  const branchSource = allNodes.find((node) => node.id === branchSourceNodeId) ?? null;
   const openCreateFor = (parentId: string | null, targetBranchId?: string) => {
     setNodeForm((current) => ({
       ...current,
@@ -2250,7 +2351,7 @@ export function ProjectDetailPage({ me }: { me: Me }) {
                   size="compact"
                 >
                   <Plus size={16} />
-                  新建节点
+                  {selected ? `在“${selected.title}”下新建子节点` : "新建根节点"}
                 </Button>
               </>
             ) : null}
@@ -2337,13 +2438,18 @@ export function ProjectDetailPage({ me }: { me: Me }) {
                     管理分支
                   </Button>
                   <Button
-                    aria-label="从当前节点创建分支"
-                    onClick={() => setShowBranch((value) => !value)}
+                    aria-label="从当前节点派生并行工作线"
+                    disabled={!selected}
+                    onClick={() => {
+                      if (!selected) return;
+                      setBranchSourceNodeId(selected.id);
+                      setShowBranch((value) => !value);
+                    }}
                     size="compact"
                     variant="secondary"
                   >
                     <GitBranch size={15} />
-                    新分支
+                    {selected ? "派生工作线" : "先选择节点再派生"}
                   </Button>
                 </>
               ) : null}
@@ -2591,9 +2697,9 @@ export function ProjectDetailPage({ me }: { me: Me }) {
                   className={fieldClass}
                   onChange={(event) => setBranchName(event.target.value)}
                   placeholder={
-                    selected
-                      ? `从“${selected.title}”创建分支`
-                      : "从主线创建分支"
+                    branchSource
+                      ? `从“${branchSource.title}”派生并行工作线`
+                      : "并行工作线名称"
                   }
                   required
                   value={branchName}
@@ -2603,11 +2709,17 @@ export function ProjectDetailPage({ me }: { me: Me }) {
                   size="compact"
                   type="submit"
                 >
-                  创建分支
+                  创建并生成入口节点
                 </Button>
               </form>
+              <p className="project-branch-form-help">
+                普通上下级任务请使用“新建子节点”。工作线适用于从当前节点派生另一套并行方案；创建后会自动生成入口节点，并在画布和时间轴中连接到来源。
+              </p>
               <Button
-                onClick={() => setShowBranch(false)}
+                onClick={() => {
+                  setShowBranch(false);
+                  setBranchSourceNodeId(null);
+                }}
                 size="compact"
                 variant="ghost"
               >
@@ -2620,9 +2732,9 @@ export function ProjectDetailPage({ me }: { me: Me }) {
               <CardContent>
                 <div className="project-create-panel-head">
                   <div>
-                    <p className="app-section-label">分支生命周期</p>
+                    <p className="app-section-label">工作线生命周期</p>
                     <h2>
-                      分支可独立演进；合并会复制它的有效节点和内部关联，再将来源分支安全归档。
+                      工作线从项目节点派生；合并会把有效节点接回来源节点，并将来源工作线放入可追溯的回收区。
                     </h2>
                   </div>
                   <Button
@@ -2642,7 +2754,7 @@ export function ProjectDetailPage({ me }: { me: Me }) {
                     <div className="project-branch-row" key={branch.id}>
                       <span className="min-w-0">
                         <strong>
-                          {branch.isDefault ? "主线 · " : "分支 · "}
+                            {branch.isDefault ? "主线 · " : "工作线 · "}
                           {branch.name}
                         </strong>
                         <small>
@@ -2685,14 +2797,18 @@ export function ProjectDetailPage({ me }: { me: Me }) {
                         </Button>
                         {!branch.isDefault ? (
                           <Button
-                            aria-label={`合并分支 ${branch.name}`}
+                          aria-label={`合并工作线 ${branch.name}`}
                             disabled={activeBranches.length < 2}
                             onClick={() => {
                               setMergeSourceBranchId(branch.id);
                               setMergeTargetBranchId(
                                 activeBranches.find(
-                                  (candidate) => candidate.id !== branch.id,
-                                )?.id ?? "",
+                                  (candidate) => candidate.id === branch.parentBranchId,
+                                )?.id ??
+                                  activeBranches.find(
+                                    (candidate) => candidate.id !== branch.id,
+                                  )?.id ??
+                                  "",
                               );
                               setBranchEditor(null);
                             }}
@@ -2705,12 +2821,12 @@ export function ProjectDetailPage({ me }: { me: Me }) {
                         ) : null}
                         {!branch.isDefault ? (
                           <Button
-                            aria-label={`归档分支 ${branch.name}`}
+                          aria-label={`删除工作线 ${branch.name}`}
                             disabled={archiveBranch.isPending}
                             onClick={() => {
                               if (
                                 window.confirm(
-                                  `归档分支“${branch.name}”吗？它会从当前视图隐藏，但不会丢失任何版本或节点。`,
+                                  `将工作线“${branch.name}”移入回收区吗？它会从当前视图隐藏，节点、版本和审计记录仍会保留并可恢复。`,
                                 )
                               )
                                 archiveBranch.mutate(branch);
@@ -2719,7 +2835,7 @@ export function ProjectDetailPage({ me }: { me: Me }) {
                             variant="ghost"
                           >
                             <Archive size={14} />
-                            归档
+                            删除
                           </Button>
                         ) : null}
                       </div>
@@ -2827,7 +2943,7 @@ export function ProjectDetailPage({ me }: { me: Me }) {
                           }}
                         >
                           <div>
-                            <p className="app-section-label">合并分支</p>
+                            <p className="app-section-label">合并工作线</p>
                             <strong>{source.name}</strong>
                           </div>
                           <Field label="合并到活跃分支">
@@ -2850,14 +2966,17 @@ export function ProjectDetailPage({ me }: { me: Me }) {
                                   >
                                     {candidate.isDefault
                                       ? "主线 · "
-                                      : "分支 · "}
+                                      : "工作线 · "}
                                     {candidate.name}
+                                    {candidate.id === source.parentBranchId
+                                      ? "（原来源，推荐）"
+                                      : ""}
                                   </option>
                                 ))}
                             </select>
                           </Field>
                           <p className="text-xs leading-5 text-[var(--text-muted)]">
-                            不会覆盖目标已有节点；系统会在同一事务内复制来源分支的有效节点和内部关系、写入审计，再归档来源分支。
+                            合并不会覆盖目标现有内容。来源根节点会接到最初派生它的节点下；旧的空工作线也会转换成一个真实子节点。节点、关系、负责人和审计会在同一事务内完成。
                           </p>
                           <div className="flex flex-wrap gap-2">
                             <Button
@@ -2885,7 +3004,7 @@ export function ProjectDetailPage({ me }: { me: Me }) {
                   : null}
                 {archivedBranches.length ? (
                   <div className="project-branch-archive-list">
-                    <p className="app-section-label">已归档分支</p>
+                    <p className="app-section-label">工作线回收区</p>
                     {archivedBranches.map((branch) => (
                       <div key={branch.id}>
                         <span>
@@ -3070,6 +3189,11 @@ export function ProjectDetailPage({ me }: { me: Me }) {
               nodes={allNodes}
               assignees={assigneesByNodeId.get(selected.id) ?? []}
               onClose={() => setSelectedNodeId(null)}
+              onDeriveBranch={() => {
+                setBranchSourceNodeId(selected.id);
+                setShowBranch(true);
+                setSelectedNodeId(null);
+              }}
               onOpenRecycle={() => {
                 setShowRecycle(true);
                 setSelectedNodeId(null);

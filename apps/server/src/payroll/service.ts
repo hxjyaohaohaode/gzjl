@@ -880,6 +880,11 @@ export class PayrollService {
         sampleDays: variableAmountForecast.sampleDays,
         nonZeroSampleDays: variableAmountForecast.nonZeroSampleDays,
         horizonDays: futureDates.length,
+        validationPoints: variableAmountForecast.validationPoints,
+        validationWape: variableAmountForecast.validationWape,
+        intervalCoverage: variableAmountForecast.intervalCoverage,
+        seasonalityStrength: variableAmountForecast.seasonalityStrength,
+        trendPerDay: variableAmountForecast.trendPerDay,
         includesKnownFutureRecords: futureDates.some((date) => {
           const amount = daily.get(date)!;
           return amount.approvedSeconds + amount.pendingSeconds > 0;

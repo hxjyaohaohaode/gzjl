@@ -158,6 +158,14 @@ export default function ProjectCanvas({
   const projectAccent = accessibleAccent(accent);
   const flowNodes = useMemo<Node[]>(() => {
     const positions = layoutTree(nodes);
+    const directChildCount = new Map<string, number>();
+    nodes.forEach((node) => {
+      if (!node.parentId) return;
+      directChildCount.set(
+        node.parentId,
+        (directChildCount.get(node.parentId) ?? 0) + 1,
+      );
+    });
 
     return nodes.map((node, fallbackIndex) => {
       const position = positions.get(node.id) ?? { x: 0, y: fallbackIndex * 142 };
@@ -171,8 +179,10 @@ export default function ProjectCanvas({
           : node.status === "completed"
             ? "var(--success)"
             : projectAccent;
+      const childCount = directChildCount.get(node.id) ?? 0;
       return {
         id: node.id,
+        ariaLabel: `${node.title}，${statusLabel(node.status)}，进度 ${progress}%${childCount ? `，${childCount} 个直接子节点` : "，末级节点"}`,
         position,
         data: {
           label: (
@@ -182,7 +192,7 @@ export default function ProjectCanvas({
             >
               <div className="project-flow-node-top">
                 <span className="project-flow-node-kind">{nodeTypeLabel(node.type)}</span>
-                <strong className="text-[0.68rem] tabular-nums text-[var(--node-accent)]">
+                <strong className="text-[0.74rem] tabular-nums text-[var(--node-accent)]">
                   {progress}%
                 </strong>
               </div>
@@ -222,7 +232,9 @@ export default function ProjectCanvas({
                 )}
               </div>
               <div className="project-flow-node-footer">
-                <span>{statusLabel(node.status)}</span>
+                <span>
+                  {statusLabel(node.status)} · {childCount ? `${childCount} 个子节点` : "末级节点"}
+                </span>
                 <span>
                   v{node.version}
                   {canManage ? (
@@ -333,6 +345,10 @@ export default function ProjectCanvas({
           <strong>{nodes.length} 个节点</strong>
           <span>{nodes.filter((node) => node.parentId).length} 条层级</span>
           <span>{edges.length} 条关联</span>
+          <span>
+            完成 {nodes.filter((node) => node.status === "completed").length} · 受阻{" "}
+            {nodes.filter((node) => node.status === "blocked").length}
+          </span>
           <span className="project-flow-key">
             <i data-kind="dependency" />
             依赖

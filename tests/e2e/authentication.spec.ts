@@ -307,10 +307,15 @@ async function mockAuthenticatedWorkspace(
             { date: "2026-09-04", seconds: 9_300, lowerSeconds: 6_300, upperSeconds: 12_300, confidence: "medium" },
           ],
           model: {
-            method: "weekday_recent_robust_v2",
+            method: "adaptive_weekday_backtest_v3",
             sampleDays: 30,
             nonZeroSampleDays: 18,
             horizonDays: 7,
+            validationPoints: 14,
+            validationWape: 0.18,
+            intervalCoverage: 0.86,
+            seasonalityStrength: 0.62,
+            trendPerDay: 180,
           },
         },
         availableFilters: {
@@ -901,11 +906,16 @@ test("personal payroll renders reconciled totals, daily pay, period trend, and c
           estimatedAmount: "1400.000000",
           projectedPeriodAmount: "3600.000000",
           projection: {
-            method: "weekday_recent_robust_v2",
+            method: "adaptive_weekday_backtest_v3",
             sampleDays: 4,
             nonZeroSampleDays: 2,
             horizonDays: 26,
             includesKnownFutureRecords: false,
+            validationPoints: 0,
+            validationWape: null,
+            intervalCoverage: null,
+            seasonalityStrength: 0,
+            trendPerDay: 0,
           },
           calculationBreakdown: {
             confirmedWorkAmount: "800.000000",
@@ -1787,6 +1797,11 @@ test("evidence uploads arbitrary file formats one by one and completes every sel
   await expect(page.getByText("验收报告.pdf", { exact: true })).toBeVisible();
   await expect(page.getByText("现场说明.txt", { exact: true }).first()).toBeVisible();
   await expect(page.getByText("完整材料.zip", { exact: true })).toBeVisible();
+  await expect(page.getByTitle("待上传 PDF：验收报告.pdf")).toBeVisible();
+  await expect(page.getByText("plain text evidence", { exact: true })).toBeVisible();
+  await expect(
+    page.getByText(/浏览器不适合直接展示此格式/).first(),
+  ).toBeVisible();
   const uploadQueueButton = page.getByRole("button", { name: "上传队列" });
   if (testInfo.project.name.startsWith("mobile")) {
     // The bottom navigation is fixed.  A control scrolled into view must keep
@@ -1890,6 +1905,7 @@ test("the uploader can inspect rich file details and use direct preview or downl
   await expect(page.getByText("现场说明.txt", { exact: true }).first()).toBeVisible();
   await expect(page.getByRole("link", { name: "预览" })).toHaveAttribute("href", `/api/attachments/${attachmentId}/open?mode=preview`);
   await expect(page.getByRole("link", { name: "下载" })).toHaveAttribute("href", `/api/attachments/${attachmentId}/open?mode=download`);
+  await expect(page.getByTitle("附件内容：现场说明.txt")).toBeVisible();
   await page.getByText("查看内容详情", { exact: true }).click();
   await expect(page.getByText("由提交人核对", { exact: true })).toBeVisible();
   await expect(page.getByText("b".repeat(64), { exact: true })).toBeVisible();
@@ -2235,6 +2251,30 @@ test("analytics uses accessible, server-backed responsive chart containers", asy
     });
   expect(chartToolSize.width).toBeLessThanOrEqual(32);
   expect(chartToolSize.height).toBeLessThanOrEqual(32);
+  if (testInfo.project.name.startsWith("mobile")) {
+    const chartSpacing = await page
+      .getByRole("img", { name: "每日净工时趋势图" })
+      .evaluate((canvas) => {
+        const frame = canvas.closest(".analytics-chart-frame");
+        const tools = frame?.querySelector(".analytics-chart-tools");
+        if (!frame || !tools) return null;
+        const canvasBox = canvas.getBoundingClientRect();
+        const toolBox = tools.getBoundingClientRect();
+        return {
+          canvasTop: canvasBox.top,
+          toolsBottom: toolBox.bottom,
+          frameWidth: frame.getBoundingClientRect().width,
+          canvasWidth: canvasBox.width,
+        };
+      });
+    expect(chartSpacing).not.toBeNull();
+    expect(chartSpacing!.toolsBottom).toBeLessThanOrEqual(
+      chartSpacing!.canvasTop,
+    );
+    expect(chartSpacing!.canvasWidth).toBeLessThanOrEqual(
+      chartSpacing!.frameWidth + 1,
+    );
+  }
   await expect(
     page.getByRole("button", { name: "全屏查看每日净工时趋势图" }),
   ).toBeVisible();
@@ -2872,6 +2912,15 @@ test("project tree renders a pannable canvas with a list fallback", async ({
   await page.goto("/projects/00000000-0000-4000-8000-000000000004");
   await expect(page.getByText("实现项目画布")).toBeVisible();
   await expect(page.locator(".react-flow")).toBeVisible();
+  await expect(page.getByText("完成 0 · 受阻 0", { exact: true })).toBeVisible();
+  await expect(
+    page.locator('.react-flow__node[aria-label*="个直接子节点"]').first(),
+  ).toBeVisible();
+  const nodeTitleFontSize = await page
+    .locator(".project-flow-node-title")
+    .first()
+    .evaluate((element) => Number.parseFloat(getComputedStyle(element).fontSize));
+  expect(nodeTitleFontSize).toBeGreaterThanOrEqual(13);
   await page.getByRole("button", { name: "列表", exact: true }).click();
   await expect(page.getByText(/任务 · .*v1/)).toBeVisible();
 });
@@ -4511,7 +4560,7 @@ test("project branch management keeps rename, merge, archive, and recovery actio
   await page.getByRole("button", { name: "登录", exact: true }).click();
   await page.goto(`/projects/${projectId}`);
   await page.getByRole("button", { name: "管理项目分支" }).click();
-  await expect(page.getByText("分支生命周期", { exact: true })).toBeVisible();
+  await expect(page.getByText("工作线生命周期", { exact: true })).toBeVisible();
   expect(
     await page.evaluate(
       () => document.documentElement.scrollWidth <= window.innerWidth + 1,
@@ -4520,13 +4569,70 @@ test("project branch management keeps rename, merge, archive, and recovery actio
   await page.getByRole("button", { name: "编辑分支 主线" }).click();
   await page.getByLabel("分支名称").fill("稳定主线");
   await page.getByRole("button", { name: "保存分支" }).click();
-  await page.getByRole("button", { name: "合并分支 交付优化" }).click();
+  await page.getByRole("button", { name: "合并工作线 交付优化" }).click();
   await page.getByLabel("合并到活跃分支").selectOption(mainBranchId);
   page.once("dialog", (dialog) => dialog.accept());
   await page.getByRole("button", { name: "确认合并" }).click();
   page.once("dialog", (dialog) => dialog.accept());
-  await page.getByRole("button", { name: "归档分支 实验分支" }).click();
+  await page.getByRole("button", { name: "删除工作线 实验分支" }).click();
   await page.getByRole("button", { name: "恢复分支 旧验证分支" }).click();
+});
+
+test("a selected project node can derive a connected work line with an entry node", async ({
+  page,
+}, testInfo) => {
+  await mockAuthenticatedWorkspace(page);
+  const projectId = "00000000-0000-4000-8000-000000000004";
+  const mainBranchId = "00000000-0000-4000-8000-000000000005";
+  const sourceNodeId = "00000000-0000-4000-8000-000000000006";
+  let submitted = false;
+  await page.route(`**/api/projects/${projectId}/branches`, async (route) => {
+    expect(route.request().method()).toBe("POST");
+    expect(route.request().postDataJSON()).toEqual({
+      name: "移动端并行验收",
+      parentBranchId: mainBranchId,
+      sourceNodeId,
+    });
+    submitted = true;
+    await route.fulfill({
+      status: 201,
+      json: {
+        branch: {
+          id: "00000000-0000-4000-8000-000000000099",
+          name: "移动端并行验收",
+          parentBranchId: mainBranchId,
+          sourceNodeId,
+        },
+      },
+    });
+  });
+
+  await page.goto("/login");
+  await page.getByLabel("邮箱或手机号").fill("owner@example.test");
+  await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+  await page.goto(`/projects/${projectId}`);
+  await expect(
+    page.getByRole("button", { name: "从当前节点派生并行工作线" }),
+  ).toBeDisabled();
+  await page
+    .locator(".react-flow")
+    .getByText("工作台正式版", { exact: true })
+    .click();
+  if (testInfo.project.name.startsWith("mobile")) {
+    await page
+      .getByRole("button", { name: "从 工作台正式版 派生工作线" })
+      .click();
+  } else {
+    await page
+      .getByRole("button", { name: "从当前节点派生并行工作线" })
+      .click();
+  }
+  await page
+    .getByPlaceholder("从“工作台正式版”派生并行工作线")
+    .fill("移动端并行验收");
+  await page.getByRole("button", { name: "创建并生成入口节点" }).click();
+  await expect.poll(() => submitted).toBe(true);
 });
 
 test("project progress modes and node assignees use versioned server-side contracts", async ({
@@ -4928,6 +5034,7 @@ test("approvers can inspect full work details and authorized evidence before dec
     "href",
     `/api/attachments/00000000-0000-4000-8000-000000000098/open?mode=download`,
   );
+  await expect(page.getByTitle("附件内容：客户研究报告.pdf")).toBeVisible();
   await expect(page.getByRole("button", { name: "批准" })).toBeVisible();
 });
 
@@ -5022,10 +5129,15 @@ test("account switching never reuses another member's analytics cache", async ({
           observed: [],
           predicted: [],
           model: {
-            method: "weekday_recent_robust_v2",
+            method: "adaptive_weekday_backtest_v3",
             sampleDays: 0,
             nonZeroSampleDays: 0,
             horizonDays: 0,
+            validationPoints: 0,
+            validationWape: null,
+            intervalCoverage: null,
+            seasonalityStrength: 0,
+            trendPerDay: 0,
           },
         },
         funnel: [
