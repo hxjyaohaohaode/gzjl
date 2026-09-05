@@ -4662,7 +4662,7 @@ test("project branch management keeps rename, merge, archive, and recovery actio
   await page.getByRole("button", { name: "恢复分支 旧验证分支" }).click();
 });
 
-test("a selected project node can derive a connected work line with an entry node", async ({
+test("a project node can derive a connected work line with an entry node", async ({
   page,
 }, testInfo) => {
   await mockAuthenticatedWorkspace(page);
@@ -4699,15 +4699,15 @@ test("a selected project node can derive a connected work line with an entry nod
   await expect(
     page.getByRole("button", { name: "从当前节点派生并行工作线" }),
   ).toBeDisabled();
-  await page
-    .locator(".react-flow")
-    .getByText("工作台正式版", { exact: true })
-    .click();
   if (testInfo.project.name.startsWith("mobile")) {
     await page
-      .getByRole("button", { name: "从 工作台正式版 派生工作线" })
+      .getByRole("button", { name: "从 工作台正式版 卡片快捷派生工作线" })
       .click();
   } else {
+    await page
+      .locator(".react-flow")
+      .getByText("工作台正式版", { exact: true })
+      .click();
     await page
       .getByRole("button", { name: "从当前节点派生并行工作线" })
       .click();

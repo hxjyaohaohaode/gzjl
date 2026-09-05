@@ -299,7 +299,7 @@ export default function ProjectCanvas({
                     type="button"
                   >↗</button>
                   <button
-                    aria-label={`从 ${node.title} 派生工作线`}
+                    aria-label={`从 ${node.title} 卡片快捷派生工作线`}
                     onClick={(event) => {
                       event.stopPropagation();
                       onDeriveBranch?.(node);
