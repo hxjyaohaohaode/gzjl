@@ -3,10 +3,15 @@ import {
   Archive,
   AlertCircle,
   ArrowLeft,
+  CheckCircle2,
+  ChevronDown,
   ChevronRight,
   Clock3,
+  ExternalLink,
   FilePenLine,
+  FileText,
   FolderKanban,
+  FolderTree,
   GitBranch,
   GitMerge,
   GripVertical,
@@ -15,6 +20,7 @@ import {
   ListTree,
   Maximize2,
   Minimize2,
+  Paperclip,
   Plus,
   RotateCcw,
   Save,
@@ -172,6 +178,19 @@ interface ProjectWorkSession {
   isPrimary: boolean;
 }
 
+interface ProjectWorkEvidence {
+  id: string;
+  kind: "file" | "url" | "text";
+  status: string;
+  originalName: string | null;
+  externalUrl: string | null;
+  textContent?: string | null;
+  mimeType: string | null;
+  visibility: "private" | "management_only" | "project_visible";
+  note: string | null;
+  uploadedAt: string;
+}
+
 interface RecycleBinNode {
   id: string;
   entityId: string;
@@ -279,6 +298,59 @@ function initials(displayName: string): string {
   return displayName.trim().slice(0, 2).toLocaleUpperCase() || "成员";
 }
 
+function safeProgress(value: string | number): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? Math.max(0, Math.min(100, parsed)) : 0;
+}
+
+function summarizeProgress(nodes: ProjectNode[]): number {
+  if (!nodes.length) return 0;
+  const roots = nodes.filter(
+    (node) => !node.parentId || !nodes.some((candidate) => candidate.id === node.parentId),
+  );
+  const basis = roots.length ? roots : nodes;
+  const weighted = basis.reduce(
+    (summary, node) => {
+      const weight = Math.max(0, Number(node.weight) || 1);
+      return {
+        total: summary.total + safeProgress(node.progress) * weight,
+        weight: summary.weight + weight,
+      };
+    },
+    { total: 0, weight: 0 },
+  );
+  return Math.round(weighted.weight ? weighted.total / weighted.weight : 0);
+}
+
+function flattenProjectTree(nodes: ProjectNode[]): Array<{ node: ProjectNode; depth: number }> {
+  const nodeIds = new Set(nodes.map((node) => node.id));
+  const children = new Map<string, ProjectNode[]>();
+  nodes.forEach((node) => {
+    const parentKey = node.parentId && nodeIds.has(node.parentId) ? node.parentId : "";
+    children.set(parentKey, [...(children.get(parentKey) ?? []), node]);
+  });
+  children.forEach((siblings) =>
+    siblings.sort((left, right) => left.sortOrder - right.sortOrder || left.title.localeCompare(right.title, "zh-CN")),
+  );
+  const ordered: Array<{ node: ProjectNode; depth: number }> = [];
+  const visited = new Set<string>();
+  const visit = (parentId: string, depth: number) => {
+    (children.get(parentId) ?? []).forEach((node) => {
+      if (visited.has(node.id)) return;
+      visited.add(node.id);
+      ordered.push({ node, depth });
+      visit(node.id, depth + 1);
+    });
+  };
+  visit("", 0);
+  nodes.forEach((node) => {
+    if (visited.has(node.id)) return;
+    ordered.push({ node, depth: 0 });
+    visit(node.id, 1);
+  });
+  return ordered;
+}
+
 function AssigneeAvatarGroup({
   assignees,
   className,
@@ -327,10 +399,14 @@ function AssigneeAvatarGroup({
 
 function Timeline({
   nodes,
+  branches,
+  assigneesByNodeId,
   selectedNodeId,
   onSelect,
 }: {
   nodes: ProjectNode[];
+  branches: Branch[];
+  assigneesByNodeId: Map<string, ProjectNodeAssignee[]>;
   selectedNodeId: string | null;
   onSelect: (nodeId: string) => void;
 }) {
@@ -363,9 +439,13 @@ function Timeline({
     1,
     Math.ceil((rangeEnd.getTime() - rangeStart.getTime()) / DAY_MS) + 1,
   );
-  const days = Array.from(
-    { length: Math.min(rangeDays, 31) },
-    (_, index) => new Date(rangeStart.getTime() + index * DAY_MS),
+  const tickCount = Math.min(8, rangeDays);
+  const ticks = Array.from({ length: tickCount }, (_, index) =>
+    new Date(
+      rangeStart.getTime() +
+        (rangeEnd.getTime() - rangeStart.getTime()) *
+          (tickCount === 1 ? 0 : index / (tickCount - 1)),
+    ),
   );
   const offset = (date: string | null) =>
     Math.max(
@@ -382,12 +462,15 @@ function Timeline({
       3,
       offset(node.dueAt ?? node.startAt) - offset(node.startAt ?? node.dueAt),
     );
+  const timelineBranches = branches.filter((branch) =>
+    nodes.some((node) => node.branchId === branch.id),
+  );
   return (
     <div className="project-timeline">
       <div className="project-timeline-head">
-        <div className="project-timeline-label">节点 / 排期</div>
+        <div className="project-timeline-label">分支 / 工作节点</div>
         <div className="project-timeline-days">
-          {days.map((day) => (
+          {ticks.map((day) => (
             <span key={day.toISOString()}>
               {new Intl.DateTimeFormat("zh-CN", {
                 month: "numeric",
@@ -398,42 +481,72 @@ function Timeline({
         </div>
       </div>
       <div className="project-timeline-rows">
-        {nodes.map((node) => (
-          <button
-            aria-pressed={selectedNodeId === node.id}
-            className={cn(
-              "project-timeline-row",
-              selectedNodeId === node.id && "is-selected",
-            )}
-            key={node.id}
-            onClick={() => onSelect(node.id)}
-            type="button"
-          >
-            <span className="project-timeline-node-label">
-              <strong>{node.title}</strong>
-              <small>
-                {nodeTypeLabel(node.type)} · {nodeStatusLabel(node.status)}
-              </small>
-            </span>
-            <span className="project-timeline-bar-space">
-              {node.startAt || node.dueAt ? (
-                <span
-                  className="project-timeline-bar"
-                  style={{
-                    left: `${offset(node.startAt ?? node.dueAt)}%`,
-                    width: `${width(node)}%`,
-                  }}
-                >
-                  <span>
-                    {formatDate(node.startAt)} – {formatDate(node.dueAt)}
-                  </span>
+        {timelineBranches.map((branch) => {
+          const branchNodes = nodes.filter((node) => node.branchId === branch.id);
+          return (
+            <section className="project-timeline-branch" key={branch.id}>
+              <div className="project-timeline-branch-head">
+                <span>
+                  <GitBranch size={14} />
+                  <strong>{branch.name}</strong>
+                  {branch.isDefault ? <em>主线</em> : null}
                 </span>
-              ) : (
-                <span className="project-timeline-unscheduled">未排期</span>
-              )}
-            </span>
-          </button>
-        ))}
+                <small>{branchNodes.length} 个节点 · {summarizeProgress(branchNodes)}%</small>
+              </div>
+              {flattenProjectTree(branchNodes).map(({ node, depth }) => {
+                const progress = safeProgress(node.progress);
+                return (
+                  <button
+                    aria-pressed={selectedNodeId === node.id}
+                    className={cn(
+                      "project-timeline-row",
+                      `is-${node.status}`,
+                      selectedNodeId === node.id && "is-selected",
+                    )}
+                    key={node.id}
+                    onClick={() => onSelect(node.id)}
+                    type="button"
+                  >
+                    <span
+                      className="project-timeline-node-label"
+                      style={{ paddingLeft: `${0.75 + Math.min(depth, 6) * 0.8}rem` }}
+                    >
+                      <i aria-hidden="true" />
+                      <span>
+                        <strong>{node.title}</strong>
+                        <small>
+                          {nodeTypeLabel(node.type)} · {nodeStatusLabel(node.status)} · {progress}%
+                        </small>
+                      </span>
+                      <AssigneeAvatarGroup assignees={assigneesByNodeId.get(node.id) ?? []} />
+                    </span>
+                    <span className="project-timeline-bar-space">
+                      {node.startAt || node.dueAt ? (
+                        <span
+                          className="project-timeline-bar"
+                          style={{
+                            left: `${offset(node.startAt ?? node.dueAt)}%`,
+                            width: `${width(node)}%`,
+                          }}
+                        >
+                          <span
+                            className="project-timeline-bar-progress"
+                            style={{ width: `${progress}%` }}
+                          />
+                          <small>
+                            {formatDate(node.startAt)} – {formatDate(node.dueAt)}
+                          </small>
+                        </span>
+                      ) : (
+                        <span className="project-timeline-unscheduled">待排期</span>
+                      )}
+                    </span>
+                  </button>
+                );
+              })}
+            </section>
+          );
+        })}
       </div>
     </div>
   );
@@ -444,61 +557,105 @@ function TreeList({
   selectedNodeId,
   onSelect,
   assigneesByNodeId,
+  searchActive = false,
+  canManage = false,
+  onAddChild,
 }: {
   nodes: ProjectNode[];
   selectedNodeId: string | null;
   onSelect: (nodeId: string) => void;
   assigneesByNodeId: Map<string, ProjectNodeAssignee[]>;
+  searchActive?: boolean;
+  canManage?: boolean;
+  onAddChild?: (node: ProjectNode) => void;
 }) {
-  const ordered = useMemo(() => {
-    const result: Array<{ node: ProjectNode; depth: number }> = [];
-    const visit = (parentId: string | null, depth: number) =>
-      nodes
-        .filter((node) => node.parentId === parentId)
-        .sort((left, right) => left.sortOrder - right.sortOrder)
-        .forEach((node) => {
-          result.push({ node, depth });
-          visit(node.id, depth + 1);
-        });
-    visit(null, 0);
-    return result;
+  const [expanded, setExpanded] = useState<Set<string>>(
+    () => new Set(nodes.filter((node) => !node.parentId).map((node) => node.id)),
+  );
+  const childCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    nodes.forEach((node) => {
+      if (node.parentId) counts.set(node.parentId, (counts.get(node.parentId) ?? 0) + 1);
+    });
+    return counts;
   }, [nodes]);
+  const ordered = useMemo(() => {
+    const all = flattenProjectTree(nodes);
+    if (searchActive) return all;
+    const visibleIds = new Set<string>();
+    all.forEach(({ node }) => {
+      if (!node.parentId || visibleIds.has(node.parentId) && expanded.has(node.parentId)) {
+        visibleIds.add(node.id);
+      }
+    });
+    return all.filter(({ node }) => visibleIds.has(node.id));
+  }, [expanded, nodes, searchActive]);
   return (
     <div className="project-tree-list project-workbench-tree-list">
+      <div className="project-tree-table-head" aria-hidden="true">
+        <span>工作节点</span>
+        <span>负责人 / 协作</span>
+        <span>状态</span>
+        <span>进度</span>
+      </div>
       {ordered.length ? (
-        ordered.map(({ node, depth }) => (
-          <button
-            aria-pressed={selectedNodeId === node.id}
+        ordered.map(({ node, depth }) => {
+          const childCount = childCounts.get(node.id) ?? 0;
+          const assignees = assigneesByNodeId.get(node.id) ?? [];
+          const responsible = assignees.find((assignee) => assignee.isResponsible);
+          return (
+          <div
             className={cn(
               "project-workbench-tree-row",
               selectedNodeId === node.id && "is-selected",
             )}
             key={node.id}
-            onClick={() => onSelect(node.id)}
-            style={{ paddingLeft: `${1 + Math.min(depth, 7) * 1.25}rem` }}
-            type="button"
           >
-            <span className="project-tree-kind">
-              <ChevronRight size={14} />
+            <span className="project-tree-node-cell" style={{ paddingLeft: `${0.45 + Math.min(depth, 7) * 1.15}rem` }}>
+              <button
+                aria-label={childCount ? `${expanded.has(node.id) ? "收起" : "展开"}${node.title}的 ${childCount} 个子节点` : `${node.title}没有子节点`}
+                className="project-tree-toggle"
+                disabled={!childCount}
+                onClick={() => setExpanded((current) => {
+                  const next = new Set(current);
+                  if (next.has(node.id)) next.delete(node.id); else next.add(node.id);
+                  return next;
+                })}
+                type="button"
+              >
+                {childCount && expanded.has(node.id) ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
+              </button>
+              <button className="project-tree-node-main" onClick={() => onSelect(node.id)} type="button">
+                <span className="project-tree-kind"><FolderTree size={14} /></span>
+                <span className="min-w-0 text-left">
+                  <strong>{node.title}</strong>
+                  <small>{nodeTypeLabel(node.type)} · v{node.version} · {childCount} 个子节点 · {formatDate(node.startAt)} – {formatDate(node.dueAt)}</small>
+                </span>
+              </button>
+              {canManage ? (
+                <button
+                  aria-label={`在 ${node.title} 下新建子节点`}
+                  className="project-tree-add-child"
+                  onClick={() => onAddChild?.(node)}
+                  title="新建子节点"
+                  type="button"
+                ><Plus size={14} /></button>
+              ) : null}
             </span>
-            <span className="min-w-0 flex-1 text-left">
-              <strong>{node.title}</strong>
-              <small>
-                {nodeTypeLabel(node.type)} · {progressModeLabel(node.progressMode)} · v{node.version} ·{" "}
-                {formatDate(node.startAt)} – {formatDate(node.dueAt)}
-              </small>
+            <span className="project-tree-owner-cell">
+              <AssigneeAvatarGroup assignees={assignees} />
+              <span><strong>{responsible?.displayName ?? "待认领"}</strong><small>{assignees.length ? `${assignees.length} 人协作` : "暂无协作者"}</small></span>
             </span>
-            <AssigneeAvatarGroup
-              assignees={assigneesByNodeId.get(node.id) ?? []}
-            />
             <Badge tone={statusTone(node.status)}>
               {nodeStatusLabel(node.status)}
             </Badge>
             <span className="project-tree-progress">
-              {Number(node.progress)}%
+              <strong>{safeProgress(node.progress)}%</strong>
+              <i><span style={{ width: `${safeProgress(node.progress)}%` }} /></i>
             </span>
-          </button>
-        ))
+          </div>
+          );
+        })
       ) : (
         <EmptyState
           description="当前筛选条件下没有节点。"
@@ -510,11 +667,148 @@ function TreeList({
   );
 }
 
+function ProjectOverview({
+  project,
+  nodes,
+  branches,
+  assigneesByNodeId,
+}: {
+  project: Project;
+  nodes: ProjectNode[];
+  branches: Branch[];
+  assigneesByNodeId: Map<string, ProjectNodeAssignee[]>;
+}) {
+  const progress = summarizeProgress(nodes);
+  const contributors = new Set(
+    [...assigneesByNodeId.values()].flat().map((assignee) => assignee.membershipId),
+  ).size;
+  const completed = nodes.filter((node) => node.status === "completed").length;
+  const blocked = nodes.filter((node) => node.status === "blocked").length;
+  return (
+    <section className="project-overview" aria-label="项目总览">
+      <div className="project-overview-identity">
+        <span className="project-overview-icon" style={{ background: project.color }}>
+          <FolderKanban size={24} />
+        </span>
+        <span>
+          <small>{project.key} · {project.status === "active" ? "执行中" : project.status}</small>
+          <strong>{project.name}</strong>
+          <em>{project.description || "用结构、排期和工作证据推进交付。"}</em>
+        </span>
+      </div>
+      <div className="project-overview-progress">
+        <span><small>项目结构进度</small><strong>{progress}%</strong></span>
+        <i><span style={{ width: `${progress}%`, background: project.color }} /></i>
+      </div>
+      <dl className="project-overview-stats">
+        <div><dt><GitBranch size={14} />活跃分支</dt><dd>{branches.length}</dd></div>
+        <div><dt><FolderTree size={14} />工作节点</dt><dd>{nodes.length}</dd></div>
+        <div><dt><UsersRound size={14} />参与成员</dt><dd>{contributors}</dd></div>
+        <div className={blocked ? "has-risk" : undefined}><dt><CheckCircle2 size={14} />完成 / 受阻</dt><dd>{completed} / {blocked}</dd></div>
+      </dl>
+    </section>
+  );
+}
+
+function ProjectBranchRail({
+  branches,
+  nodes,
+  selectedBranchId,
+  onSelect,
+}: {
+  branches: Branch[];
+  nodes: ProjectNode[];
+  selectedBranchId: string;
+  onSelect: (branchId: string) => void;
+}) {
+  return (
+    <section className="project-branch-rail" aria-label="项目分支">
+      <button
+        aria-pressed={selectedBranchId === "all"}
+        className={cn("project-branch-card", selectedBranchId === "all" && "is-selected")}
+        onClick={() => onSelect("all")}
+        type="button"
+      >
+        <span className="project-branch-card-icon"><Layers3 size={17} /></span>
+        <span><strong>全部结构</strong><small>{branches.length} 条分支并行</small></span>
+        <em>{summarizeProgress(nodes)}%</em>
+      </button>
+      {branches.map((branch) => {
+        const branchNodes = nodes.filter((node) => node.branchId === branch.id);
+        const parent = branches.find((candidate) => candidate.id === branch.parentBranchId);
+        const progress = summarizeProgress(branchNodes);
+        return (
+          <button
+            aria-pressed={selectedBranchId === branch.id}
+            className={cn("project-branch-card", selectedBranchId === branch.id && "is-selected")}
+            key={branch.id}
+            onClick={() => onSelect(branch.id)}
+            type="button"
+          >
+            <span className="project-branch-card-icon"><GitBranch size={17} /></span>
+            <span>
+              <strong>{branch.name}{branch.isDefault ? <i>主线</i> : null}</strong>
+              <small>{parent ? `挂载于 ${parent.name}` : "项目根分支"} · {branchNodes.length} 节点</small>
+            </span>
+            <em>{progress}%</em>
+            <span className="project-branch-card-progress"><i style={{ width: `${progress}%` }} /></span>
+          </button>
+        );
+      })}
+    </section>
+  );
+}
+
+function WorkSessionEvidence({ sessionId }: { sessionId: string }) {
+  const [open, setOpen] = useState(false);
+  const evidence = useQuery({
+    queryKey: ["project-work-evidence", sessionId],
+    queryFn: () => api<{ items: ProjectWorkEvidence[] }>(`/api/work-sessions/${sessionId}/attachments`),
+    enabled: open,
+  });
+  return (
+    <details className="project-work-evidence" onToggle={(event) => setOpen(event.currentTarget.open)}>
+      <summary>
+        <Paperclip size={13} />
+        <span>{open && evidence.data ? `${evidence.data.items.length} 项工作证据` : "查看工作证据"}</span>
+        <ChevronRight size={13} />
+      </summary>
+      <div className="project-work-evidence-list">
+        {evidence.isPending ? (
+          <small>正在读取你有权查看的证据…</small>
+        ) : evidence.data?.items.length ? (
+          evidence.data.items.map((item) => (
+            <article key={item.id}>
+              <FileText size={14} />
+              <span>
+                <strong>{item.originalName || item.note || (item.kind === "url" ? "外部链接" : "文字证据")}</strong>
+                <small>{item.kind === "file" ? item.mimeType || "文件" : item.kind === "url" ? "链接证据" : "文字证据"} · {formatProjectWorkTime(item.uploadedAt)}</small>
+                {item.kind === "text" && item.textContent ? <em>{item.textContent}</em> : null}
+              </span>
+              {item.kind === "file" && item.status === "available" ? (
+                <a href={`/api/attachments/${encodeURIComponent(item.id)}/open?mode=preview`} rel="noopener noreferrer" target="_blank"><ExternalLink size={13} />打开</a>
+              ) : item.kind === "url" && item.externalUrl ? (
+                <a href={item.externalUrl} rel="noopener noreferrer" target="_blank"><ExternalLink size={13} />访问</a>
+              ) : null}
+            </article>
+          ))
+        ) : (
+          <small>{evidence.error?.message ?? "该工作记录没有可见证据。"}</small>
+        )}
+      </div>
+    </details>
+  );
+}
+
 function ProjectTeamPanel({
   projectId,
+  nodeAssignees = [],
+  canManage,
   onClose,
 }: {
   projectId: string;
+  nodeAssignees?: ProjectNodeAssignee[];
+  canManage: boolean;
   onClose: () => void;
 }) {
   const queryClient = useQueryClient();
@@ -532,6 +826,7 @@ function ProjectTeamPanel({
       api<{ items: ProjectMemberCandidate[] }>(
         `/api/projects/${projectId}/member-candidates`,
       ),
+    enabled: canManage,
   });
   const refresh = () =>
     Promise.all([
@@ -579,6 +874,10 @@ function ProjectTeamPanel({
     (candidate) => !currentMemberIds.has(candidate.membershipId),
   );
   const hasAvailableCandidates = availableCandidates.length > 0;
+  const assignmentCounts = nodeAssignees.reduce((counts, assignee) => {
+    counts.set(assignee.membershipId, (counts.get(assignee.membershipId) ?? 0) + 1);
+    return counts;
+  }, new Map<string, number>());
 
   return (
     <Card className="project-team-panel">
@@ -592,6 +891,11 @@ function ProjectTeamPanel({
             关闭
           </Button>
         </div>
+        <div className="project-team-summary">
+          <span><strong>{members.data?.items.length ?? 0}</strong><small>项目成员</small></span>
+          <span><strong>{members.data?.items.filter((member) => member.role === "lead").length ?? 0}</strong><small>项目负责人</small></span>
+          <span><strong>{new Set(nodeAssignees.map((assignee) => assignee.nodeId)).size}</strong><small>已认领节点</small></span>
+        </div>
         <p className="project-team-panel-note">
           这是项目协作角色，不等同于组织访问权限、组织岗位或专业身份。离开项目会撤销该成员的节点分配，不会删除历史事实。
         </p>
@@ -600,7 +904,7 @@ function ProjectTeamPanel({
             <LoadingBlock />
           ) : members.data?.items.length ? (
             members.data.items.map((member) => (
-              <div key={member.membershipId}>
+              <div className={!canManage ? "is-readonly" : undefined} key={member.membershipId}>
                 {member.avatarUrl ? (
                   <img alt="" src={member.avatarUrl} />
                 ) : (
@@ -611,7 +915,7 @@ function ProjectTeamPanel({
                 <span className="min-w-0">
                   <strong>{member.displayName}</strong>
                   <small>
-                    {projectMemberRoleLabel(member.role)} ·{" "}
+                    {projectMemberRoleLabel(member.role)} · 负责/参与 {assignmentCounts.get(member.membershipId) ?? 0} 个节点 ·{" "}
                     {member.publicActivityVisible
                       ? "公开项目活动"
                       : "项目活动仅本人"}
@@ -620,7 +924,7 @@ function ProjectTeamPanel({
                       : " · 暂无工作提交"}
                   </small>
                 </span>
-                <select
+                {canManage ? <select
                   aria-label={`设置 ${member.displayName} 的项目角色`}
                   className={fieldClass}
                   disabled={saveMember.isPending}
@@ -636,8 +940,8 @@ function ProjectTeamPanel({
                   <option value="lead">项目负责人</option>
                   <option value="member">项目成员</option>
                   <option value="observer">观察者</option>
-                </select>
-                <label className="project-team-visibility">
+                </select> : null}
+                {canManage ? <label className="project-team-visibility">
                   <input
                     checked={member.publicActivityVisible}
                     disabled={saveMember.isPending}
@@ -651,8 +955,8 @@ function ProjectTeamPanel({
                     type="checkbox"
                   />
                   <span>公开活动</span>
-                </label>
-                <Button
+                </label> : null}
+                {canManage ? <Button
                   aria-label={`移出项目成员 ${member.displayName}`}
                   disabled={removeMember.isPending}
                   onClick={() => {
@@ -669,14 +973,14 @@ function ProjectTeamPanel({
                 >
                   <UserMinus size={14} />
                   移出
-                </Button>
+                </Button> : null}
               </div>
             ))
           ) : (
             <p className="text-xs text-[var(--text-muted)]">尚未加入项目成员。</p>
           )}
         </div>
-        <form
+        {canManage ? <form
           className="project-team-add-form"
           onSubmit={(event) => {
             event.preventDefault();
@@ -754,7 +1058,7 @@ function ProjectTeamPanel({
             <UserPlus size={15} />
             {saveMember.isPending ? "正在加入…" : "加入项目"}
           </Button>
-        </form>
+        </form> : null}
         <ErrorMessage error={members.error ?? candidates.error ?? saveMember.error ?? removeMember.error} />
       </CardContent>
     </Card>
@@ -962,6 +1266,14 @@ function NodeInspectorContent({
       });
     return rows;
   }, []);
+  const linkedWorkItems = linkedWork.data?.items ?? [];
+  const visibleWorkSeconds = linkedWorkItems.reduce(
+    (total, session) => total + (session.netSeconds ?? 0),
+    0,
+  );
+  const visibleContributors = new Set(
+    linkedWorkItems.map((session) => session.membershipId),
+  ).size;
   return (
     <aside
       aria-label={`${node.title} 节点详情`}
@@ -1114,6 +1426,11 @@ function NodeInspectorContent({
         </section>
         <section className="project-inspector-section">
           <p className="app-section-label">关联工作记录</p>
+          <div className="project-node-work-summary">
+            <span><strong>{visibleContributors}</strong><small>可见参与人</small></span>
+            <span><strong>{linkedWorkItems.length}</strong><small>工作记录</small></span>
+            <span><strong>{formatProjectWorkDuration(visibleWorkSeconds)}</strong><small>可见工时</small></span>
+          </div>
           {linkedWork.isPending ? (
             <p className="mt-3 text-xs text-[var(--text-muted)]">
               正在读取关联工作…
@@ -1121,7 +1438,7 @@ function NodeInspectorContent({
           ) : linkedWork.data?.items.length ? (
             <div className="project-version-history">
               {linkedWork.data.items.map((session) => (
-                <div key={session.id}>
+                <div className="project-node-work-item" key={session.id}>
                   <span>
                     <strong>{session.content}</strong>
                     <small>
@@ -1132,6 +1449,7 @@ function NodeInspectorContent({
                         ? `${formatProjectWorkTime(session.startAt)} · ${formatProjectWorkDuration(session.netSeconds)} · ${session.source === "timer" ? "计时" : "手工"}`
                         : `最后工作 ${formatProjectWorkTime(session.activityAt ?? session.endAt ?? session.startAt)}`}
                     </small>
+                    <WorkSessionEvidence sessionId={session.id} />
                   </span>
                   <Badge tone={session.isPrimary ? "info" : "neutral"}>
                     {session.isPrimary ? "主关联" : "辅助关联"}
@@ -1617,6 +1935,7 @@ export function ProjectDetailPage({ me }: { me: Me }) {
   const [branchEditForm, setBranchEditForm] = useState({
     name: "",
     description: "",
+    parentBranchId: "",
   });
   const [mergeSourceBranchId, setMergeSourceBranchId] = useState<string | null>(
     null,
@@ -1705,15 +2024,19 @@ export function ProjectDetailPage({ me }: { me: Me }) {
     },
   });
   const createBranch = useMutation({
-    mutationFn: () =>
-      api(`/api/projects/${projectId}/branches`, {
+    mutationFn: () => {
+      const sourceNode = allNodes.find((node) => node.id === selectedNodeId);
+      const parentBranchId = sourceNode?.branchId ??
+        (branchId !== "all" ? branchId : activeBranches.find((branch) => branch.isDefault)?.id);
+      return api(`/api/projects/${projectId}/branches`, {
         method: "POST",
         body: {
           name: branchName,
-          parentBranchId: activeBranches.find((branch) => branch.isDefault)?.id,
+          parentBranchId,
           sourceNodeId: selectedNodeId ?? undefined,
         },
-      }),
+      });
+    },
     onSuccess: async () => {
       setShowBranch(false);
       setBranchName("");
@@ -1725,10 +2048,12 @@ export function ProjectDetailPage({ me }: { me: Me }) {
       branch,
       name,
       description,
+      parentBranchId,
     }: {
       branch: Branch;
       name: string;
       description: string;
+      parentBranchId: string | null;
     }) =>
       api(`/api/projects/${projectId}/branches/${branch.id}`, {
         method: "PATCH",
@@ -1736,6 +2061,7 @@ export function ProjectDetailPage({ me }: { me: Me }) {
           expectedVersion: branch.version ?? 1,
           name,
           description: description.trim() || null,
+          parentBranchId,
           changeSummary: "更新分支信息",
         },
       }),
@@ -1828,6 +2154,18 @@ export function ProjectDetailPage({ me }: { me: Me }) {
     [assigneesByNodeId, visibleNodes],
   );
   const selected = allNodes.find((node) => node.id === selectedNodeId) ?? null;
+  const openCreateFor = (parentId: string | null, targetBranchId?: string) => {
+    setNodeForm((current) => ({
+      ...current,
+      parentId: parentId ?? "",
+      branchId:
+        targetBranchId ??
+        (branchId === "all"
+          ? activeBranches.find((branch) => branch.isDefault)?.id ?? ""
+          : branchId),
+    }));
+    setShowCreate(true);
+  };
 
   useEffect(() => {
     if (!selectedNodeId) return;
@@ -1872,7 +2210,7 @@ export function ProjectDetailPage({ me }: { me: Me }) {
     <>
       <PageHeader
         title={tree.data.project.name}
-        description={`${tree.data.project.key} · ${activeBranches.length} 个活跃分支${archivedBranches.length ? ` · ${archivedBranches.length} 个已归档` : ""} · ${allNodes.length} 个有效节点。画布、列表和时间轴都指向同一套版本化项目事实。`}
+        description={`${tree.data.project.key} · ${activeBranches.length} 个活跃分支${archivedBranches.length ? ` · ${archivedBranches.length} 个已归档` : ""} · ${allNodes.length} 个有效节点。结构、排期、负责人、工时与证据集中在这里推进。`}
         actions={
           <div className="flex flex-wrap gap-2">
             <Link to="/projects">
@@ -1881,17 +2219,17 @@ export function ProjectDetailPage({ me }: { me: Me }) {
                 项目列表
               </Button>
             </Link>
+            <Button
+              aria-expanded={showTeam}
+              onClick={() => setShowTeam((value) => !value)}
+              size="compact"
+              variant="secondary"
+            >
+              <UsersRound size={15} />
+              团队成员
+            </Button>
             {canManage ? (
               <>
-                <Button
-                  aria-expanded={showTeam}
-                  onClick={() => setShowTeam((value) => !value)}
-                  size="compact"
-                  variant="secondary"
-                >
-                  <UsersRound size={15} />
-                  团队成员
-                </Button>
                 <Button
                   aria-expanded={showRecycle}
                   onClick={() => {
@@ -1906,16 +2244,8 @@ export function ProjectDetailPage({ me }: { me: Me }) {
                 </Button>
                 <Button
                   onClick={() => {
-                    setNodeForm((current) => ({
-                      ...current,
-                      parentId: selectedNodeId ?? "",
-                      branchId:
-                        branchId === "all"
-                          ? (activeBranches.find((branch) => branch.isDefault)
-                              ?.id ?? "")
-                          : branchId,
-                    }));
-                    setShowCreate((value) => !value);
+                    if (showCreate) setShowCreate(false);
+                    else openCreateFor(selectedNodeId, selected?.branchId);
                   }}
                   size="compact"
                 >
@@ -1935,6 +2265,12 @@ export function ProjectDetailPage({ me }: { me: Me }) {
         )}
       >
         <main className="project-workbench-main">
+          <ProjectOverview
+            assigneesByNodeId={assigneesByNodeId}
+            branches={activeBranches}
+            nodes={allNodes}
+            project={tree.data.project}
+          />
           <div className="project-workbench-toolbar">
             <div className="project-view-tabs">
               {(
@@ -2013,6 +2349,12 @@ export function ProjectDetailPage({ me }: { me: Me }) {
               ) : null}
             </div>
           </div>
+          <ProjectBranchRail
+            branches={activeBranches}
+            nodes={allNodes}
+            onSelect={setBranchId}
+            selectedBranchId={branchId}
+          />
           {showCreate && canManage ? (
             <Card className="project-create-panel">
               <CardContent>
@@ -2228,8 +2570,10 @@ export function ProjectDetailPage({ me }: { me: Me }) {
               </CardContent>
             </Card>
           ) : null}
-          {showTeam && canManage ? (
+          {showTeam ? (
             <ProjectTeamPanel
+              canManage={canManage}
+              nodeAssignees={tree.data.nodeAssignees ?? []}
               onClose={() => setShowTeam(false)}
               projectId={projectId}
             />
@@ -2329,6 +2673,7 @@ export function ProjectDetailPage({ me }: { me: Me }) {
                             setBranchEditForm({
                               name: branch.name,
                               description: branch.description ?? "",
+                              parentBranchId: branch.parentBranchId ?? "",
                             });
                             setMergeSourceBranchId(null);
                           }}
@@ -2390,6 +2735,7 @@ export function ProjectDetailPage({ me }: { me: Me }) {
                         branch: branchEditor,
                         name: branchEditForm.name.trim(),
                         description: branchEditForm.description,
+                        parentBranchId: branchEditForm.parentBranchId || null,
                       });
                     }}
                   >
@@ -2411,7 +2757,7 @@ export function ProjectDetailPage({ me }: { me: Me }) {
                         value={branchEditForm.name}
                       />
                     </Field>
-                    <Field label="分支说明（可选）">
+                      <Field label="分支说明（可选）">
                       <input
                         className={fieldClass}
                         maxLength={10_000}
@@ -2423,7 +2769,20 @@ export function ProjectDetailPage({ me }: { me: Me }) {
                         }
                         value={branchEditForm.description}
                       />
-                    </Field>
+                      </Field>
+                      <Field label="挂载到分支">
+                        <select
+                          className={fieldClass}
+                          disabled={branchEditor.isDefault}
+                          onChange={(event) => setBranchEditForm({ ...branchEditForm, parentBranchId: event.target.value })}
+                          value={branchEditForm.parentBranchId}
+                        >
+                          <option value="">项目根级</option>
+                          {activeBranches
+                            .filter((candidate) => candidate.id !== branchEditor.id)
+                            .map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.name}</option>)}
+                        </select>
+                      </Field>
                     <div className="flex flex-wrap gap-2">
                       <Button
                         disabled={
@@ -2650,14 +3009,18 @@ export function ProjectDetailPage({ me }: { me: Me }) {
                 >
                   <ProjectCanvas
                     accent={tree.data.project.color}
+                    canManage={canManage}
                     edges={visibleEdges}
                     nodes={visibleCanvasNodes}
+                    onAddChild={(node) => openCreateFor(node.id, node.branchId)}
                     onNodeSelect={setSelectedNodeId}
                     selectedNodeId={selectedNodeId}
                   />
                 </Suspense>
               ) : view === "timeline" ? (
                 <Timeline
+                  assigneesByNodeId={assigneesByNodeId}
+                  branches={activeBranches}
                   nodes={visibleNodes}
                   onSelect={setSelectedNodeId}
                   selectedNodeId={selectedNodeId}
@@ -2665,8 +3028,11 @@ export function ProjectDetailPage({ me }: { me: Me }) {
               ) : (
                 <TreeList
                   assigneesByNodeId={assigneesByNodeId}
+                  canManage={canManage}
                   nodes={visibleNodes}
+                  onAddChild={(node) => openCreateFor(node.id, node.branchId)}
                   onSelect={setSelectedNodeId}
+                  searchActive={Boolean(search.trim())}
                   selectedNodeId={selectedNodeId}
                 />
               )
@@ -2711,29 +3077,7 @@ export function ProjectDetailPage({ me }: { me: Me }) {
               projectId={projectId}
             />
           </>
-        ) : (
-          <aside className="project-workbench-guide">
-            <p className="app-section-label">项目视图</p>
-            <h2>从结构到排期，都指向同一条版本链。</h2>
-            <div>
-              <span>
-                <Layers3 size={16} />
-                <strong>结构画布</strong>
-                <small>查看层级、依赖与分支关系。</small>
-              </span>
-              <span>
-                <Clock3 size={16} />
-                <strong>时间轴</strong>
-                <small>只显示真实节点排期；未排期节点明确标记。</small>
-              </span>
-              <span>
-                <ListTree size={16} />
-                <strong>可访问列表</strong>
-                <small>移动端与键盘操作的完整兜底。</small>
-              </span>
-            </div>
-          </aside>
-        )}
+        ) : null}
       </div>
     </>
   );

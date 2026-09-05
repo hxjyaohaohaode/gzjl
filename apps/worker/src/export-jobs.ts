@@ -12,9 +12,12 @@ import {
   notifications,
   orgMemberships,
   outboxEvents,
+  projectNodes,
+  projects,
   users,
   workSessionProjectLinks,
   workSessions,
+  workTypes,
 } from "@workbench/db/schema";
 
 import {
@@ -338,15 +341,30 @@ export function createExportJobRuntime(
         throw new WorkerExportError("export_too_large", true);
       }
       const rows = await db
-        .select({ session: workSessions, displayName: users.displayName })
+        .select({
+          session: workSessions,
+          displayName: users.displayName,
+          projectName: projects.name,
+          projectNodeTitle: projectNodes.title,
+          workTypeName: workTypes.name,
+        })
         .from(workSessions)
         .innerJoin(orgMemberships, eq(orgMemberships.id, workSessions.membershipId))
         .innerJoin(users, eq(users.id, orgMemberships.userId))
+        .leftJoin(projectNodes, eq(projectNodes.id, workSessions.primaryProjectNodeId))
+        .leftJoin(projects, eq(projects.id, projectNodes.projectId))
+        .leftJoin(workTypes, eq(workTypes.id, workSessions.workTypeId))
         .where(workFilter)
         .orderBy(workSessions.startAt)
         .limit(MAX_EXPORT_ROWS);
 
-      const items: WorkSessionExportRow[] = rows.map(({ session, displayName }) => {
+      const items: WorkSessionExportRow[] = rows.map(({
+        session,
+        displayName,
+        projectName,
+        projectNodeTitle,
+        workTypeName,
+      }) => {
         const canReadSensitive =
           policy.contentOrganizationWide ||
           policy.includeContent ||
@@ -371,6 +389,9 @@ export function createExportJobRuntime(
           result: protectedValue(session.result),
           blockers: protectedValue(session.blockers),
           nextStep: protectedValue(session.nextStep),
+          projectName,
+          projectNodeTitle,
+          workTypeName,
           primaryProjectNodeId: session.primaryProjectNodeId,
           workTypeId: session.workTypeId,
           visibility: session.visibility,

@@ -11,6 +11,7 @@ import {
   CircleDollarSign,
   Clock3,
   Crown,
+  Download,
   ExternalLink,
   Eye,
   EyeOff,
@@ -2970,6 +2971,7 @@ interface EvidenceAttachment {
   sha256: string | null;
   version: number;
   uploadedAt: string;
+  createdAt: string;
   updatedAt: string;
 }
 
@@ -3170,6 +3172,8 @@ function DirectEvidenceFields({
               : "文件存储未配置，仍可保存链接和文字"}
         </span>
         <input
+          accept="*/*"
+          aria-describedby="direct-evidence-file-help"
           disabled={!fileUploadsAvailable}
           multiple
           onChange={(event) =>
@@ -3178,6 +3182,9 @@ function DirectEvidenceFields({
           type="file"
         />
       </label>
+      <span className="sr-only" id="direct-evidence-file-help">
+        支持 PDF、TXT、README、ZIP、Office 文档、图片、音视频及其他任意文件格式
+      </span>
     </div>
   );
 }
@@ -3693,6 +3700,39 @@ function WorkDayTimeline({
     </section>
   );
 }
+
+function evidenceCanPreview(item: EvidenceAttachment): boolean {
+  if (item.kind !== "file" || item.status !== "available") return false;
+  const mime = (item.mimeType ?? "").toLowerCase();
+  if (["application/pdf", "application/json", "text/plain", "text/markdown", "text/csv"].includes(mime)) return true;
+  if ((mime.startsWith("image/") && mime !== "image/svg+xml") || mime.startsWith("audio/") || mime.startsWith("video/")) return true;
+  const name = (item.originalName ?? "").trim().toLowerCase();
+  return name === "readme" || name === "license" || /\.(pdf|txt|md|markdown|log|csv|json)$/u.test(name);
+}
+
+function evidenceAccessHref(item: EvidenceAttachment, mode: "preview" | "download"): string {
+  return `/api/attachments/${encodeURIComponent(item.id)}/open?mode=${mode}`;
+}
+
+function EvidenceFileActions({ item }: { item: EvidenceAttachment }) {
+  if (item.kind !== "file") return null;
+  if (item.status !== "available") {
+    return <span className="evidence-file-unavailable">文件尚未完成核验</span>;
+  }
+  return (
+    <span className="evidence-file-actions">
+      {evidenceCanPreview(item) ? (
+        <a className="evidence-file-action" href={evidenceAccessHref(item, "preview")} rel="noopener noreferrer" target="_blank">
+          <Eye size={14} />预览
+        </a>
+      ) : null}
+      <a className="evidence-file-action" href={evidenceAccessHref(item, "download")} rel="noopener noreferrer" target="_blank">
+        <Download size={14} />下载
+      </a>
+    </span>
+  );
+}
+
 function EvidencePanel({ sessionId }: { sessionId: string }) {
   const queryClient = useQueryClient();
   const [open, setOpen] = useState(false);
@@ -3889,11 +3929,6 @@ function EvidencePanel({ sessionId }: { sessionId: string }) {
       await refresh();
     },
   });
-  const download = useMutation({
-    mutationFn: (id: string) =>
-      api<{ url: string }>(`/api/attachments/${id}/download`),
-    onSuccess: (data) => window.open(data.url, "_blank", "noopener,noreferrer"),
-  });
   const remove = useMutation({
     mutationFn: (id: string) =>
       api(`/api/attachments/${id}`, {
@@ -3924,6 +3959,7 @@ function EvidencePanel({ sessionId }: { sessionId: string }) {
             <>
               <div className="flex flex-col gap-2 sm:flex-row">
                 <input
+                  accept="*/*"
                   aria-label={replacementFor ? "选择替换文件" : "选择工作证据文件"}
                   className="block min-w-0 flex-1 text-sm"
                   multiple={!replacementFor}
@@ -4120,7 +4156,6 @@ function EvidencePanel({ sessionId }: { sessionId: string }) {
               upload.error ??
               addUrl.error ??
               addText.error ??
-              download.error ??
               remove.error ??
               evidence.error ??
               capabilities.error ??
@@ -4172,17 +4207,7 @@ function EvidencePanel({ sessionId }: { sessionId: string }) {
                     <span className="flex shrink-0 flex-wrap gap-1">
                       {item.kind === "file" ? (
                         <>
-                          <Button
-                            disabled={
-                              download.isPending || item.status !== "available"
-                            }
-                            onClick={() => download.mutate(item.id)}
-                            size="compact"
-                            variant="secondary"
-                          >
-                            <FileText size={14} />
-                            下载
-                          </Button>
+                          <EvidenceFileActions item={item} />
                           <Button
                             onClick={() => {
                               setReplacementFor(item.id);
@@ -4235,7 +4260,10 @@ function EvidencePanel({ sessionId }: { sessionId: string }) {
                       <div><dt>类型</dt><dd>{item.kind === "file" ? item.mimeType ?? "application/octet-stream" : item.kind === "url" ? "外部链接" : "文字"}</dd></div>
                       <div><dt>大小</dt><dd>{item.kind === "file" ? formatFileSize(item.sizeBytes) : "—"}</dd></div>
                       <div><dt>上传时间</dt><dd>{formatDateTime(item.uploadedAt)}</dd></div>
+                      <div><dt>最近更新</dt><dd>{formatDateTime(item.updatedAt)}</dd></div>
                       <div><dt>版本</dt><dd>v{item.version}</dd></div>
+                      {item.kind === "file" ? <div className="evidence-metadata-wide"><dt>完整文件名</dt><dd>{item.originalName || "未命名文件"}</dd></div> : null}
+                      {item.note ? <div className="evidence-metadata-wide"><dt>证据说明</dt><dd>{item.note}</dd></div> : null}
                       <div className="evidence-metadata-wide"><dt>SHA-256</dt><dd>{item.sha256 || "不适用"}</dd></div>
                       {item.kind === "url" ? <div className="evidence-metadata-wide"><dt>完整链接</dt><dd>{item.externalUrl}</dd></div> : null}
                       {item.kind === "text" ? <div className="evidence-metadata-wide"><dt>完整内容</dt><dd>{item.textContent || "（空内容）"}</dd></div> : null}
@@ -4278,11 +4306,6 @@ function ReadOnlyEvidenceList({ sessionId }: { sessionId: string }) {
         `/api/work-sessions/${sessionId}/attachments`,
       ),
   });
-  const download = useMutation({
-    mutationFn: (id: string) =>
-      api<{ url: string }>(`/api/attachments/${id}/download`),
-    onSuccess: (data) => window.open(data.url, "_blank", "noopener,noreferrer"),
-  });
   if (evidence.isPending) {
     return <p className="evidence-readonly-state">正在读取附件证据…</p>;
   }
@@ -4313,15 +4336,7 @@ function ReadOnlyEvidenceList({ sessionId }: { sessionId: string }) {
               </small>
             </div>
             {item.kind === "file" ? (
-              <Button
-                disabled={download.isPending || item.status !== "available"}
-                onClick={() => download.mutate(item.id)}
-                size="compact"
-                variant="secondary"
-              >
-                <FileText size={14} />
-                查看文件
-              </Button>
+              <EvidenceFileActions item={item} />
             ) : item.kind === "url" && item.externalUrl ? (
               <a
                 className="evidence-readonly-link"
@@ -4348,9 +4363,12 @@ function ReadOnlyEvidenceList({ sessionId }: { sessionId: string }) {
           ) : null}
           <dl className="evidence-readonly-metadata">
             <div><dt>上传时间</dt><dd>{formatDateTime(item.uploadedAt)}</dd></div>
+            <div><dt>最近更新</dt><dd>{formatDateTime(item.updatedAt)}</dd></div>
             <div><dt>核验状态</dt><dd>{item.status === "available" ? "已通过" : item.status}</dd></div>
             <div><dt>可见范围</dt><dd>{item.visibility === "project_visible" ? "关联项目" : item.visibility === "management_only" ? "审核与管理" : "仅提交人"}</dd></div>
             <div><dt>版本</dt><dd>v{item.version}</dd></div>
+            {item.kind === "file" ? <div className="evidence-metadata-wide"><dt>完整文件名</dt><dd>{item.originalName || "未命名文件"}</dd></div> : null}
+            {item.note ? <div className="evidence-metadata-wide"><dt>证据说明</dt><dd>{item.note}</dd></div> : null}
             {item.kind === "file" ? <div className="evidence-metadata-wide"><dt>SHA-256</dt><dd>{item.sha256 || "等待核验"}</dd></div> : null}
           </dl>
           {item.kind === "file" && item.status !== "available" ? (
@@ -4358,7 +4376,6 @@ function ReadOnlyEvidenceList({ sessionId }: { sessionId: string }) {
           ) : null}
         </article>
       ))}
-      <ErrorMessage error={download.error} />
     </div>
   );
 }
@@ -10553,6 +10570,8 @@ type AiTaskType =
   | "project_progress"
   | "project_blockers"
   | "organization_summary"
+  | "operations_brief"
+  | "executive_brief"
   | "salary_explanation"
   | "assistant_chat";
 
@@ -10577,21 +10596,26 @@ type AiPageArea = (typeof aiPageAreaValues)[number];
 const aiTaskPresets: Array<{
   type: AiTaskType;
   label: string;
+  description: string;
   rangeDays: number;
   teamOnly?: boolean;
+  ownerOnly?: boolean;
   selfOnly?: boolean;
   requiresOwnPayroll?: boolean;
 }> = [
-  { type: "daily_summary", label: "总结今日", rangeDays: 1 },
-  { type: "weekly_summary", label: "生成周报", rangeDays: 7 },
-  { type: "monthly_summary", label: "月度回顾", rangeDays: 31 },
-  { type: "work_rhythm", label: "工作节奏", rangeDays: 31 },
-  { type: "project_progress", label: "项目进展", rangeDays: 31 },
-  { type: "project_blockers", label: "项目阻塞", rangeDays: 31 },
-  { type: "organization_summary", label: "团队总结", rangeDays: 7, teamOnly: true },
+  { type: "daily_summary", label: "总结今日", description: "事实、产出、阻塞与下一步", rangeDays: 1 },
+  { type: "weekly_summary", label: "生成周报", description: "整理一周可直接校对的工作事实", rangeDays: 7 },
+  { type: "monthly_summary", label: "月度回顾", description: "投入结构、变化与待确认事项", rangeDays: 31 },
+  { type: "work_rhythm", label: "工作节奏", description: "分析时段分布与可见工作模式", rangeDays: 31 },
+  { type: "project_progress", label: "项目进展", description: "按项目汇总投入与进展证据", rangeDays: 31 },
+  { type: "project_blockers", label: "项目阻塞", description: "定位有事实支持的风险与处理动作", rangeDays: 31 },
+  { type: "organization_summary", label: "团队总结", description: "汇总团队进展，不做人员排名", rangeDays: 7, teamOnly: true },
+  { type: "operations_brief", label: "运营执行简报", description: "待审、阻塞、异常、协作缺口与今日动作", rangeDays: 7, teamOnly: true },
+  { type: "executive_brief", label: "老板决策简报", description: "组织投入、交付风险、决策事项与七天关注点", rangeDays: 31, teamOnly: true, ownerOnly: true },
   {
     type: "salary_explanation",
     label: "解释我的薪资",
+    description: "逐项解释本人可见金额、状态和待确认项",
     rangeDays: 93,
     selfOnly: true,
     requiresOwnPayroll: true,
@@ -11326,7 +11350,9 @@ export function AiPage({ me }: { me: Me }) {
                   <div className="flex flex-wrap items-center justify-between gap-3">
                     <div className="flex flex-wrap gap-2">
                       {(scope === "team"
-                        ? ["总结团队今天的进展", "梳理项目阻塞与责任人", "列出下一步协作优先级"]
+                        ? me.user.isOwner
+                          ? ["给我一份老板今天必须知道的决策简报", "梳理项目阻塞、影响和建议责任角色", "列出未来七天需要盯住的交付与审核风险"]
+                          : ["生成今日运营待办和优先级", "梳理项目阻塞、影响和建议责任角色", "列出待审核、异常和协作缺口"]
                         : ["总结我今天的工作", "梳理当前项目阻塞", "给出下一步优先级"]
                       ).map((prompt) => (
                         <button className="rounded-lg bg-[var(--surface-subtle)] px-3 py-2 text-xs font-semibold hover:bg-[var(--accent-soft)]" key={prompt} onClick={() => setQuestion(prompt)} type="button">{prompt}</button>
@@ -11348,27 +11374,30 @@ export function AiPage({ me }: { me: Me }) {
                   </h2>
                   <Badge>{scope === "team" ? "团队" : "本人"}</Badge>
                 </div>
-                <div className="mt-5 flex flex-wrap items-center gap-3">
+                <div className="ai-preset-grid">
                   {aiTaskPresets
                     .filter(
                       (preset) =>
                         (!preset.teamOnly || canAnalyzeTeam) &&
+                        (!preset.ownerOnly || me.user.isOwner) &&
                         (!preset.requiresOwnPayroll || canViewOwnPayroll),
                     )
                     .map((preset) => (
-                      <Button
+                      <button
+                        aria-label={preset.label}
                         aria-pressed={taskType === preset.type}
+                        className={`ai-preset ${taskType === preset.type ? "is-active" : ""}`}
                         key={preset.type}
                         onClick={() => {
                           setTaskType(preset.type);
                           if (preset.teamOnly) setScope("team");
                           if (preset.selfOnly) setScope("self");
                         }}
-                        size="compact"
-                        variant={taskType === preset.type ? "primary" : "secondary"}
+                        type="button"
                       >
-                        {preset.label}
-                      </Button>
+                        <strong>{preset.label}</strong>
+                        <span>{preset.description}</span>
+                      </button>
                     ))}
                 </div>
                 <div className="mt-4 flex flex-wrap items-center gap-3">

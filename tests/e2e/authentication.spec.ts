@@ -7,6 +7,7 @@ async function mockAuthenticatedWorkspace(
     canExport?: boolean;
     canViewPayroll?: boolean;
     canConfigurePayroll?: boolean;
+    canAnalyzeTeam?: boolean;
   } = {},
 ): Promise<void> {
   let authenticated = false;
@@ -88,6 +89,15 @@ async function mockAuthenticatedWorkspace(
                 ? [
                     {
                       permission: "export.scope",
+                      scopeKind: "organization",
+                      scopeId: null,
+                    },
+                  ]
+                : []),
+              ...(options.canAnalyzeTeam
+                ? [
+                    {
+                      permission: "ai.team_analysis",
                       scopeKind: "organization",
                       scopeId: null,
                     },
@@ -1743,7 +1753,9 @@ test("evidence uploads arbitrary file formats one by one and completes every sel
   await page.getByRole("button", { name: "登录", exact: true }).click();
   await page.goto("/work");
   await page.getByRole("button", { name: "证据" }).click();
-  await page.getByLabel("选择工作证据文件").setInputFiles([
+  const evidencePicker = page.getByLabel("选择工作证据文件");
+  await expect(evidencePicker).toHaveAttribute("accept", "*/*");
+  await evidencePicker.setInputFiles([
     {
       name: "现场采集.tracebundle",
       mimeType: "",
@@ -1754,9 +1766,27 @@ test("evidence uploads arbitrary file formats one by one and completes every sel
       mimeType: "application/x-acme-work-proof",
       buffer: Buffer.from("custom work evidence"),
     },
+    {
+      name: "验收报告.pdf",
+      mimeType: "application/pdf",
+      buffer: Buffer.from("%PDF-1.7 test evidence"),
+    },
+    {
+      name: "现场说明.txt",
+      mimeType: "text/plain",
+      buffer: Buffer.from("plain text evidence"),
+    },
+    {
+      name: "完整材料.zip",
+      mimeType: "application/zip",
+      buffer: Buffer.from("PK test archive evidence"),
+    },
   ]);
   await expect(page.getByText("现场采集.tracebundle", { exact: true })).toBeVisible();
   await expect(page.getByText("专项记录.acmeproof", { exact: true })).toBeVisible();
+  await expect(page.getByText("验收报告.pdf", { exact: true })).toBeVisible();
+  await expect(page.getByText("现场说明.txt", { exact: true }).first()).toBeVisible();
+  await expect(page.getByText("完整材料.zip", { exact: true })).toBeVisible();
   const uploadQueueButton = page.getByRole("button", { name: "上传队列" });
   if (testInfo.project.name.startsWith("mobile")) {
     // The bottom navigation is fixed.  A control scrolled into view must keep
@@ -1775,8 +1805,8 @@ test("evidence uploads arbitrary file formats one by one and completes every sel
     expect(navigationClearance!).toBeGreaterThanOrEqual(8);
   }
   await uploadQueueButton.click();
-  await expect.poll(() => completedAttachmentIds.length).toBe(2);
-  expect(uploadIntents).toHaveLength(2);
+  await expect.poll(() => completedAttachmentIds.length).toBe(5);
+  expect(uploadIntents).toHaveLength(5);
   expect(uploadIntents[0]).toMatchObject({
     originalName: "现场采集.tracebundle",
     mimeType: "application/octet-stream",
@@ -1785,12 +1815,84 @@ test("evidence uploads arbitrary file formats one by one and completes every sel
     originalName: "专项记录.acmeproof",
     mimeType: "application/x-acme-work-proof",
   });
+  expect(uploadIntents.slice(2).map((item) => [item.originalName, item.mimeType])).toEqual([
+    ["验收报告.pdf", "application/pdf"],
+    ["现场说明.txt", "text/plain"],
+    ["完整材料.zip", "application/zip"],
+  ]);
   await expect(
     page.getByText(/现场采集\.tracebundle.*已完成/),
   ).toBeVisible();
   await expect(
     page.getByText(/专项记录\.acmeproof.*已完成/),
   ).toBeVisible();
+});
+
+test("the uploader can inspect rich file details and use direct preview or download links", async ({ page }) => {
+  await mockAuthenticatedWorkspace(page);
+  const sessionId = "00000000-0000-4000-8000-000000000089";
+  const attachmentId = "00000000-0000-4000-8000-000000000090";
+  const startedAt = new Date();
+  startedAt.setHours(8, 0, 0, 0);
+  await page.route("**/api/work-sessions?**", (route) => route.fulfill({ json: {
+    items: [{
+      id: sessionId,
+      startAt: startedAt.toISOString(),
+      endAt: new Date(startedAt.getTime() + 3_600_000).toISOString(),
+      timezone: "Asia/Shanghai",
+      netSeconds: 3_600,
+      content: "附件详情验收",
+      result: "",
+      blockers: "",
+      nextStep: "",
+      parallelWork: false,
+      primaryProjectNodeId: null,
+      projectLinks: [],
+      source: "manual",
+      recordKind: "fact",
+      submissionStatus: "draft",
+      approvalStatus: "not_requested",
+      version: 1,
+      visibility: "management_only",
+      breaks: [],
+    }],
+    nextCursor: null,
+  } }));
+  await page.route("**/api/evidence/capabilities", (route) => route.fulfill({ json: {
+    fileUploads: { available: true, maxBytes: 100 * 1024 * 1024, acceptsArbitraryFormats: true },
+    references: { url: true, text: true },
+  } }));
+  await page.route(`**/api/work-sessions/${sessionId}/attachments`, (route) => route.fulfill({ json: {
+    items: [{
+      id: attachmentId,
+      kind: "file",
+      status: "available",
+      originalName: "现场说明.txt",
+      externalUrl: null,
+      mimeType: "text/plain",
+      sizeBytes: 1_024,
+      visibility: "management_only",
+      note: "由提交人核对",
+      sha256: "b".repeat(64),
+      version: 3,
+      uploadedAt: startedAt.toISOString(),
+      createdAt: startedAt.toISOString(),
+      updatedAt: new Date(startedAt.getTime() + 60_000).toISOString(),
+    }],
+  } }));
+
+  await page.goto("/login");
+  await page.getByLabel("邮箱或手机号").fill("owner@example.test");
+  await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+  await page.goto("/work");
+  await page.getByRole("button", { name: "证据" }).click();
+  await expect(page.getByText("现场说明.txt", { exact: true }).first()).toBeVisible();
+  await expect(page.getByRole("link", { name: "预览" })).toHaveAttribute("href", `/api/attachments/${attachmentId}/open?mode=preview`);
+  await expect(page.getByRole("link", { name: "下载" })).toHaveAttribute("href", `/api/attachments/${attachmentId}/open?mode=download`);
+  await page.getByText("查看内容详情", { exact: true }).click();
+  await expect(page.getByText("由提交人核对", { exact: true })).toBeVisible();
+  await expect(page.getByText("b".repeat(64), { exact: true })).toBeVisible();
 });
 
 test("evidence keeps text references usable when private object storage is not configured", async ({
@@ -2322,6 +2424,7 @@ test("AI provider configuration is visible only to the unique Owner", async ({
   await page.getByLabel("邮箱或手机号").fill("member@example.test");
   await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
   await page.getByRole("button", { name: "登录", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "林知夏，今天好" })).toBeVisible();
   await page.goto("/ai");
   await expect(
     page.getByRole("button", { name: "组织 AI 配置" }),
@@ -2395,7 +2498,7 @@ test("Owner can verify the saved AI provider and review a redacted health record
 test("AI report requests keep a stable five-minute range for cost-safe deduplication", async ({
   page,
 }) => {
-  await mockAuthenticatedWorkspace(page);
+  await mockAuthenticatedWorkspace(page, { canAnalyzeTeam: true });
   const requests: Array<{ taskType: string; scope: string; from: string; to: string }> = [];
   await page.route("**/api/ai/reports", async (route) => {
     if (route.request().method() === "GET") {
@@ -2441,6 +2544,13 @@ test("AI report requests keep a stable five-minute range for cost-safe deduplica
   expect(to.getUTCMilliseconds()).toBe(0);
   expect(to.getUTCMinutes() % 5).toBe(0);
   expect(to.getTime() - from.getTime()).toBe(7 * 86_400_000);
+
+  await expect(page.getByRole("button", { name: /运营执行简报/ })).toBeVisible();
+  await page.getByRole("button", { name: /老板决策简报/ }).click();
+  await generate.click();
+  await expect.poll(() => requests.length).toBe(3);
+  expect(requests[2]).toMatchObject({ taskType: "executive_brief", scope: "team" });
+  expect(new Date(requests[2]!.to).getTime() - new Date(requests[2]!.from).getTime()).toBe(31 * 86_400_000);
 });
 
 test("AI salary explanation is explicitly self-scoped and uses a bounded payroll range", async ({
@@ -2469,6 +2579,7 @@ test("AI salary explanation is explicitly self-scoped and uses a bounded payroll
   await page.getByLabel("邮箱或手机号").fill("owner@example.test");
   await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
   await page.getByRole("button", { name: "登录", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "林知夏，今天好" })).toBeVisible();
   await page.goto("/ai");
   await page.getByRole("button", { name: "解释我的薪资", exact: true }).click();
   await page.getByRole("button", { name: "生成所选洞察", exact: true }).click();
@@ -2495,6 +2606,7 @@ test("AI salary explanation is hidden when the account cannot view its own payro
   await page.getByLabel("邮箱或手机号").fill("member@example.test");
   await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
   await page.getByRole("button", { name: "登录", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "林知夏，今天好" })).toBeVisible();
   await page.goto("/ai");
 
   await expect(
@@ -2561,6 +2673,7 @@ test("AI salary report exposes its authorized payroll provenance without exposin
   await page.getByLabel("邮箱或手机号").fill("owner@example.test");
   await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
   await page.getByRole("button", { name: "登录", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "林知夏，今天好" })).toBeVisible();
   await page.goto("/ai");
 
   await expect(page.getByRole("heading", { name: "2026 年 9 月本人薪资解释" })).toBeVisible();
@@ -3450,6 +3563,7 @@ test("owner can see invitation activation state and withdraw a pending member", 
   await page.getByLabel("邮箱或手机号").fill("owner@example.test");
   await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
   await page.getByRole("button", { name: "登录", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "林知夏，今天好" })).toBeVisible();
   await page.goto("/organization");
   await page.getByRole("tab", { name: /成员/ }).click();
   await expect(page.getByText("当前在线 · 2 个活跃端")).toBeVisible();
@@ -4350,6 +4464,7 @@ test("project branch management keeps rename, merge, archive, and recovery actio
         expectedVersion: 2,
         name: "稳定主线",
         description: "稳定交付路径",
+        parentBranchId: null,
         changeSummary: "更新分支信息",
       });
       await route.fulfill({ json: { branch: { id: mainBranchId } } });
@@ -4776,6 +4891,21 @@ test("approvers can inspect full work details and authorized evidence before dec
           version: 1,
           uploadedAt: "2026-09-04T05:01:00.000Z",
           updatedAt: "2026-09-04T05:01:00.000Z",
+        }, {
+          id: "00000000-0000-4000-8000-000000000098",
+          kind: "file",
+          status: "available",
+          originalName: "客户研究报告.pdf",
+          externalUrl: null,
+          mimeType: "application/pdf",
+          sizeBytes: 245_760,
+          visibility: "management_only",
+          note: "最终 PDF 交付件",
+          sha256: "a".repeat(64),
+          version: 2,
+          uploadedAt: "2026-09-04T05:02:00.000Z",
+          createdAt: "2026-09-04T05:01:00.000Z",
+          updatedAt: "2026-09-04T05:02:00.000Z",
         }],
       },
     }),
@@ -4789,6 +4919,15 @@ test("approvers can inspect full work details and authorized evidence before dec
   await page.getByRole("button", { name: "查看工作与附件" }).click();
   await expect(page.getByText("已形成最终版", { exact: true })).toBeVisible();
   await expect(page.getByRole("link", { name: "https://example.test/research/final" })).toBeVisible();
+  await expect(page.getByText("客户研究报告.pdf", { exact: true }).first()).toBeVisible();
+  await expect(page.getByRole("link", { name: "预览" })).toHaveAttribute(
+    "href",
+    `/api/attachments/00000000-0000-4000-8000-000000000098/open?mode=preview`,
+  );
+  await expect(page.getByRole("link", { name: "下载" })).toHaveAttribute(
+    "href",
+    `/api/attachments/00000000-0000-4000-8000-000000000098/open?mode=download`,
+  );
   await expect(page.getByRole("button", { name: "批准" })).toBeVisible();
 });
 

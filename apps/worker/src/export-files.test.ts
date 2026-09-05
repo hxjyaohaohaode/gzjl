@@ -33,6 +33,9 @@ const document: WorkSessionExportDocument = {
       result: "完成中文结果",
       blockers: "",
       nextStep: "继续验证",
+      projectName: "证据平台",
+      projectNodeTitle: "文件上传",
+      workTypeName: "研发",
       primaryProjectNodeId: null,
       workTypeId: null,
       visibility: "management_only",
@@ -71,14 +74,21 @@ describe("background export renderers", () => {
     await workbook.xlsx.load(
       rendered.body as unknown as Parameters<typeof workbook.xlsx.load>[0],
     );
+    const overview = workbook.getWorksheet("导出概览");
     const sheet = workbook.getWorksheet("工作记录");
+    const technical = workbook.getWorksheet("技术明细");
+    expect(overview?.getCell("A1").value).toBe("工作记录导出");
     expect(sheet).toBeDefined();
-    expect(sheet!.getCell("A1").value).toBe("工作记录导出");
-    expect(sheet!.getCell("C6").value).toBe("测试成员");
-    expect(sheet!.getCell("L6").value).toBe(
+    expect(sheet!.getCell("A2").value).toBe("测试成员");
+    expect(sheet!.getCell("G2").value).toBe("证据平台");
+    expect(sheet!.getCell("O2").value).toBe("已提交");
+    expect(sheet!.getCell("P2").value).toBe("已批准");
+    expect(sheet!.getCell("K2").value).toBe(
       "'=HYPERLINK(\"https://invalid.example\",\"危险公式\")",
     );
     expect(sheet!.views[0]?.state).toBe("frozen");
+    expect(sheet!.autoFilter).toBeTruthy();
+    expect(technical?.state).toBe("hidden");
   });
 
   it("renders a non-empty PDF with an embedded Chinese-capable font", async () => {

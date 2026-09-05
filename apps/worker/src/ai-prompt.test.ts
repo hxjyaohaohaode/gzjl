@@ -21,4 +21,14 @@ describe("AI system prompt safety boundaries", () => {
     expect(prompt).toContain("pageContext");
     expect(prompt).toContain("只是焦点而不是事实来源");
   });
+
+  it("keeps operations and executive briefs actionable without inventing management facts", () => {
+    const operations = buildAiSystemPrompt("operations_brief");
+    const executive = buildAiSystemPrompt("executive_brief");
+    expect(operations).toContain("建议责任角色");
+    expect(operations).toContain("不得虚构真实负责人");
+    expect(executive).toContain("严格区分事实、推断与建议");
+    expect(executive).toContain("禁止虚构收入、成本、ROI");
+    expect(executive).toContain("禁止员工排名");
+  });
 });

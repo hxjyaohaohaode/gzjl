@@ -4,6 +4,7 @@ import {
   MarkerType,
   MiniMap,
   Panel,
+  Position,
   ReactFlow,
   type Edge,
   type Node,
@@ -17,6 +18,7 @@ import { accessibleAccent } from "./color.js";
 
 interface ProjectCanvasNode {
   id: string;
+  branchId: string;
   parentId: string | null;
   title: string;
   status: string;
@@ -45,8 +47,20 @@ function statusLabel(status: string): string {
   if (status === "in_progress") return "进行中";
   if (status === "completed") return "已完成";
   if (status === "blocked") return "受阻";
+  if (status === "in_review") return "待确认";
+  if (status === "cancelled") return "已取消";
   if (status === "not_started") return "未开始";
   return status;
+}
+
+function nodeTypeLabel(type: string): string {
+  return {
+    phase: "阶段",
+    milestone: "里程碑",
+    task: "任务",
+    deliverable: "交付物",
+    decision: "决策",
+  }[type] ?? type;
 }
 
 function progressModeLabel(mode: ProjectCanvasNode["progressMode"]): string {
@@ -88,23 +102,23 @@ function layoutTree(nodes: ProjectCanvasNode[]): Map<string, { x: number; y: num
     });
   const positions = new Map<string, { x: number; y: number }>();
   const visiting = new Set<string>();
-  let nextRow = 0;
+  let nextColumn = 0;
 
   const visit = (id: string, depth: number): { x: number; y: number } => {
     const known = positions.get(id);
     if (known) return known;
     if (visiting.has(id)) {
-      const cycleFallback = { x: depth * 278, y: nextRow * 142 };
-      nextRow += 1;
+      const cycleFallback = { x: nextColumn * 292, y: depth * 188 };
+      nextColumn += 1;
       return cycleFallback;
     }
     visiting.add(id);
     const childIds = sortIds(children.get(id) ?? []);
     const childPositions = childIds.map((childId) => visit(childId, depth + 1));
-    const y = childPositions.length
-      ? (childPositions[0]!.y + childPositions[childPositions.length - 1]!.y) / 2
-      : nextRow++ * 142;
-    const position = { x: depth * 278, y };
+    const x = childPositions.length
+      ? (childPositions[0]!.x + childPositions[childPositions.length - 1]!.x) / 2
+      : nextColumn++ * 292;
+    const position = { x, y: depth * 188 };
     positions.set(id, position);
     visiting.delete(id);
     return position;
@@ -128,13 +142,17 @@ export default function ProjectCanvas({
   nodes,
   edges,
   accent,
+  canManage = false,
   selectedNodeId,
+  onAddChild,
   onNodeSelect,
 }: {
   nodes: ProjectCanvasNode[];
   edges: ProjectCanvasEdge[];
   accent?: string;
+  canManage?: boolean;
   selectedNodeId?: string | null;
+  onAddChild?: (node: ProjectCanvasNode) => void;
   onNodeSelect?: (nodeId: string) => void;
 }) {
   const projectAccent = accessibleAccent(accent);
@@ -163,7 +181,7 @@ export default function ProjectCanvas({
               style={{ "--node-accent": nodeAccent } as CSSProperties}
             >
               <div className="project-flow-node-top">
-                <span className="project-flow-node-kind">{node.type}</span>
+                <span className="project-flow-node-kind">{nodeTypeLabel(node.type)}</span>
                 <strong className="text-[0.68rem] tabular-nums text-[var(--node-accent)]">
                   {progress}%
                 </strong>
@@ -205,7 +223,21 @@ export default function ProjectCanvas({
               </div>
               <div className="project-flow-node-footer">
                 <span>{statusLabel(node.status)}</span>
-                <span>v{node.version}</span>
+                <span>
+                  v{node.version}
+                  {canManage ? (
+                    <button
+                      aria-label={`在 ${node.title} 下新建子节点`}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onAddChild?.(node);
+                      }}
+                      type="button"
+                    >
+                      ＋ 子节点
+                    </button>
+                  ) : null}
+                </span>
               </div>
             </div>
           ),
@@ -216,13 +248,28 @@ export default function ProjectCanvas({
           padding: 0,
           width: 226,
         },
+        sourcePosition: Position.Bottom,
+        targetPosition: Position.Top,
       };
     });
-  }, [nodes, projectAccent, selectedNodeId]);
+  }, [canManage, nodes, onAddChild, projectAccent, selectedNodeId]);
 
   const flowEdges = useMemo<Edge[]>(
-    () =>
-      edges.map((edge) => {
+    () => {
+      const visibleNodeIds = new Set(nodes.map((node) => node.id));
+      const hierarchy = nodes
+        .filter((node) => node.parentId && visibleNodeIds.has(node.parentId))
+        .map((node) => ({
+          id: `hierarchy-${node.id}`,
+          source: node.parentId!,
+          target: node.id,
+          type: "smoothstep",
+          style: {
+            stroke: "color-mix(in srgb, var(--project-accent) 28%, var(--border))",
+            strokeWidth: 1.8,
+          },
+        }));
+      const relationships = edges.map((edge) => {
         const blocks = edge.type === "blocks";
         const structural =
           edge.type === "replaces" || edge.type === "merges_into";
@@ -232,7 +279,7 @@ export default function ProjectCanvas({
             ? "var(--text-muted)"
             : projectAccent;
         return {
-          id: edge.id,
+          id: `relation-${edge.id}`,
           source: edge.sourceNodeId,
           target: edge.targetNodeId,
           label: edge.label ?? relationshipLabel(edge.type),
@@ -251,8 +298,10 @@ export default function ProjectCanvas({
           },
           labelBgStyle: { fill: "var(--surface)", fillOpacity: 0.94 },
         };
-      }),
-    [edges, projectAccent],
+      });
+      return [...hierarchy, ...relationships];
+    },
+    [edges, nodes, projectAccent],
   );
 
   return (
@@ -282,7 +331,8 @@ export default function ProjectCanvas({
         <Background color="var(--border)" gap={22} size={1} />
         <Panel className="project-flow-legend" position="top-left">
           <strong>{nodes.length} 个节点</strong>
-          <span>{edges.length} 条关系</span>
+          <span>{nodes.filter((node) => node.parentId).length} 条层级</span>
+          <span>{edges.length} 条关联</span>
           <span className="project-flow-key">
             <i data-kind="dependency" />
             依赖

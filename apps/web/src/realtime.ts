@@ -5,6 +5,9 @@ interface RealtimeMessage {
   type?: unknown;
 }
 
+const REALTIME_TAB_CHANNEL = "workbench-realtime-sync-v1";
+const REALTIME_TAB_STORAGE_KEY = "workbench-realtime-sync-event";
+
 export type RealtimeSyncStatus =
   | "offline"
   | "connecting"
@@ -47,17 +50,32 @@ export function useRealtimeSync(enabled: boolean): RealtimeSyncStatus {
     let reconnectTimer: number | undefined;
     let invalidateTimer: number | undefined;
     let reconnectAttempt = 0;
+    let hasConnected = false;
+    let hiddenAt: number | undefined;
     let socket: WebSocket | undefined;
+    const channel = typeof BroadcastChannel === "undefined"
+      ? undefined
+      : new BroadcastChannel(REALTIME_TAB_CHANNEL);
 
-    const invalidate = () => {
+    const publishToOtherTabs = () => {
+      const value = `${Date.now()}:${crypto.randomUUID?.() ?? Math.random()}`;
+      channel?.postMessage(value);
+      try {
+        localStorage.setItem(REALTIME_TAB_STORAGE_KEY, value);
+      } catch {
+        // Storage may be disabled; BroadcastChannel or each tab's socket still works.
+      }
+    };
+    const invalidate = (broadcast = false) => {
+      if (broadcast) publishToOtherTabs();
       if (invalidateTimer !== undefined) return;
       invalidateTimer = window.setTimeout(() => {
         invalidateTimer = undefined;
-        // Refetch only data observed by the current screen. Inactive screens
-        // will fetch on navigation, so one organization event cannot fan out
-        // into dozens of requests in every open tab.
+        // Mark every cached screen stale but refetch only the screen currently
+        // observed. A later navigation can never reuse a pre-event cache, while
+        // one organization event still cannot fan out into dozens of requests.
         void queryClient.invalidateQueries({
-          type: "active",
+          type: "all",
           refetchType: "active",
         });
       }, 1_500);
@@ -98,21 +116,23 @@ export function useRealtimeSync(enabled: boolean): RealtimeSyncStatus {
         return;
       }
       socket.addEventListener("open", () => {
+        const isReconnect = hasConnected;
+        hasConnected = true;
         reconnectAttempt = 0;
         setStatus("connected");
         // A device can miss changes while suspended or offline. Reconcile the
-        // data currently visible as soon as the realtime channel is restored.
-        invalidate();
+        // visible data when a lost channel is restored. The first connection
+        // follows the screen's normal initial queries and needs no duplicate
+        // refetch.
+        if (isReconnect) invalidate(true);
       });
       socket.addEventListener("message", (event) => {
         const message = parseMessage(event.data);
         if (!message || typeof message.type !== "string") return;
-        if (message.type === "heartbeat") return;
-        // A fresh connection can have missed events while the device was
-        // offline, so ready is deliberately treated as a reconciled refetch.
-        // Bursts are coalesced above so one saved work entry cannot make every
-        // open chart replay several refreshes in succession.
-        invalidate();
+        if (message.type === "heartbeat" || message.type === "realtime.ready") return;
+        // Business event bursts are coalesced above so one saved work entry
+        // cannot make every open chart replay several refreshes in succession.
+        invalidate(true);
       });
       socket.addEventListener("close", (event) => {
         if (disposed) return;
@@ -129,6 +149,7 @@ export function useRealtimeSync(enabled: boolean): RealtimeSyncStatus {
     };
 
     const onOnline = () => {
+      invalidate();
       if (socket?.readyState !== WebSocket.OPEN) connect();
     };
     const onOffline = () => {
@@ -139,8 +160,25 @@ export function useRealtimeSync(enabled: boolean): RealtimeSyncStatus {
       }
       socket?.close(1_000, "device offline");
     };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "hidden") {
+        hiddenAt = Date.now();
+        return;
+      }
+      if (hiddenAt !== undefined) {
+        hiddenAt = undefined;
+        invalidate();
+      }
+    };
+    const onStorage = (event: StorageEvent) => {
+      if (event.key === REALTIME_TAB_STORAGE_KEY) invalidate();
+    };
+    const onChannelMessage = () => invalidate();
     window.addEventListener("online", onOnline);
     window.addEventListener("offline", onOffline);
+    window.addEventListener("storage", onStorage);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    channel?.addEventListener("message", onChannelMessage);
     connect();
 
     return () => {
@@ -149,6 +187,10 @@ export function useRealtimeSync(enabled: boolean): RealtimeSyncStatus {
       if (invalidateTimer !== undefined) window.clearTimeout(invalidateTimer);
       window.removeEventListener("online", onOnline);
       window.removeEventListener("offline", onOffline);
+      window.removeEventListener("storage", onStorage);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      channel?.removeEventListener("message", onChannelMessage);
+      channel?.close();
       socket?.close(1_000, "client cleanup");
     };
   }, [enabled, queryClient]);

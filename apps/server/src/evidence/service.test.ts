@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { Database } from "@workbench/db";
 
 import type { ServerConfig } from "../config.js";
-import { EvidenceService } from "./service.js";
+import { EvidenceService, previewMimeType } from "./service.js";
 
 const config: ServerConfig = {
   NODE_ENV: "test",
@@ -38,6 +38,14 @@ const config: ServerConfig = {
 };
 
 describe("evidence storage capabilities", () => {
+  it("previews passive document and media formats while forcing archives and active content to download", () => {
+    expect(previewMimeType("application/pdf", "proof.pdf")).toBe("application/pdf");
+    expect(previewMimeType("", "README")).toBe("text/plain");
+    expect(previewMimeType("application/octet-stream", "notes.txt")).toBe("text/plain");
+    expect(previewMimeType("application/zip", "proof.zip")).toBeNull();
+    expect(previewMimeType("image/svg+xml", "diagram.svg")).toBeNull();
+    expect(previewMimeType("text/html", "report.html")).toBeNull();
+  });
   it("keeps links and text available while refusing to pretend that absent object storage can upload files", () => {
     const capabilities = new EvidenceService({} as Database, config).capabilities();
 

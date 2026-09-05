@@ -119,7 +119,40 @@ export interface CreateBranchInput {
 export interface UpdateBranchInput {
   name?: string | undefined;
   description?: string | null | undefined;
+  parentBranchId?: string | null | undefined;
   changeSummary: string;
+}
+
+export function assertValidBranchParent(input: {
+  branchId: string;
+  isDefault: boolean;
+  parentBranchId: string | null;
+  activeBranches: Array<{ id: string; parentBranchId: string | null }>;
+}): void {
+  if (input.isDefault && input.parentBranchId !== null) {
+    throw new ProjectTreeValidationError("主线必须保留在项目根级。");
+  }
+  if (input.parentBranchId === input.branchId) {
+    throw new ProjectTreeValidationError("分支不能挂载到自身。");
+  }
+  const parentById = new Map(
+    input.activeBranches.map((branch) => [branch.id, branch.parentBranchId]),
+  );
+  if (input.parentBranchId && !parentById.has(input.parentBranchId)) {
+    throw new ProjectTreeValidationError("目标父分支不属于当前项目或已归档。");
+  }
+  const seen = new Set<string>();
+  let cursor = input.parentBranchId;
+  while (cursor) {
+    if (cursor === input.branchId) {
+      throw new ProjectTreeValidationError("移动会造成分支层级循环。");
+    }
+    if (seen.has(cursor)) {
+      throw new ProjectTreeValidationError("目标分支层级已存在循环，不能继续移动。");
+    }
+    seen.add(cursor);
+    cursor = parentById.get(cursor) ?? null;
+  }
 }
 
 export interface CreateEdgeInput {
@@ -1312,11 +1345,30 @@ export class ProjectService {
         )
         .limit(1);
       if (!before) throw new ProjectNotFoundError();
+      if (changes.parentBranchId !== undefined) {
+        const activeBranches = await tx
+          .select({ id: projectBranches.id, parentBranchId: projectBranches.parentBranchId })
+          .from(projectBranches)
+          .where(
+            and(
+              eq(projectBranches.projectId, projectId),
+              isNull(projectBranches.deletedAt),
+              isNull(projectBranches.archivedAt),
+            ),
+          );
+        assertValidBranchParent({
+          branchId,
+          isDefault: before.isDefault,
+          parentBranchId: changes.parentBranchId,
+          activeBranches,
+        });
+      }
       const [updated] = await tx
         .update(projectBranches)
         .set({
           name: changes.name,
           description: changes.description,
+          parentBranchId: changes.parentBranchId,
           version: expectedVersion + 1,
           updatedAt: new Date(),
         })

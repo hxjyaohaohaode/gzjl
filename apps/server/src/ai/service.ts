@@ -30,6 +30,8 @@ export const aiTaskTypes = [
   "project_progress",
   "project_blockers",
   "organization_summary",
+  "operations_brief",
+  "executive_brief",
   "salary_explanation",
   "assistant_chat",
 ] as const;
@@ -78,6 +80,8 @@ const taskGoals: Record<AiTaskType, string> = {
   project_progress: "按项目汇总投入和进展证据；工时不能被直接解释为完成度。",
   project_blockers: "仅根据工作记录中的阻塞与项目事实定位风险，并给出可验证的处理建议。",
   organization_summary: "汇总授权范围内的组织工作事实，不做员工排名、处罚或绩效结论。",
+  operations_brief: "生成运营执行简报：按紧急程度整理待审核、阻塞、异常、协作缺口和下一步动作；每项动作标明事实依据、建议责任角色和建议时间，不虚构负责人或截止日期。",
+  executive_brief: "生成负责人决策简报：说明组织投入、项目进展、交付与审核风险、需要决策的事项及未来七天关注点；严格区分事实、推断和建议，不做员工排名或无依据的绩效评价。",
   salary_explanation: "解释本人可见的工资周期、计薪分项、调整与预估状态；逐字使用既有金额，不重新计薪或猜测税费。",
   assistant_chat: "回答用户关于工作、成员状态和项目状态的问题；结论必须能回溯到当前授权范围内的事实。",
 };

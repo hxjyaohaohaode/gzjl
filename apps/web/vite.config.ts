@@ -4,6 +4,12 @@ import { defineConfig } from "vite";
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  // The project canvas is lazy-loaded well into the E2E suite. Pre-bundle its
+  // runtime so Vite does not invalidate already-open browser modules when the
+  // first canvas is visited.
+  optimizeDeps: {
+    include: ["@xyflow/react"],
+  },
   server: {
     port: 5_173,
     strictPort: true,

@@ -174,26 +174,65 @@ class ObjectStore {
     }
   }
 
-  async createDownloadUrl(objectKey: string, originalName: string | null) {
+  async createAccessUrl(
+    objectKey: string,
+    originalName: string | null,
+    declaredMimeType: string | null,
+    mode: "preview" | "download",
+  ) {
     // Downloads only need a short capability. Keep them at five minutes or
     // less even if a deployment chooses a longer upload retry window.
     const expiresInSeconds = Math.min(this.config.signedUrlTtlSeconds, 5 * 60);
+    const previewType = previewMimeType(declaredMimeType, originalName);
+    const preview = mode === "preview" && previewType !== null;
     return {
       url: await getSignedUrl(
         this.client,
         new GetObjectCommand({
           Bucket: this.config.bucket,
           Key: objectKey,
-          // Evidence is always an attachment; never let a browser execute or
-          // render an uploaded file in the application origin.
-          ResponseContentDisposition: `attachment; filename="${safeName(originalName ?? "evidence")}"`,
-          ResponseContentType: genericBinaryMimeType,
+          // Preview only passive formats and keep them on the isolated object
+          // storage origin. Active or unknown formats remain forced downloads.
+          ResponseContentDisposition: `${preview ? "inline" : "attachment"}; filename="${safeName(originalName ?? "evidence")}"`,
+          ResponseContentType: previewType ?? genericBinaryMimeType,
         }),
         { expiresIn: expiresInSeconds },
       ),
       expiresInSeconds,
+      previewable: previewType !== null,
+      disposition: preview ? "inline" : "attachment",
     };
   }
+}
+
+export function previewMimeType(
+  declaredMimeType: string | null,
+  originalName: string | null,
+): string | null {
+  const mimeType = normalizeMimeType(declaredMimeType ?? "");
+  if (mimeType === "application/pdf" || mimeType === "application/json") return mimeType;
+  if (mimeType === "text/plain" || mimeType === "text/markdown" || mimeType === "text/csv") {
+    return mimeType;
+  }
+  if (
+    mimeType.startsWith("image/") &&
+    mimeType !== "image/svg+xml"
+  ) {
+    return mimeType;
+  }
+  if (mimeType.startsWith("audio/") || mimeType.startsWith("video/")) return mimeType;
+
+  // Several browsers report an empty type for README, log and Markdown files.
+  // A conservative extension fallback makes these common evidence formats
+  // readable without ever treating HTML, SVG or scripts as inline content.
+  const name = (originalName ?? "").trim().toLowerCase();
+  if (name === "readme" || name === "license" || /\.(txt|md|markdown|log)$/u.test(name)) {
+    return "text/plain";
+  }
+  if (/\.csv$/u.test(name)) return "text/csv";
+  if (/\.json$/u.test(name)) return "application/json";
+  if (/\.pdf$/u.test(name)) return "application/pdf";
+  return null;
 }
 
 function safeName(name: string): string {
@@ -751,6 +790,14 @@ export class EvidenceService {
   }
 
   async download(actor: AuthContext, attachmentId: string) {
+    return this.access(actor, attachmentId, "download");
+  }
+
+  async access(
+    actor: AuthContext,
+    attachmentId: string,
+    mode: "preview" | "download",
+  ) {
     const row = await this.linkedAttachment(actor, attachmentId);
     await this.assertVisible(actor, row.attachment, row.link.entityId);
     if (row.attachment.status !== "available") {
@@ -764,9 +811,11 @@ export class EvidenceService {
       throw new EvidenceValidationError("该证据没有可下载文件。");
     }
     return {
-      ...(await this.store.createDownloadUrl(
+      ...(await this.store.createAccessUrl(
         row.attachment.objectKey,
         row.attachment.originalName,
+        row.attachment.mimeType,
+        mode,
       )),
       sha256: row.attachment.sha256,
       originalName: row.attachment.originalName,

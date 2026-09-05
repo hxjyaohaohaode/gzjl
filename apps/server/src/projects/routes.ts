@@ -78,10 +78,14 @@ const updateBranchSchema = z
     expectedVersion: z.number().int().positive(),
     name: z.string().trim().min(1).max(160).optional(),
     description: z.string().trim().max(10_000).nullable().optional(),
+    parentBranchId: z.uuid().nullable().optional(),
     changeSummary: z.string().trim().min(2).max(500),
   })
   .refine(
-    (input) => input.name !== undefined || input.description !== undefined,
+    (input) =>
+      input.name !== undefined ||
+      input.description !== undefined ||
+      input.parentBranchId !== undefined,
     { message: "至少提供一个要更新的分支字段" },
   );
 const mergeBranchSchema = z.object({

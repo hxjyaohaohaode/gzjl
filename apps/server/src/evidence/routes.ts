@@ -10,6 +10,9 @@ import {
 
 const sessionParams = z.object({ sessionId: z.uuid() });
 const attachmentParams = z.object({ attachmentId: z.uuid() });
+const attachmentOpenQuery = z.object({
+  mode: z.enum(["preview", "download"]).default("preview"),
+});
 const visibility = z.enum(["private", "management_only", "project_visible"]);
 const fileInput = z.object({
   originalName: z.string().trim().min(1).max(255),
@@ -162,6 +165,21 @@ export async function registerEvidenceRoutes(
       try {
         const { attachmentId } = attachmentParams.parse(request.params);
         return await service.download(request.auth!, attachmentId);
+      } catch (error) {
+        return mapEvidenceError(error, reply);
+      }
+    },
+  );
+
+  app.get(
+    "/api/attachments/:attachmentId/open",
+    { preHandler: authenticate },
+    async (request, reply) => {
+      try {
+        const { attachmentId } = attachmentParams.parse(request.params);
+        const { mode } = attachmentOpenQuery.parse(request.query);
+        const access = await service.access(request.auth!, attachmentId, mode);
+        return reply.redirect(access.url);
       } catch (error) {
         return mapEvidenceError(error, reply);
       }
