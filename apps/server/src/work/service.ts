@@ -1,12 +1,15 @@
 import { and, asc, desc, eq, gt, inArray, isNull, lt, ne, or } from "drizzle-orm";
 import type { Database } from "@workbench/db";
 import {
+  attachmentLinks,
+  attachments,
   auditLogs,
   approvalActions,
   approvalRequests,
   projectNodes,
   projects,
   orgMemberships,
+  outboxEvents,
   workBreaks,
   workExpectationProfiles,
   workSessionProjectLinks,
@@ -39,6 +42,13 @@ export class WorkSessionVersionConflictError extends Error {
   constructor() {
     super("记录已被其他操作更新或当前状态不允许提交，请刷新后重试。");
     this.name = "WorkSessionVersionConflictError";
+  }
+}
+
+export class WorkSessionEvidenceRequiredError extends Error {
+  constructor() {
+    super("提交审核前必须至少提供一项审核人可见且已完成核验的证据。可上传任意格式文件，或添加链接/文字证据。");
+    this.name = "WorkSessionEvidenceRequiredError";
   }
 }
 
@@ -490,6 +500,14 @@ export class WorkSessionService {
         requestId: requestMeta.requestId,
         userAgent: requestMeta.userAgent,
       });
+      await tx.insert(outboxEvents).values({
+        organizationId: actor.organizationId,
+        eventType: "work_session.changed",
+        entityType: "work_session",
+        entityId: updated.id,
+        entityVersion: updated.version,
+        payload: { change: recordKind === "plan" ? "plan_updated" : "draft_updated" },
+      });
       return snapshot;
     });
   }
@@ -676,6 +694,14 @@ export class WorkSessionService {
       after: snapshot,
       requestId: requestMeta.requestId,
       userAgent: requestMeta.userAgent,
+    });
+    await db.insert(outboxEvents).values({
+      organizationId: actor.organizationId,
+      eventType: "work_session.changed",
+      entityType: "work_session",
+      entityId: session.id,
+      entityVersion: session.version,
+      payload: { change: recordKind === "plan" ? "plan_created" : "created" },
     });
     return snapshot;
   }
@@ -924,6 +950,14 @@ export class WorkSessionService {
           before: { ...current, breaks, projectLinks },
           after: { ...updated, breaks: shiftedBreaks, projectLinks },
         });
+      await tx.insert(outboxEvents).values({
+        organizationId: actor.organizationId,
+        eventType: "work_session.changed",
+        entityType: "work_session",
+        entityId: updated.id,
+        entityVersion: updated.version,
+        payload: { change: "rescheduled" },
+      });
       return { ...updated, breaks: shiftedBreaks, projectLinks };
     });
   }
@@ -1034,12 +1068,36 @@ export class WorkSessionService {
         before: { ...current, breaks, projectLinks },
         after: snapshot,
       });
+      await tx.insert(outboxEvents).values({
+        organizationId: actor.organizationId,
+        eventType: "work_session.changed",
+        entityType: "work_session",
+        entityId: updated.id,
+        entityVersion: updated.version,
+        payload: { change: "plan_realized" },
+      });
       return snapshot;
     });
   }
 
   async submit(actor: WorkActor, sessionId: string, expectedVersion: number) {
     return this.db.transaction(async (tx) => {
+      const [reviewableEvidence] = await tx
+        .select({ id: attachments.id })
+        .from(attachmentLinks)
+        .innerJoin(attachments, eq(attachments.id, attachmentLinks.attachmentId))
+        .where(
+          and(
+            eq(attachmentLinks.entityType, "work_session"),
+            eq(attachmentLinks.entityId, sessionId),
+            eq(attachments.organizationId, actor.organizationId),
+            eq(attachments.status, "available"),
+            inArray(attachments.visibility, ["management_only", "project_visible"]),
+            isNull(attachments.deletedAt),
+          ),
+        )
+        .limit(1);
+      if (!reviewableEvidence) throw new WorkSessionEvidenceRequiredError();
       const [updated] = await tx
         .update(workSessions)
         .set({
@@ -1117,6 +1175,117 @@ export class WorkSessionService {
         entityType: "work_session",
         entityId: updated.id,
         after: snapshot,
+      });
+      await tx.insert(outboxEvents).values({
+        organizationId: actor.organizationId,
+        eventType: "work_session.changed",
+        entityType: "work_session",
+        entityId: updated.id,
+        entityVersion: updated.version,
+        payload: { change: "submitted" },
+      });
+      return snapshot;
+    });
+  }
+
+  async withdrawSubmission(
+    actor: WorkActor,
+    sessionId: string,
+    expectedVersion: number,
+  ) {
+    return this.db.transaction(async (tx) => {
+      const [current] = await tx
+        .select()
+        .from(workSessions)
+        .where(
+          and(
+            eq(workSessions.id, sessionId),
+            eq(workSessions.organizationId, actor.organizationId),
+            eq(workSessions.membershipId, actor.membershipId),
+            eq(workSessions.version, expectedVersion),
+            eq(workSessions.recordKind, "fact"),
+            eq(workSessions.submissionStatus, "submitted"),
+            eq(workSessions.approvalStatus, "pending_review"),
+            isNull(workSessions.lockedAt),
+            isNull(workSessions.deletedAt),
+          ),
+        )
+        .limit(1);
+      if (!current) throw new WorkSessionVersionConflictError();
+
+      const [request] = await tx
+        .update(approvalRequests)
+        .set({ status: "cancelled", resolvedAt: new Date() })
+        .where(
+          and(
+            eq(approvalRequests.organizationId, actor.organizationId),
+            eq(approvalRequests.entityType, "work_session"),
+            eq(approvalRequests.entityId, sessionId),
+            eq(approvalRequests.status, "pending"),
+          ),
+        )
+        .returning();
+      if (!request) throw new WorkSessionVersionConflictError();
+
+      const [updated] = await tx
+        .update(workSessions)
+        .set({
+          submissionStatus: "draft",
+          approvalStatus: "not_requested",
+          submittedAt: null,
+          updatedAt: new Date(),
+          version: expectedVersion + 1,
+        })
+        .where(
+          and(
+            eq(workSessions.id, sessionId),
+            eq(workSessions.version, expectedVersion),
+            eq(workSessions.approvalStatus, "pending_review"),
+          ),
+        )
+        .returning();
+      if (!updated) throw new WorkSessionVersionConflictError();
+
+      const [breaks, projectLinks] = await Promise.all([
+        tx.select().from(workBreaks).where(eq(workBreaks.workSessionId, sessionId)),
+        tx
+          .select()
+          .from(workSessionProjectLinks)
+          .where(eq(workSessionProjectLinks.workSessionId, sessionId)),
+      ]);
+      const beforeSnapshot = { ...current, breaks, projectLinks };
+      const snapshot = { ...updated, breaks, projectLinks };
+      await tx.insert(workSessionVersions).values({
+        workSessionId: sessionId,
+        version: updated.version,
+        snapshot,
+        changeReason: "approval_submission_withdrawn",
+        changedBy: actor.membershipId,
+      });
+      await tx.insert(approvalActions).values({
+        approvalRequestId: request.id,
+        actorMembershipId: actor.membershipId,
+        action: "cancelled",
+        reason: "提交人撤回并准备修改",
+        beforeSnapshot,
+        afterSnapshot: snapshot,
+      });
+      await tx.insert(auditLogs).values({
+        organizationId: actor.organizationId,
+        actorMembershipId: actor.membershipId,
+        action: "work_session.submission_withdrawn",
+        entityType: "work_session",
+        entityId: sessionId,
+        before: beforeSnapshot,
+        after: snapshot,
+      });
+      await tx.insert(outboxEvents).values({
+        organizationId: actor.organizationId,
+        eventType: "work_session.changed",
+        entityType: "work_session",
+        entityId: sessionId,
+        entityVersion: updated.version,
+        payload: { change: "submission_withdrawn" },
       });
       return snapshot;
     });

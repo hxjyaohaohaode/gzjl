@@ -1569,6 +1569,7 @@ const notificationCategories = [
   { category: "project_due_soon", title: "项目临期", description: "负责的项目节点临近截止时间时提醒。" },
   { category: "blocked_node_aging", title: "阻塞持续", description: "负责的项目节点持续阻塞时提醒。" },
   { category: "approval_returned", title: "审核退回", description: "工作记录被退回后提醒补充或修正。" },
+  { category: "work_submission_overdue", title: "提交审核提醒", description: "工作草稿超过两小时仍未提交审核时提醒。" },
   {
     category: "payroll_cutoff_pending",
     title: "薪资截止",
@@ -2918,6 +2919,10 @@ interface PendingWorkEvidence {
   files: File[];
 }
 
+function hasPendingWorkEvidence(value: PendingWorkEvidence): boolean {
+  return Boolean(value.url.trim() || value.text.trim() || value.files.length);
+}
+
 interface AdditionalWorkSegment {
   id: string;
   startAt: string;
@@ -3134,8 +3139,8 @@ function DirectEvidenceFields({
   return (
     <div className="work-direct-evidence">
       <div className="work-direct-evidence-head">
-        <strong>本段证据（可选）</strong>
-        <span>随本次保存自动关联</span>
+        <strong>本段证据（必填）</strong>
+        <span>文件、链接或文字至少一项；文件支持图片、视频、PDF、README 及其他任意格式</span>
       </div>
       <div className="work-direct-evidence-grid">
         <input
@@ -4224,6 +4229,18 @@ function EvidencePanel({ sessionId }: { sessionId: string }) {
                       </Button>
                     </span>
                   </div>
+                  <details className="evidence-metadata-details">
+                    <summary>查看内容详情</summary>
+                    <dl>
+                      <div><dt>类型</dt><dd>{item.kind === "file" ? item.mimeType ?? "application/octet-stream" : item.kind === "url" ? "外部链接" : "文字"}</dd></div>
+                      <div><dt>大小</dt><dd>{item.kind === "file" ? formatFileSize(item.sizeBytes) : "—"}</dd></div>
+                      <div><dt>上传时间</dt><dd>{formatDateTime(item.uploadedAt)}</dd></div>
+                      <div><dt>版本</dt><dd>v{item.version}</dd></div>
+                      <div className="evidence-metadata-wide"><dt>SHA-256</dt><dd>{item.sha256 || "不适用"}</dd></div>
+                      {item.kind === "url" ? <div className="evidence-metadata-wide"><dt>完整链接</dt><dd>{item.externalUrl}</dd></div> : null}
+                      {item.kind === "text" ? <div className="evidence-metadata-wide"><dt>完整内容</dt><dd>{item.textContent || "（空内容）"}</dd></div> : null}
+                    </dl>
+                  </details>
                   {versionsFor === item.id ? (
                     <div className="mt-2 rounded-lg bg-[var(--surface-subtle)] px-3 py-2 text-xs text-[var(--text-muted)]">
                       {versionHistory.isPending ? (
@@ -4329,6 +4346,13 @@ function ReadOnlyEvidenceList({ sessionId }: { sessionId: string }) {
           {item.kind === "text" ? (
             <p className="evidence-readonly-text">{item.textContent || "（空内容）"}</p>
           ) : null}
+          <dl className="evidence-readonly-metadata">
+            <div><dt>上传时间</dt><dd>{formatDateTime(item.uploadedAt)}</dd></div>
+            <div><dt>核验状态</dt><dd>{item.status === "available" ? "已通过" : item.status}</dd></div>
+            <div><dt>可见范围</dt><dd>{item.visibility === "project_visible" ? "关联项目" : item.visibility === "management_only" ? "审核与管理" : "仅提交人"}</dd></div>
+            <div><dt>版本</dt><dd>v{item.version}</dd></div>
+            {item.kind === "file" ? <div className="evidence-metadata-wide"><dt>SHA-256</dt><dd>{item.sha256 || "等待核验"}</dd></div> : null}
+          </dl>
           {item.kind === "file" && item.status !== "available" ? (
             <p className="evidence-readonly-state">该文件尚未完成安全核验，暂不可下载。</p>
           ) : null}
@@ -4717,6 +4741,27 @@ export function WorkPage() {
   };
   const create = useMutation({
     mutationFn: async (recordKind: "fact" | "plan") => {
+      if (!editingSession && !correctionSession) {
+        const evidenceMissingFor: string[] = [];
+        const primaryIsFact =
+          recordKind === "fact" &&
+          zonedInputToDate(manual.endAt).getTime() <= Date.now() + 5 * 60_000;
+        if (primaryIsFact && !hasPendingWorkEvidence(primaryEvidence)) {
+          evidenceMissingFor.push("第 1 段");
+        }
+        additionalSegments.forEach((segment, index) => {
+          const isFact =
+            zonedInputToDate(segment.endAt).getTime() <= Date.now() + 5 * 60_000;
+          if (isFact && !hasPendingWorkEvidence(segment.evidence)) {
+            evidenceMissingFor.push(`第 ${index + 2} 段`);
+          }
+        });
+        if (evidenceMissingFor.length) {
+          throw new Error(
+            `${evidenceMissingFor.join("、")}缺少证据。每段已完成工作必须至少上传一个文件，或填写一条链接/文字证据。`,
+          );
+        }
+      }
       const incompleteBreak = manualBreaks.some(
         (entry) => Boolean(entry.startAt) !== Boolean(entry.endAt),
       );
@@ -4904,6 +4949,14 @@ export function WorkPage() {
   const submit = useMutation({
     mutationFn: (item: WorkSession) =>
       api(`/api/work-sessions/${item.id}/submit`, {
+        method: "POST",
+        body: { expectedVersion: item.version },
+      }),
+    onSuccess: refresh,
+  });
+  const withdraw = useMutation({
+    mutationFn: (item: WorkSession) =>
+      api(`/api/work-sessions/${item.id}/withdraw`, {
         method: "POST",
         body: { expectedVersion: item.version },
       }),
@@ -5582,7 +5635,10 @@ export function WorkPage() {
                     </button>
                   </div>
                 </div>
-                <Field label="可见范围">
+                <Field
+                  hint="提交审核时至少一项证据必须对审核人可见；选择“仅自己”可保存草稿，但不能提交审核。"
+                  label="可见范围"
+                >
                   <select
                     className={fieldClass}
                     onChange={(event) =>
@@ -5590,7 +5646,7 @@ export function WorkPage() {
                     }
                     value={manual.visibility}
                   >
-                    <option value="private">仅自己</option>
+                    <option value="private">仅自己（仅保存草稿）</option>
                     <option value="management_only">管理范围</option>
                     <option value="project_visible">项目成员</option>
                   </select>
@@ -5672,9 +5728,11 @@ export function WorkPage() {
                     </Field>
                   </div>
                 ) : (
-                  <div className="flex items-end text-xs leading-5 text-[var(--text-muted)] md:col-span-2">
+                  <div className="work-project-suggestion md:col-span-2" role="note">
+                    <FolderKanban size={17} />
                     <p>
-                      未关联时仍可保存个人工作草稿；后续可随时选择项目并添加多个节点。
+                      <strong>建议关联相关项目</strong>
+                      <span>便于归集投入与查看进度；暂时无法确定时可以跳过，草稿仍可正常保存。</span>
                     </p>
                   </div>
                 )}
@@ -6059,14 +6117,33 @@ export function WorkPage() {
                               </Button>
                             ) : null}
                             <Button
+                              className="work-submit-review-button"
                               disabled={submit.isPending}
                               onClick={() => submit.mutate(item)}
                               size="compact"
-                              variant="secondary"
                             >
+                              <FileCheck2 size={16} />
                               提交审核
                             </Button>
                           </div>
+                        ) : item.approvalStatus === "pending_review" ? (
+                          <Button
+                            disabled={withdraw.isPending}
+                            onClick={() => {
+                              if (
+                                window.confirm(
+                                  "撤回后该记录会恢复为草稿，可以修改证据或内容并重新提交。确认撤回？",
+                                )
+                              ) {
+                                withdraw.mutate(item);
+                              }
+                            }}
+                            size="compact"
+                            variant="secondary"
+                          >
+                            <RotateCcw size={16} />
+                            撤回修改
+                          </Button>
                         ) : null
                       }
                       item={item}
@@ -6099,7 +6176,7 @@ export function WorkPage() {
                 title="还没有工时记录"
               />
             )}
-            <ErrorMessage error={realizePlan.error} />
+            <ErrorMessage error={submit.error ?? withdraw.error ?? realizePlan.error} />
           </CardContent>
         </Card>
       </div>
@@ -6651,6 +6728,7 @@ function readCorrectionProposal(snapshot: unknown): {
 export function ApprovalsPage() {
   const queryClient = useQueryClient();
   const [expandedApprovalId, setExpandedApprovalId] = useState<string | null>(null);
+  const [returnReasons, setReturnReasons] = useState<Record<string, string>>({});
   const [correctionInputs, setCorrectionInputs] = useState<
     Record<string, { amount: string; reviewNote: string }>
   >({});
@@ -6666,17 +6744,17 @@ export function ApprovalsPage() {
       ),
   });
   const decide = useMutation({
-    mutationFn: ({ id, decision }: { id: string; decision: string }) =>
+    mutationFn: ({ id, decision, reason }: { id: string; decision: string; reason?: string }) =>
       api(`/api/approvals/${id}/decision`, {
         method: "POST",
         body: {
           decision,
-          ...(decision === "returned"
-            ? { reason: "请补充工作结果后重新提交" }
-            : {}),
+          ...(decision === "returned" ? { reason: reason?.trim() } : {}),
         },
       }),
     onSuccess: async () => {
+      setExpandedApprovalId(null);
+      setReturnReasons({});
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["approvals"] }),
         queryClient.invalidateQueries({ queryKey: ["work-sessions"] }),
@@ -6801,17 +6879,26 @@ export function ApprovalsPage() {
                         : "查看工作与附件"}
                     </Button>
                     <Button
-                      disabled={decide.isPending}
-                      onClick={() =>
+                      disabled={
+                        decide.isPending ||
+                        (expandedApprovalId === item.request.id &&
+                          (returnReasons[item.request.id]?.trim().length ?? 0) < 2)
+                      }
+                      onClick={() => {
+                        if (expandedApprovalId !== item.request.id) {
+                          setExpandedApprovalId(item.request.id);
+                          return;
+                        }
                         decide.mutate({
                           id: item.request.id,
                           decision: "returned",
-                        })
-                      }
+                          reason: returnReasons[item.request.id] ?? "",
+                        });
+                      }}
                       variant="secondary"
                     >
                       <RotateCcw size={17} />
-                      退回
+                      退回修改
                     </Button>
                     <Button
                       disabled={decide.isPending}
@@ -6836,6 +6923,20 @@ export function ApprovalsPage() {
                       <div><dt>净工时</dt><dd>{formatDuration(item.session.netSeconds)}</dd></div>
                     </dl>
                     <ReadOnlyEvidenceList sessionId={item.session.id} />
+                    <label className="approval-return-reason">
+                      <span>退回原因</span>
+                      <textarea
+                        maxLength={1_000}
+                        onChange={(event) =>
+                          setReturnReasons((current) => ({
+                            ...current,
+                            [item.request.id]: event.target.value,
+                          }))
+                        }
+                        placeholder="明确说明需要补充或修改的内容；退回后提交人可编辑并重新提交。"
+                        value={returnReasons[item.request.id] ?? ""}
+                      />
+                    </label>
                   </section>
                 ) : null}
               </CardContent>

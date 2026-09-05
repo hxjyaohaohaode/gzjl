@@ -5,6 +5,7 @@ import { createWorkSessionSchema } from "@workbench/shared";
 import { requirePermission } from "../auth/authorization.js";
 import {
   WorkSessionConflictError,
+  WorkSessionEvidenceRequiredError,
   WorkSessionValidationError,
   WorkSessionVersionConflictError,
 } from "./service.js";
@@ -276,6 +277,31 @@ export async function registerWorkRoutes(
       const { expectedVersion } = submitBodySchema.parse(request.body);
       try {
         const session = await service.submit(request.auth!, sessionId, expectedVersion);
+        return { session };
+      } catch (error) {
+        if (error instanceof WorkSessionEvidenceRequiredError) {
+          return reply.code(422).send({ error: "evidence_required", message: error.message });
+        }
+        if (error instanceof WorkSessionVersionConflictError) {
+          return reply.code(409).send({ error: "version_conflict", message: error.message });
+        }
+        throw error;
+      }
+    },
+  );
+
+  app.post(
+    "/api/work-sessions/:sessionId/withdraw",
+    { preHandler: [app.csrfProtection, authenticate, ownPermission] },
+    async (request, reply) => {
+      const { sessionId } = submitParamsSchema.parse(request.params);
+      const { expectedVersion } = submitBodySchema.parse(request.body);
+      try {
+        const session = await service.withdrawSubmission(
+          request.auth!,
+          sessionId,
+          expectedVersion,
+        );
         return { session };
       } catch (error) {
         if (error instanceof WorkSessionVersionConflictError) {

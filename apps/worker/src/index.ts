@@ -198,6 +198,7 @@ const defaultReminderRules = [
   { category: "project_due_soon", name: "系统默认", severity: "warning" as const, cooldownSeconds: 86_400, conditions: { daysBeforeDue: 3 } },
   { category: "blocked_node_aging", name: "系统默认", severity: "warning" as const, cooldownSeconds: 86_400, conditions: { agingDays: 7 } },
   { category: "approval_returned", name: "系统默认", severity: "warning" as const, cooldownSeconds: 86_400, conditions: { lookbackDays: 7 } },
+  { category: "work_submission_overdue", name: "系统默认", severity: "warning" as const, cooldownSeconds: 86_400, conditions: { thresholdSeconds: 7_200 } },
   { category: "duration_baseline_change", name: "系统默认", severity: "info" as const, cooldownSeconds: 86_400, conditions: { lowerRatio: 0.5, upperRatio: 2, minimumBaselineSeconds: 7_200 } },
   { category: "forgotten_work", name: "系统默认（按需启用）", severity: "info" as const, cooldownSeconds: 86_400, conditions: { inactivityHours: 72 }, enabled: false },
   { category: "payroll_cutoff_pending", name: "系统默认", severity: "warning" as const, cooldownSeconds: 86_400, conditions: { daysBeforeCutoff: 3 } },
@@ -444,6 +445,37 @@ async function evaluateReminders(): Promise<void> {
       const returned = await database.db.select().from(workSessions).where(and(eq(workSessions.organizationId, rule.organizationId), eq(workSessions.recordKind, "fact"), eq(workSessions.approvalStatus, "returned"), isNull(workSessions.deletedAt), gte(workSessions.updatedAt, new Date(now.getTime() - lookbackDays * 86_400_000))));
       for (const session of returned) {
         await createRuleNotification({ rule, recipientMembershipId: session.membershipId, title: "工作记录已退回", body: "记录需要补充或修正，请查看审核意见后重新提交。", actionUrl: `/work?session=${session.id}`, dedupeKey: `approval-returned:${session.id}:${session.version}` });
+      }
+    }
+    if (rule.category === "work_submission_overdue") {
+      const threshold =
+        typeof conditions.thresholdSeconds === "number"
+          ? conditions.thresholdSeconds
+          : 7_200;
+      const overdue = await database.db
+        .select()
+        .from(workSessions)
+        .where(
+          and(
+            eq(workSessions.organizationId, rule.organizationId),
+            eq(workSessions.recordKind, "fact"),
+            eq(workSessions.submissionStatus, "draft"),
+            inArray(workSessions.approvalStatus, ["not_requested", "returned"]),
+            isNull(workSessions.deletedAt),
+            lt(workSessions.endAt, now),
+            lt(workSessions.updatedAt, new Date(now.getTime() - threshold * 1_000)),
+          ),
+        );
+      const thresholdHours = Math.max(1, Math.round(threshold / 3_600));
+      for (const session of overdue) {
+        await createRuleNotification({
+          rule,
+          recipientMembershipId: session.membershipId,
+          title: "工作记录尚未提交审核",
+          body: `这条工作记录已超过 ${thresholdHours} 小时未提交；请补齐审核人可见的证据后提交，或继续修改草稿。`,
+          actionUrl: `/work#work-session-${session.id}`,
+          dedupeKey: `work-submission-overdue:${session.id}:${session.version}`,
+        });
       }
     }
     if (rule.category === "duration_baseline_change") {

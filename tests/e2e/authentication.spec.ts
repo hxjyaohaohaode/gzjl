@@ -1541,6 +1541,10 @@ test("one manual submission persists multiple completed work segments atomically
   page,
 }) => {
   await mockAuthenticatedWorkspace(page);
+  const evidenceReferences: Array<{
+    pathname: string;
+    body: { kind: string; textContent: string; visibility: string };
+  }> = [];
   let batchPayload: {
     entries: Array<{
       recordKind: string;
@@ -1577,6 +1581,20 @@ test("one manual submission persists multiple completed work segments atomically
       },
     });
   });
+  await page.route("**/api/work-sessions/*/attachments/reference", async (route) => {
+    evidenceReferences.push({
+      pathname: new URL(route.request().url()).pathname,
+      body: route.request().postDataJSON() as {
+        kind: string;
+        textContent: string;
+        visibility: string;
+      },
+    });
+    await route.fulfill({
+      status: 201,
+      json: { attachment: { id: `batch-evidence-${evidenceReferences.length}` } },
+    });
+  });
   await page.goto("/login");
   await page.getByLabel("邮箱或手机号").fill("owner@example.test");
   await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
@@ -1587,11 +1605,13 @@ test("one manual submission persists multiple completed work segments atomically
   await page.getByLabel("结束时间").fill("2026-09-03T12:00");
   await page.getByLabel("工作内容").fill("上午交付工作");
   await page.getByLabel("工作结果").fill("上午部分已完成");
+  await page.getByLabel("本段文字证据").fill("上午交付清单与验收记录");
   await page.getByRole("button", { name: "添加一段" }).click();
   await page.getByLabel("开始", { exact: true }).fill("2026-09-03T13:00");
   await page.getByLabel("结束", { exact: true }).fill("2026-09-03T14:00");
   await page.getByLabel("本段工作内容").fill("下午联调工作");
   await page.getByLabel("本段结果（可选）").fill("联调通过");
+  await page.getByLabel("本段文字证据").nth(1).fill("下午联调日志与通过结论");
   await page.getByRole("button", { name: "保存真实工时草稿" }).click();
 
   await expect.poll(() => batchPayload?.entries.length ?? 0).toBe(2);
@@ -1603,6 +1623,25 @@ test("one manual submission persists multiple completed work segments atomically
     {
       recordKind: "fact",
       input: { content: "下午联调工作", result: "联调通过" },
+    },
+  ]);
+  await expect.poll(() => evidenceReferences.length).toBe(2);
+  expect(evidenceReferences).toEqual([
+    {
+      pathname: "/api/work-sessions/batch-session-1/attachments/reference",
+      body: {
+        kind: "text",
+        textContent: "上午交付清单与验收记录",
+        visibility: "management_only",
+      },
+    },
+    {
+      pathname: "/api/work-sessions/batch-session-2/attachments/reference",
+      body: {
+        kind: "text",
+        textContent: "下午联调日志与通过结论",
+        visibility: "management_only",
+      },
     },
   ]);
 });
@@ -2085,6 +2124,17 @@ test("analytics uses accessible, server-backed responsive chart containers", asy
   ).toBeVisible();
   await expect(
     page.getByRole("button", { name: "下载每日净工时趋势图图片" }),
+  ).toBeVisible();
+  const chartToolSize = await page
+    .getByRole("button", { name: "下载每日净工时趋势图图片" })
+    .evaluate((element) => {
+      const box = element.getBoundingClientRect();
+      return { width: box.width, height: box.height };
+    });
+  expect(chartToolSize.width).toBeLessThanOrEqual(32);
+  expect(chartToolSize.height).toBeLessThanOrEqual(32);
+  await expect(
+    page.getByRole("button", { name: "全屏查看每日净工时趋势图" }),
   ).toBeVisible();
   await expect(page.getByRole("img", { name: "项目投入分布图" })).toBeVisible();
   await expect(page.getByRole("img", { name: "事实与未来工时预测带" })).toBeVisible();

@@ -11,7 +11,8 @@ import { CalendarComponent, DataZoomComponent, GridComponent, LegendComponent, T
 import * as echarts from "echarts/core";
 import type { EChartsCoreOption } from "echarts/core";
 import { CanvasRenderer } from "echarts/renderers";
-import { useEffect, useRef } from "react";
+import { Download, Maximize2, Minimize2 } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 
 echarts.use([
   BarChart,
@@ -45,6 +46,9 @@ export default function AnalyticsChart({
   const chartRef = useRef<echarts.EChartsType | null>(null);
   const onDataSelectRef = useRef(onDataSelect);
   const optionSignatureRef = useRef("");
+  const scrollPositionRef = useRef({ x: 0, y: 0 });
+  const ownedFullscreenRef = useRef(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
 
   useEffect(() => {
     onDataSelectRef.current = onDataSelect;
@@ -96,9 +100,18 @@ export default function AnalyticsChart({
   }, [option]);
 
   useEffect(() => {
-    const resize = () => chartRef.current?.resize();
-    document.addEventListener("fullscreenchange", resize);
-    return () => document.removeEventListener("fullscreenchange", resize);
+    const handleFullscreenChange = () => {
+      const active = document.fullscreenElement === frame.current;
+      setIsFullscreen(active);
+      window.requestAnimationFrame(() => chartRef.current?.resize());
+      if (!document.fullscreenElement && ownedFullscreenRef.current) {
+        ownedFullscreenRef.current = false;
+        const { x, y } = scrollPositionRef.current;
+        window.requestAnimationFrame(() => window.scrollTo({ left: x, top: y }));
+      }
+    };
+    document.addEventListener("fullscreenchange", handleFullscreenChange);
+    return () => document.removeEventListener("fullscreenchange", handleFullscreenChange);
   }, []);
 
   const downloadImage = () => {
@@ -116,27 +129,46 @@ export default function AnalyticsChart({
     link.click();
   };
 
+  const toggleFullscreen = async () => {
+    if (document.fullscreenElement === frame.current) {
+      await document.exitFullscreen?.();
+      return;
+    }
+    if (!frame.current?.requestFullscreen) return;
+    scrollPositionRef.current = { x: window.scrollX, y: window.scrollY };
+    ownedFullscreenRef.current = true;
+    try {
+      await frame.current.requestFullscreen();
+    } catch {
+      ownedFullscreenRef.current = false;
+    }
+  };
+
   return (
-    <div className="relative bg-[var(--surface)] fullscreen:h-screen fullscreen:p-6" ref={frame}>
-      <div className="absolute right-1 top-0 z-10 flex gap-1">
+    <div className="analytics-chart-frame" ref={frame}>
+      <div className="analytics-chart-tools">
         <button
           aria-label={`下载${ariaLabel}图片`}
-          className="rounded-lg bg-[var(--surface-subtle)] px-2.5 py-1.5 text-xs font-semibold text-[var(--text-muted)] hover:text-[var(--text)]"
+          className="analytics-chart-tool"
           onClick={downloadImage}
+          title="下载 PNG"
           type="button"
         >
-          PNG
+          <Download aria-hidden="true" size={14} />
+          <span className="sr-only">PNG</span>
         </button>
         <button
-          aria-label={`全屏查看${ariaLabel}`}
-          className="rounded-lg bg-[var(--surface-subtle)] px-2.5 py-1.5 text-xs font-semibold text-[var(--text-muted)] hover:text-[var(--text)]"
-          onClick={() => void frame.current?.requestFullscreen?.()}
+          aria-label={`${isFullscreen ? "退出全屏" : "全屏查看"}${ariaLabel}`}
+          aria-pressed={isFullscreen}
+          className="analytics-chart-tool"
+          onClick={() => void toggleFullscreen()}
+          title={isFullscreen ? "退出全屏" : "全屏查看"}
           type="button"
         >
-          全屏
+          {isFullscreen ? <Minimize2 aria-hidden="true" size={14} /> : <Maximize2 aria-hidden="true" size={14} />}
         </button>
       </div>
-      <div aria-label={ariaLabel} className="h-64 w-full sm:h-72 lg:h-80 fullscreen:h-full" ref={container} role="img" />
+      <div aria-label={ariaLabel} className="analytics-chart-canvas" ref={container} role="img" />
     </div>
   );
 }

@@ -1352,6 +1352,94 @@ input[type="file"]::file-selector-button {
   padding-bottom: 1rem;
 }
 
+.analytics-chart-frame {
+  position: relative;
+  min-width: 0;
+  background: var(--surface);
+}
+
+.analytics-chart-canvas {
+  width: 100%;
+  height: 16rem;
+}
+
+.analytics-chart-tools {
+  position: absolute;
+  top: 0.2rem;
+  right: 0.2rem;
+  z-index: 10;
+  display: flex;
+  gap: 0.25rem;
+  opacity: 0.38;
+  transition: opacity 150ms ease;
+}
+
+.analytics-chart-frame:hover .analytics-chart-tools,
+.analytics-chart-tools:focus-within,
+.analytics-chart-frame:fullscreen .analytics-chart-tools {
+  opacity: 1;
+}
+
+.analytics-chart-tool {
+  display: inline-grid;
+  width: 1.75rem;
+  height: 1.75rem;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--border) 72%, transparent);
+  border-radius: 0.5rem;
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  color: var(--text-muted);
+  box-shadow: 0 0.2rem 0.65rem color-mix(in srgb, var(--text) 8%, transparent);
+  backdrop-filter: blur(0.4rem);
+  transition: color 150ms ease, background-color 150ms ease, transform 150ms ease;
+}
+
+.analytics-chart-tool:hover,
+.analytics-chart-tool:focus-visible {
+  background: var(--surface-subtle);
+  color: var(--text);
+  transform: translateY(-1px);
+}
+
+.analytics-chart-frame:fullscreen {
+  display: grid;
+  width: 100vw;
+  height: 100dvh;
+  place-items: center;
+  overflow: hidden;
+  padding: max(1rem, env(safe-area-inset-top)) max(1rem, env(safe-area-inset-right)) max(1rem, env(safe-area-inset-bottom)) max(1rem, env(safe-area-inset-left));
+  background: var(--surface);
+}
+
+.analytics-chart-frame:fullscreen .analytics-chart-tools {
+  top: max(0.75rem, env(safe-area-inset-top));
+  right: max(0.75rem, env(safe-area-inset-right));
+}
+
+.analytics-chart-frame:fullscreen .analytics-chart-canvas {
+  width: min(96vw, 112rem);
+  height: calc(100dvh - 4rem);
+  max-height: 64rem;
+}
+
+@media (min-width: 640px) {
+  .analytics-chart-canvas {
+    height: 18rem;
+  }
+}
+
+@media (min-width: 1024px) {
+  .analytics-chart-canvas {
+    height: 20rem;
+  }
+}
+
+@media (hover: none) {
+  .analytics-chart-tools {
+    opacity: 0.72;
+  }
+}
+
 .analytics-breakdown-row {
   border-radius: 0.75rem;
   transition: background-color 160ms ease;
@@ -1359,6 +1447,98 @@ input[type="file"]::file-selector-button {
 
 .analytics-breakdown-row:hover {
   background: var(--surface-tint);
+}
+
+.work-project-suggestion {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.65rem;
+  border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--border));
+  border-radius: 0.9rem;
+  background: color-mix(in srgb, var(--accent-soft) 55%, var(--surface));
+  padding: 0.75rem 0.85rem;
+  color: var(--accent-strong);
+}
+
+.work-project-suggestion p {
+  display: grid;
+  gap: 0.15rem;
+  font-size: 0.75rem;
+  line-height: 1.45;
+}
+
+.work-project-suggestion span {
+  color: var(--text-muted);
+}
+
+.work-submit-review-button {
+  box-shadow: 0 0.35rem 1.1rem color-mix(in srgb, var(--accent) 24%, transparent);
+}
+
+.evidence-metadata-details {
+  margin-top: 0.55rem;
+  border-top: 1px solid var(--border);
+  padding-top: 0.45rem;
+  color: var(--text-muted);
+}
+
+.evidence-metadata-details summary {
+  width: fit-content;
+  cursor: pointer;
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--accent-strong);
+}
+
+.evidence-metadata-details dl,
+.evidence-readonly-metadata {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.45rem 0.8rem;
+  margin-top: 0.55rem;
+  font-size: 0.72rem;
+}
+
+.evidence-metadata-details dl > div,
+.evidence-readonly-metadata > div {
+  min-width: 0;
+}
+
+.evidence-metadata-details dt,
+.evidence-readonly-metadata dt {
+  color: var(--text-subtle);
+}
+
+.evidence-metadata-details dd,
+.evidence-readonly-metadata dd {
+  margin-top: 0.1rem;
+  overflow-wrap: anywhere;
+  color: var(--text);
+}
+
+.evidence-metadata-wide {
+  grid-column: 1 / -1;
+}
+
+.approval-return-reason {
+  display: grid;
+  gap: 0.4rem;
+  margin-top: 0.9rem;
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: var(--text-muted);
+}
+
+.approval-return-reason textarea {
+  min-height: 5rem;
+  resize: vertical;
+  border: 1px solid var(--border);
+  border-radius: 0.8rem;
+  background: var(--surface);
+  padding: 0.65rem 0.75rem;
+  color: var(--text);
+  font: inherit;
+  font-weight: 500;
 }
 
 .ai-workspace {

@@ -14,6 +14,8 @@ import {
   attachmentVersions,
   attachments,
   auditLogs,
+  orgMemberships,
+  outboxEvents,
   workSessionProjectLinks,
   workSessions,
 } from "@workbench/db/schema";
@@ -300,9 +302,50 @@ export class EvidenceService {
     );
   }
 
+  private async canReviewSession(
+    actor: AuthContext,
+    sessionId: string,
+    membershipId: string,
+  ): Promise<boolean> {
+    const grants = actor.grants.filter((grant) => grant.permission === "work.review");
+    if (grants.some((grant) => grant.scopeKind === "organization")) return true;
+    const orgUnitGrants = grants.filter(
+      (grant) => grant.scopeKind === "org_unit" && grant.scopeId,
+    );
+    if (orgUnitGrants.length) {
+      const [membership] = await this.db
+        .select({ orgUnitId: orgMemberships.orgUnitId })
+        .from(orgMemberships)
+        .where(eq(orgMemberships.id, membershipId))
+        .limit(1);
+      if (
+        membership?.orgUnitId &&
+        orgUnitGrants.some((grant) => grant.scopeId === membership.orgUnitId)
+      ) {
+        return true;
+      }
+    }
+    const projectIds = grants
+      .filter((grant) => grant.scopeKind === "project" && grant.scopeId)
+      .map((grant) => grant.scopeId!);
+    if (!projectIds.length) return false;
+    const links = await this.db
+      .select({ projectId: workSessionProjectLinks.projectId })
+      .from(workSessionProjectLinks)
+      .where(eq(workSessionProjectLinks.workSessionId, sessionId));
+    return links.some((link) => projectIds.includes(link.projectId));
+  }
+
   private async assertVisible(actor: AuthContext, attachment: Attachment, sessionId: string) {
     const session = await this.session(actor, sessionId);
     if (session.membershipId === actor.membershipId) return;
+    if (
+      attachment.visibility !== "private" &&
+      session.approvalStatus === "pending_review" &&
+      (await this.canReviewSession(actor, sessionId, session.membershipId))
+    ) {
+      return;
+    }
     if (attachment.visibility === "management_only" && this.canManage(actor)) return;
     if (
       attachment.visibility === "project_visible" &&
@@ -381,6 +424,14 @@ export class EvidenceService {
           visibility: input.visibility,
         },
       });
+      await tx.insert(outboxEvents).values({
+        organizationId: actor.organizationId,
+        eventType: "evidence.changed",
+        entityType: "work_session",
+        entityId: sessionId,
+        entityVersion: created.version,
+        payload: { change: "upload_initiated" },
+      });
       return created;
     });
     return {
@@ -450,6 +501,14 @@ export class EvidenceService {
         entityId: attachmentId,
         before: { version: row.attachment.version, sha256: row.attachment.sha256, objectKey: row.attachment.objectKey },
         after: { version: updated.version, sha256: input.sha256, sizeBytes: input.sizeBytes, reason: input.reason },
+      });
+      await tx.insert(outboxEvents).values({
+        organizationId: actor.organizationId,
+        eventType: "evidence.changed",
+        entityType: "work_session",
+        entityId: row.link.entityId,
+        entityVersion: updated.version,
+        payload: { change: "replacement_initiated" },
       });
       return updated;
     });
@@ -578,6 +637,14 @@ export class EvidenceService {
       entityId: attachmentId,
       after: { sha256: attachment.sha256, sizeBytes: attachment.sizeBytes },
     });
+    await this.db.insert(outboxEvents).values({
+      organizationId: actor.organizationId,
+      eventType: "evidence.changed",
+      entityType: "work_session",
+      entityId: row.link.entityId,
+      entityVersion: (updated ?? attachment).version,
+      payload: { change: "upload_completed" },
+    });
     return { attachment: updated ?? attachment };
   }
 
@@ -624,6 +691,14 @@ export class EvidenceService {
         entityType: "attachment",
         entityId: created.id,
         after: { sessionId, kind: input.kind, visibility: input.visibility },
+      });
+      await tx.insert(outboxEvents).values({
+        organizationId: actor.organizationId,
+        eventType: "evidence.changed",
+        entityType: "work_session",
+        entityId: sessionId,
+        entityVersion: created.version,
+        payload: { change: "reference_created" },
       });
       return created;
     });
@@ -728,6 +803,14 @@ export class EvidenceService {
         entityId: attachmentId,
         before: { version: row.attachment.version, sha256: row.attachment.sha256 },
         reason,
+      });
+      await tx.insert(outboxEvents).values({
+        organizationId: actor.organizationId,
+        eventType: "evidence.changed",
+        entityType: "work_session",
+        entityId: row.link.entityId,
+        entityVersion: removed.version,
+        payload: { change: "deleted" },
       });
     });
     return { deleted: true };

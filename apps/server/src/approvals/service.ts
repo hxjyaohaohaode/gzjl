@@ -1,10 +1,13 @@
-import { and, desc, eq, isNull } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull } from "drizzle-orm";
 import type { Database } from "@workbench/db";
 import {
+  attachmentLinks,
+  attachments,
   approvalActions,
   approvalRequests,
   auditLogs,
   orgMemberships,
+  outboxEvents,
   workBreaks,
   workSessions,
   workSessionProjectLinks,
@@ -158,6 +161,28 @@ export class ApprovalService {
     if (decision === "returned" && (!reason || reason.trim().length < 2)) {
       throw new ApprovalConflictError("退回时必须填写明确原因。")
     }
+    if (decision === "approved") {
+      const [reviewableEvidence] = await this.db
+        .select({ id: attachments.id })
+        .from(attachmentLinks)
+        .innerJoin(attachments, eq(attachments.id, attachmentLinks.attachmentId))
+        .where(
+          and(
+            eq(attachmentLinks.entityType, "work_session"),
+            eq(attachmentLinks.entityId, reviewable.session.id),
+            eq(attachments.organizationId, actor.organizationId),
+            eq(attachments.status, "available"),
+            inArray(attachments.visibility, ["management_only", "project_visible"]),
+            isNull(attachments.deletedAt),
+          ),
+        )
+        .limit(1);
+      if (!reviewableEvidence) {
+        throw new ApprovalConflictError(
+          "该记录缺少审核人可见且已完成核验的证据，请退回补充后再批准。",
+        );
+      }
+    }
 
     return this.db.transaction(async (tx) => {
       const [breaks, projectLinks] = await Promise.all([
@@ -237,6 +262,14 @@ export class ApprovalService {
         before: { request: reviewable.request, session: beforeSnapshot },
         after: { request, session: afterSnapshot },
         reason,
+      });
+      await tx.insert(outboxEvents).values({
+        organizationId: actor.organizationId,
+        eventType: "work_session.changed",
+        entityType: "work_session",
+        entityId: session.id,
+        entityVersion: session.version,
+        payload: { change: decision === "approved" ? "approved" : "returned" },
       });
       return { request, session: afterSnapshot };
     });

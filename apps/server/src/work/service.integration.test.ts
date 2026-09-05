@@ -5,10 +5,22 @@ import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
 import { afterEach, describe, expect, it } from "vitest";
 import type { Database } from "@workbench/db";
-import { organizations, orgMemberships, users, workSessions } from "@workbench/db/schema";
+import {
+  attachmentLinks,
+  attachments,
+  organizations,
+  orgMemberships,
+  outboxEvents,
+  users,
+  workSessions,
+} from "@workbench/db/schema";
 
 import { ApprovalService } from "../approvals/service.js";
-import { WorkSessionConflictError, WorkSessionService } from "./service.js";
+import {
+  WorkSessionConflictError,
+  WorkSessionEvidenceRequiredError,
+  WorkSessionService,
+} from "./service.js";
 
 const clients: PGlite[] = [];
 
@@ -142,6 +154,23 @@ describe("structured work entry and approval chain", () => {
 
     expect(fact?.recordKind).toBe("fact");
     expect(plan).toMatchObject({ recordKind: "plan", visibility: "private" });
+    const [evidence] = await db
+      .insert(attachments)
+      .values({
+        organizationId: actors.employee.organizationId,
+        uploadedBy: actors.employee.membershipId,
+        kind: "text",
+        status: "available",
+        textContent: "已核验的交付说明",
+        visibility: "management_only",
+      })
+      .returning();
+    await db.insert(attachmentLinks).values({
+      attachmentId: evidence!.id,
+      entityType: "work_session",
+      entityId: fact!.id,
+      createdBy: actors.employee.membershipId,
+    });
     await work.submit(actors.employee, fact!.id, fact!.version);
 
     const pending = await new ApprovalService(db).listPending(actors.owner, 20);
@@ -154,5 +183,66 @@ describe("structured work entry and approval chain", () => {
         approvalStatus: "pending_review",
       },
     });
+
+    const submitted = pending[0]!.session;
+    const withdrawn = await work.withdrawSubmission(
+      actors.employee,
+      submitted.id,
+      submitted.version,
+    );
+    expect(withdrawn).toMatchObject({
+      submissionStatus: "draft",
+      approvalStatus: "not_requested",
+    });
+    expect(await new ApprovalService(db).listPending(actors.owner, 20)).toHaveLength(0);
+    const realtimeSignals = await db.select().from(outboxEvents);
+    expect(
+      realtimeSignals.map((event) => event.eventType),
+    ).toEqual(
+      expect.arrayContaining([
+        "work_session.changed",
+      ]),
+    );
+  });
+
+  it("refuses submission until review-visible verified evidence exists", async () => {
+    const db = await createTestDatabase();
+    const actors = await seedActors(db);
+    const work = new WorkSessionService(db);
+    const now = Date.now();
+    const fact = await work.createManual(
+      actors.employee,
+      manualInput(
+        new Date(now - 2 * 60 * 60_000),
+        new Date(now - 60 * 60_000),
+        "等待证据的工作",
+      ),
+    );
+
+    await expect(
+      work.submit(actors.employee, fact.id, fact.version),
+    ).rejects.toBeInstanceOf(WorkSessionEvidenceRequiredError);
+
+    const [privateEvidence] = await db
+      .insert(attachments)
+      .values({
+        organizationId: actors.employee.organizationId,
+        uploadedBy: actors.employee.membershipId,
+        kind: "text",
+        status: "available",
+        textContent: "仅本人可见",
+        visibility: "private",
+      })
+      .returning();
+    await db.insert(attachmentLinks).values({
+      attachmentId: privateEvidence!.id,
+      entityType: "work_session",
+      entityId: fact.id,
+      createdBy: actors.employee.membershipId,
+    });
+
+    await expect(
+      work.submit(actors.employee, fact.id, fact.version),
+    ).rejects.toBeInstanceOf(WorkSessionEvidenceRequiredError);
   });
 });

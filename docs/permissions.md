@@ -44,4 +44,4 @@
 
 ## 证据的特殊规则
 
-证据可见性为 `private`、`management_only` 或 `project_visible`。对象存储 bucket 永不公开；文件直传和下载均为短时预签名 URL。替换与删除写审计日志，替换前的哈希、对象键和版本快照保存在 `attachment_versions`，以便追踪，不会被常规列表返回。
+证据可见性为 `private`、`management_only` 或 `project_visible`。提交审批至少需要一项 `management_only` 或 `project_visible` 且已核验的证据；有效审核人仅在该记录待审期间、并且其 `work.review` scope 覆盖该记录时读取这些证据，`private` 证据始终只对提交人开放。对象存储 bucket 永不公开；文件直传和下载均为短时预签名 URL。替换与删除写审计日志，替换前的哈希、对象键和版本快照保存在 `attachment_versions`，以便追踪，不会被常规列表返回。

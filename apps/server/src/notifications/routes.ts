@@ -26,6 +26,7 @@ const notificationCategories = [
   "project_due_soon",
   "blocked_node_aging",
   "approval_returned",
+  "work_submission_overdue",
   "payroll_cutoff_pending",
   "identity_request_result",
   "export_ready",

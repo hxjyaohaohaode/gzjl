@@ -3,6 +3,7 @@ import { z } from "zod";
 import type { Database } from "@workbench/db";
 import {
   auditLogs,
+  outboxEvents,
   projectNodes,
   projects,
   timerEvents,
@@ -462,6 +463,14 @@ export class TimerService {
         entityType: "timer_state",
         entityId: current.id,
         after: { ...updated, workSessionId: session.id, workSession: snapshot },
+      });
+      await tx.insert(outboxEvents).values({
+        organizationId: actor.organizationId,
+        eventType: "work_session.changed",
+        entityType: "work_session",
+        entityId: session.id,
+        entityVersion: session.version,
+        payload: { change: "timer_stopped" },
       });
       return { ...updated, workSessionId: session.id, workSession: snapshot };
     });
