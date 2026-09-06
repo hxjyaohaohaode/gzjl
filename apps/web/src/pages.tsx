@@ -9641,6 +9641,11 @@ function exportErrorMessage(code: string | null): string | null {
   if (!code) return null;
   const messages: Record<string, string> = {
     export_storage_unavailable: "私有对象存储未配置。",
+    export_storage_bucket_missing: "存储桶不存在或区域不匹配，请联系管理员检查配置。",
+    export_storage_credentials_invalid: "对象存储密钥无效，请联系管理员更新密钥。",
+    export_storage_signature_invalid: "对象存储签名不兼容，请联系管理员检查端点与区域。",
+    export_storage_forbidden: "对象存储拒绝写入，请联系管理员检查存储桶权限。",
+    export_storage_unreachable: "对象存储暂时无法连接，系统会自动重试。",
     export_too_large: "记录超过 50,000 条或文本超过 25 MiB，请缩小时间范围。",
     export_job_invalid: "任务参数无效，请重新创建。",
     export_render_failed: "文件生成失败，可以重试。",

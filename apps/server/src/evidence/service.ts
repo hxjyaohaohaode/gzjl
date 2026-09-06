@@ -4,7 +4,7 @@ import {
   GetObjectCommand,
   HeadObjectCommand,
   PutObjectCommand,
-  S3Client,
+  type S3Client,
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { and, eq, isNull } from "drizzle-orm";
@@ -23,6 +23,7 @@ import { hasPermission } from "@workbench/shared";
 
 import type { AuthContext } from "../auth/service.js";
 import type { ServerConfig } from "../config.js";
+import { createS3CompatibleClient } from "../storage/s3-compatible-client.js";
 
 export type EvidenceVisibility = "private" | "management_only" | "project_visible";
 type Attachment = typeof attachments.$inferSelect;
@@ -83,7 +84,7 @@ class ObjectStore {
   readonly client: S3Client;
 
   constructor(readonly config: ObjectStoreConfig) {
-    this.client = new S3Client({
+    this.client = createS3CompatibleClient({
       region: config.region,
       ...(config.endpoint ? { endpoint: config.endpoint } : {}),
       forcePathStyle: config.forcePathStyle,

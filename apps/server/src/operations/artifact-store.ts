@@ -1,7 +1,8 @@
-import { GetObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { GetObjectCommand, type S3Client } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
 import type { ServerConfig } from "../config.js";
+import { createS3CompatibleClient } from "../storage/s3-compatible-client.js";
 
 export interface ExportStorageCapabilities {
   available: boolean;
@@ -41,7 +42,7 @@ export class ExportArtifactStore implements ExportArtifactAccess {
       ? null
       : `私有对象存储尚未完整配置（缺少 ${missingVariables.join("、")}），暂时不能生成可下载的后台导出文件。`;
     this.client = complete
-      ? new S3Client({
+      ? createS3CompatibleClient({
           region: config.S3_REGION,
           ...(config.S3_ENDPOINT ? { endpoint: config.S3_ENDPOINT } : {}),
           forcePathStyle: config.S3_FORCE_PATH_STYLE,

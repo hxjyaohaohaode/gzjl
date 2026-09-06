@@ -1,6 +1,5 @@
 import "dotenv/config";
 
-import { S3Client } from "@aws-sdk/client-s3";
 import { and, eq, gt, gte, inArray, isNull, lt, lte, or, sql } from "drizzle-orm";
 import { PgBoss } from "pg-boss";
 import pino from "pino";
@@ -35,6 +34,7 @@ import {
 
 import { createExportJobRuntime } from "./export-jobs.js";
 import { buildAiSystemPrompt } from "./ai-prompt.js";
+import { createS3CompatibleClient } from "./s3-compatible-client.js";
 import {
   isPermanentWebPushFailure,
   isWithinQuietHours,
@@ -97,7 +97,7 @@ const exportStoreReady = Boolean(
   config.S3_BUCKET && config.S3_ACCESS_KEY_ID && config.S3_SECRET_ACCESS_KEY,
 );
 const exportStore = exportStoreReady
-  ? new S3Client({
+  ? createS3CompatibleClient({
       ...(config.S3_ENDPOINT ? { endpoint: config.S3_ENDPOINT } : {}),
       region: config.S3_REGION,
       forcePathStyle: config.S3_FORCE_PATH_STYLE,
@@ -113,6 +113,10 @@ const exportRuntime = createExportJobRuntime(
   exportStore && config.S3_BUCKET
     ? { client: exportStore, bucket: config.S3_BUCKET }
     : null,
+  {
+    onStorageFailure: (details) =>
+      logger.error(details, "export artifact upload failed"),
+  },
 );
 
 const pushReady = Boolean(

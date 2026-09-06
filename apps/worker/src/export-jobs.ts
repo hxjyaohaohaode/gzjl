@@ -71,6 +71,123 @@ export interface ExportObjectStore {
   bucket: string;
 }
 
+export interface ExportStorageFailureDiagnostic {
+  jobId: string;
+  errorCode: string;
+  providerErrorName: string | null;
+  providerErrorCode: string | null;
+  httpStatusCode: number | null;
+  requestId: string | null;
+}
+
+interface ExportJobRuntimeDiagnostics {
+  onStorageFailure?: (details: ExportStorageFailureDiagnostic) => void;
+}
+
+interface StorageErrorLike {
+  name?: unknown;
+  code?: unknown;
+  Code?: unknown;
+  $metadata?: {
+    httpStatusCode?: unknown;
+    requestId?: unknown;
+  };
+}
+
+function stringValue(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+/**
+ * Convert provider failures into stable user-facing codes and a deliberately
+ * small diagnostic payload. Never log the raw SDK error: it can contain a
+ * signed request, object metadata, or credentials in nested request fields.
+ */
+export function normalizeExportStorageFailure(error: unknown): {
+  code: string;
+  permanent: boolean;
+  providerErrorName: string | null;
+  providerErrorCode: string | null;
+  httpStatusCode: number | null;
+  requestId: string | null;
+} {
+  const value =
+    typeof error === "object" && error !== null
+      ? (error as StorageErrorLike)
+      : ({} as StorageErrorLike);
+  const providerErrorName = stringValue(value.name);
+  const providerErrorCode = stringValue(value.code) ?? stringValue(value.Code);
+  const rawStatus = value.$metadata?.httpStatusCode;
+  const httpStatusCode = typeof rawStatus === "number" ? rawStatus : null;
+  const requestId = stringValue(value.$metadata?.requestId);
+  const identity = `${providerErrorName ?? ""} ${providerErrorCode ?? ""}`;
+
+  if (/NoSuchBucket/i.test(identity) || httpStatusCode === 404) {
+    return {
+      code: "export_storage_bucket_missing",
+      permanent: true,
+      providerErrorName,
+      providerErrorCode,
+      httpStatusCode,
+      requestId,
+    };
+  }
+  if (/InvalidAccessKeyId|InvalidToken|ExpiredToken/i.test(identity) || httpStatusCode === 401) {
+    return {
+      code: "export_storage_credentials_invalid",
+      permanent: true,
+      providerErrorName,
+      providerErrorCode,
+      httpStatusCode,
+      requestId,
+    };
+  }
+  if (/SignatureDoesNotMatch|AuthorizationHeaderMalformed/i.test(identity)) {
+    return {
+      code: "export_storage_signature_invalid",
+      permanent: true,
+      providerErrorName,
+      providerErrorCode,
+      httpStatusCode,
+      requestId,
+    };
+  }
+  if (/AccessDenied|Forbidden/i.test(identity) || httpStatusCode === 403) {
+    return {
+      code: "export_storage_forbidden",
+      permanent: true,
+      providerErrorName,
+      providerErrorCode,
+      httpStatusCode,
+      requestId,
+    };
+  }
+  if (
+    /Timeout|Abort|ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ETIMEDOUT/i.test(
+      identity,
+    ) ||
+    httpStatusCode === 429 ||
+    (httpStatusCode !== null && httpStatusCode >= 500)
+  ) {
+    return {
+      code: "export_storage_unreachable",
+      permanent: false,
+      providerErrorName,
+      providerErrorCode,
+      httpStatusCode,
+      requestId,
+    };
+  }
+  return {
+    code: "export_upload_failed",
+    permanent: false,
+    providerErrorName,
+    providerErrorCode,
+    httpStatusCode,
+    requestId,
+  };
+}
+
 async function eventEnabled(db: Database, membershipId: string, category: string) {
   const [preference] = await db
     .select()
@@ -91,6 +208,16 @@ function messageForError(code: string): string {
   switch (code) {
     case "export_storage_unavailable":
       return "后台导出存储尚未配置，请联系 Owner 完成对象存储设置。";
+    case "export_storage_bucket_missing":
+      return "后台导出存储桶不存在或区域配置不匹配，请联系 Owner 检查对象存储。";
+    case "export_storage_credentials_invalid":
+      return "后台导出存储凭据无效，请联系 Owner 更新对象存储密钥。";
+    case "export_storage_signature_invalid":
+      return "后台导出存储签名不兼容，请联系 Owner 检查区域、端点和签名配置。";
+    case "export_storage_forbidden":
+      return "后台导出存储拒绝写入，请联系 Owner 检查存储桶权限。";
+    case "export_storage_unreachable":
+      return "后台导出存储暂时无法连接，系统会自动重试。";
     case "export_too_large":
       return `本次范围超过 ${MAX_EXPORT_ROWS.toLocaleString("zh-CN")} 条或文本体积超过 25 MiB，请缩小时间范围后重试。`;
     case "export_job_invalid":
@@ -116,6 +243,7 @@ export function createExportJobRuntime(
   db: Database,
   boss: PgBoss,
   store: ExportObjectStore | null,
+  diagnostics: ExportJobRuntimeDiagnostics = {},
 ) {
   async function enqueue(jobId: string): Promise<void> {
     const [job] = await db
@@ -441,8 +569,17 @@ export function createExportJobRuntime(
             Metadata: { sha256: digest, exportjobid: claimed.id },
           }),
         );
-      } catch {
-        throw new WorkerExportError("export_upload_failed", false);
+      } catch (error) {
+        const normalized = normalizeExportStorageFailure(error);
+        diagnostics.onStorageFailure?.({
+          jobId: claimed.id,
+          errorCode: normalized.code,
+          providerErrorName: normalized.providerErrorName,
+          providerErrorCode: normalized.providerErrorCode,
+          httpStatusCode: normalized.httpStatusCode,
+          requestId: normalized.requestId,
+        });
+        throw new WorkerExportError(normalized.code, normalized.permanent);
       }
       uploadedObjectKey = objectKey;
 
