@@ -9,7 +9,12 @@ services:
   - type: web
     name: gzjl-hxjyaohaohaode-web
     runtime: node
-    plan: 0.5c-512mb
+    # The API serves the PWA, analytics, authenticated WebSockets, Argon2
+    # verification and export orchestration in one process. The former 512 MB
+    # instance repeatedly exceeded its hard memory limit in production; 2 GB
+    # leaves headroom for native allocations and prevents Render from killing
+    # the Web service during ordinary authenticated traffic.
+    plan: 1c-2g
     region: singapore
     branch: main
     autoDeployTrigger: checksPass
@@ -51,7 +56,9 @@ services:
       - key: AI_MAX_RETRIES
         value: "2"
       - key: DATABASE_POOL_MAX
-        value: "10"
+        # Five connections are sufficient for a single Web process and avoid
+        # reserving unnecessary client buffers on the memory-constrained API.
+        value: "5"
       - key: SESSION_SECRET
         generateValue: true
       - key: SETUP_TOKEN
