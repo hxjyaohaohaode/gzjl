@@ -1094,8 +1094,17 @@ test("personal payroll renders reconciled totals, daily pay, period trend, and c
   await expect(page.getByText(/¥800.00 已批准工作计薪/)).toBeVisible();
   await expect(page.getByText("每周工时", { exact: true })).toBeVisible();
   await expect(page.getByText("每日工时", { exact: true })).toBeVisible();
-  await expect(page.getByRole("img", { name: "本月每日薪资与周奖励" })).toBeVisible();
-  await expect(page.getByRole("img", { name: "本月薪资累计与未来预测" })).toBeVisible();
+  await expect(
+    page.getByRole("img", {
+      name: "本月每日薪资、工时、累计金额与未来预测",
+    }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "每日工时、薪资与月末预测" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("img", { name: "本月薪资累计与未来预测" }),
+  ).toHaveCount(0);
   await expect(page.getByText("当前应结")).toBeVisible();
   await expect(page.getByText("¥900.00", { exact: true }).first()).toBeVisible();
   await expect(page.getByRole("img", { name: "2026 年 9 月每日薪资" })).toBeVisible();
@@ -2432,6 +2441,56 @@ test("authorized analytics users can create, cancel, retry, and download backgro
   await page.getByRole("button", { name: "下载", exact: true }).click();
   await expect.poll(() => downloadAuthorizations).toBe(1);
   expect((await download).suggestedFilename()).toBe("work-sessions.xlsx");
+});
+
+test("CSV export remains usable when private object storage is unavailable", async ({
+  page,
+}) => {
+  await mockAuthenticatedWorkspace(page, { canExport: true });
+  await page.route("**/api/exports/capabilities", (route) =>
+    route.fulfill({
+      json: {
+        available: false,
+        formats: ["csv", "json", "xlsx", "pdf"],
+        retentionHours: 24,
+        unavailableReason:
+          "私有对象存储尚未完整配置（缺少 S3_ACCESS_KEY_ID、S3_SECRET_ACCESS_KEY）。",
+      },
+    }),
+  );
+  await page.route("**/api/exports", (route) =>
+    route.fulfill({ json: { items: [] } }),
+  );
+  await page.route("**/api/**", (route) => {
+    if (
+      new URL(route.request().url()).pathname !==
+      "/api/exports/work-sessions.csv"
+    ) {
+      return route.fallback();
+    }
+    return route.fulfill({
+      body: "id,startAt,endAt\n1,2026-09-01,2026-09-01\n",
+      contentType: "text/csv; charset=utf-8",
+      headers: {
+        "content-disposition": 'attachment; filename="work-sessions.csv"',
+      },
+    });
+  });
+  await page.goto("/login");
+  await page.getByLabel("邮箱或手机号").fill("owner@example.test");
+  await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+  await page.goto("/analytics");
+  await expect(page.getByLabel("导出格式")).toHaveValue("csv");
+  await expect(page.getByText(/CSV 与 JSON 已切换为服务器直接生成下载/)).toBeVisible();
+  const download = page.waitForEvent("download");
+  await page.getByRole("button", { name: "直接导出" }).click();
+  const completedDownload = await download;
+  expect(completedDownload.suggestedFilename()).toBe("work-sessions.csv");
+  const stream = await completedDownload.createReadStream();
+  const chunks: Buffer[] = [];
+  for await (const chunk of stream) chunks.push(Buffer.from(chunk));
+  expect(Buffer.concat(chunks).toString("utf8")).toContain("id,startAt,endAt");
 });
 
 test("AI page does not expose team analysis without an organization-scoped grant", async ({
@@ -4487,6 +4546,37 @@ test("project workbench exposes versioned node editing instead of a visual-only 
   await expect(page.getByText("节点详情", { exact: true })).toHaveCount(0);
 });
 
+test("deleted project nodes disappear from the active structure immediately", async ({
+  page,
+}) => {
+  await mockAuthenticatedWorkspace(page);
+  const projectId = "00000000-0000-4000-8000-000000000004";
+  const childNodeId = "00000000-0000-4000-8000-000000000007";
+  let deleted = false;
+  await page.route(
+    `**/api/projects/${projectId}/nodes/${childNodeId}`,
+    async (route) => {
+      expect(route.request().method()).toBe("DELETE");
+      expect(route.request().postDataJSON()).toEqual({ expectedVersion: 1 });
+      deleted = true;
+      await route.fulfill({ status: 204, body: "" });
+    },
+  );
+  await page.goto("/login");
+  await page.getByLabel("邮箱或手机号").fill("owner@example.test");
+  await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+  await page.goto(`/projects/${projectId}`);
+  const canvas = page.locator(".react-flow");
+  await expect(canvas.getByText("实现项目画布", { exact: true })).toBeVisible();
+  await canvas.getByText("实现项目画布", { exact: true }).click();
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.getByRole("button", { name: "移入回收站" }).click();
+  await expect.poll(() => deleted).toBe(true);
+  await expect(canvas.getByText("实现项目画布", { exact: true })).toHaveCount(0);
+  await expect(canvas.getByText("工作台正式版", { exact: true })).toBeVisible();
+});
+
 test("project relation, version history, and recycle recovery use real mutation contracts", async ({
   page,
 }) => {
@@ -4524,6 +4614,7 @@ test("project relation, version history, and recycle recovery use real mutation 
               submissionStatus: "draft",
               approvalStatus: "not_requested",
               isPrimary: true,
+              allocationBasisPoints: 5000,
             },
           ],
         },
@@ -4561,6 +4652,8 @@ test("project relation, version history, and recycle recovery use real mutation 
   await canvas.getByText("工作台正式版", { exact: true }).click();
   await expect(page.getByText("关联工作记录", { exact: true })).toBeVisible();
   await expect(page.getByText("节点投入追踪", { exact: true })).toBeVisible();
+  await expect(page.getByText("30分", { exact: true })).toBeVisible();
+  await expect(page.getByText("主关联 · 50%", { exact: true })).toBeVisible();
   await expect(page.getByText("版本历史与回滚", { exact: true })).toBeVisible();
   await expect(page.getByText(/v2 · 工作台正式版/)).toBeVisible();
   await expect(page.getByText(/更新阶段进度.*1 位协作者/)).toBeVisible();
@@ -4702,6 +4795,10 @@ test("project branch management keeps rename, merge, archive, and recovery actio
   await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
   await page.getByRole("button", { name: "登录", exact: true }).click();
   await page.goto(`/projects/${projectId}`);
+  const branchRail = page.getByLabel("项目分支");
+  await expect(
+    branchRail.getByText("实验分支", { exact: true }),
+  ).toBeVisible();
   await page.getByRole("button", { name: "管理项目分支" }).click();
   await expect(page.getByText("工作线生命周期", { exact: true })).toBeVisible();
   expect(
@@ -4718,6 +4815,9 @@ test("project branch management keeps rename, merge, archive, and recovery actio
   await page.getByRole("button", { name: "确认合并" }).click();
   page.once("dialog", (dialog) => dialog.accept());
   await page.getByRole("button", { name: "删除工作线 实验分支" }).click();
+  await expect(
+    branchRail.getByText("实验分支", { exact: true }),
+  ).toHaveCount(0);
   await page.getByRole("button", { name: "恢复分支 旧验证分支" }).click();
 });
 

@@ -47,6 +47,12 @@ interface ProjectCanvasNode {
     avatarUrl: string | null;
     isResponsible: boolean;
   }>;
+  workSummary?: {
+    visibleSessionCount: number;
+    timedSessionCount: number;
+    visibleContributorCount: number;
+    allocatedSeconds: number;
+  };
 }
 
 interface ProjectCanvasEdge {
@@ -101,6 +107,12 @@ function relationshipLabel(type: string): string {
   }[type] ?? type;
 }
 
+function formatWorkDuration(seconds: number): string {
+  if (seconds <= 0) return "0 小时";
+  const hours = seconds / 3_600;
+  return hours < 1 ? `${Math.max(1, Math.round(seconds / 60))} 分钟` : `${hours.toFixed(hours >= 10 ? 1 : 2)} 小时`;
+}
+
 function layoutTree(nodes: ProjectCanvasNode[]): Map<string, { x: number; y: number }> {
   const byId = new Map(nodes.map((node) => [node.id, node]));
   const children = new Map<string, string[]>();
@@ -124,7 +136,7 @@ function layoutTree(nodes: ProjectCanvasNode[]): Map<string, { x: number; y: num
     const known = positions.get(id);
     if (known) return known;
     if (visiting.has(id)) {
-      const cycleFallback = { x: nextColumn * 306, y: depth * 236 };
+      const cycleFallback = { x: nextColumn * 306, y: depth * 318 };
       nextColumn += 1;
       return cycleFallback;
     }
@@ -134,7 +146,7 @@ function layoutTree(nodes: ProjectCanvasNode[]): Map<string, { x: number; y: num
     const x = childPositions.length
       ? (childPositions[0]!.x + childPositions[childPositions.length - 1]!.x) / 2
       : nextColumn++ * 306;
-    const position = { x, y: depth * 236 };
+    const position = { x, y: depth * 318 };
     positions.set(id, position);
     visiting.delete(id);
     return position;
@@ -278,6 +290,17 @@ export default function ProjectCanvas({
                 <span>
                   v{node.version}
                 </span>
+              </div>
+              <div className="project-flow-node-work">
+                <span>实际投入</span>
+                <strong>{formatWorkDuration(node.workSummary?.allocatedSeconds ?? 0)}</strong>
+                <small>
+                  {node.workSummary?.visibleSessionCount ?? 0} 条关联记录
+                  {(node.workSummary?.timedSessionCount ?? 0) <
+                  (node.workSummary?.visibleSessionCount ?? 0)
+                    ? " · 部分工时受权限保护"
+                    : " · 已按关联比例分摊"}
+                </small>
               </div>
               {canManage ? (
                 <div className="nodrag nopan project-flow-node-actions" aria-label={`${node.title} 快捷操作`}>

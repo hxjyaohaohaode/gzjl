@@ -2196,6 +2196,42 @@ input[type="file"]::file-selector-button {
   line-height: 1.45;
 }
 
+.project-flow-node-work {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: baseline;
+  gap: 0.15rem 0.45rem;
+  margin-top: 0.55rem;
+  padding: 0.48rem 0.58rem;
+  border: 1px solid color-mix(in srgb, var(--node-accent) 18%, var(--border));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--node-accent) 5%, var(--surface));
+}
+
+.project-flow-node-work > span,
+.project-flow-node-work > small {
+  color: var(--text-muted);
+  font-size: 0.63rem;
+  font-style: normal;
+}
+
+.project-flow-node-work > strong {
+  justify-self: end;
+  color: var(--text);
+  font-size: 0.72rem;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+
+.project-flow-node-work > small {
+  grid-column: 1 / -1;
+  line-height: 1.35;
+}
+
+.salary-forecast-unified-card .analytics-chart-canvas {
+  height: clamp(370px, 52vw, 560px);
+}
+
 .auth-shell {
   min-height: 100dvh;
   background:
@@ -6761,9 +6797,18 @@ body,
   border-radius: inherit;
 }
 
+.project-overview-progress-note {
+  display: block !important;
+  margin-top: 0.45rem;
+  color: var(--text-muted) !important;
+  font-size: 0.56rem !important;
+  font-weight: 560 !important;
+  line-height: 1.45;
+}
+
 .project-overview-stats {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 0.35rem;
 }
 

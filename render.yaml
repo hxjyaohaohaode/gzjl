@@ -89,15 +89,14 @@ services:
         # and compares its actual bytes with the browser-computed SHA-256.
         value: download_sha256
       # File attachments are a core production capability. On a new Blueprint,
-      # Render asks for these private object-storage values instead of putting
-      # placeholders or secrets in Git. For an existing service, add the same
-      # keys under Web service > Environment, then redeploy.
+      # Keep the non-secret B2 routing values in Blueprint so existing services
+      # receive them on sync. Only the two credentials remain secret prompts.
       - key: S3_ENDPOINT
-        sync: false
+        value: https://s3.us-east-005.backblazeb2.com
       - key: S3_BROWSER_ORIGIN
-        sync: false
+        value: https://s3.us-east-005.backblazeb2.com
       - key: S3_BUCKET
-        sync: false
+        value: gzjl-evidence-a7k3
       - key: S3_ACCESS_KEY_ID
         sync: false
       - key: S3_SECRET_ACCESS_KEY

@@ -170,6 +170,60 @@ export function resolveMergedNodeParentId(
     : mergeAnchorId;
 }
 
+export interface ProjectNodeWorkSummaryRow {
+  nodeId: string;
+  membershipId: string;
+  netSeconds: number;
+  allocationBasisPoints: number;
+}
+
+export function summarizeProjectNodeWork(
+  nodeIds: string[],
+  rows: ProjectNodeWorkSummaryRow[],
+  actorMembershipId: string,
+  canViewAll: boolean,
+) {
+  const state = new Map<
+    string,
+    {
+      visibleSessionCount: number;
+      timedSessionCount: number;
+      allocatedSeconds: number;
+      contributorIds: Set<string>;
+    }
+  >();
+  for (const row of rows) {
+    const summary = state.get(row.nodeId) ?? {
+      visibleSessionCount: 0,
+      timedSessionCount: 0,
+      allocatedSeconds: 0,
+      contributorIds: new Set<string>(),
+    };
+    summary.visibleSessionCount += 1;
+    summary.contributorIds.add(row.membershipId);
+    // Public project activity may reveal that work happened, but duration is
+    // still private unless this is the actor's own record or they have the
+    // same project-wide visibility used by the node work-detail endpoint.
+    if (canViewAll || row.membershipId === actorMembershipId) {
+      summary.timedSessionCount += 1;
+      summary.allocatedSeconds += Math.round(
+        (row.netSeconds * row.allocationBasisPoints) / 10_000,
+      );
+    }
+    state.set(row.nodeId, summary);
+  }
+  return nodeIds.map((nodeId) => {
+    const summary = state.get(nodeId);
+    return {
+      nodeId,
+      visibleSessionCount: summary?.visibleSessionCount ?? 0,
+      timedSessionCount: summary?.timedSessionCount ?? 0,
+      visibleContributorCount: summary?.contributorIds.size ?? 0,
+      allocatedSeconds: summary?.allocatedSeconds ?? 0,
+    };
+  });
+}
+
 export interface CreateEdgeInput {
   sourceNodeId: string;
   targetNodeId: string;
@@ -502,12 +556,69 @@ export class ProjectService {
           .where(inArray(projectNodeAssignees.nodeId, nodes.map((node) => node.id)))
           .orderBy(asc(projectNodeAssignees.assignedAt))
       : [];
+    const linkedWorkRows = nodes.length
+      ? await this.db
+          .select({
+            nodeId: workSessionProjectLinks.projectNodeId,
+            membershipId: workSessions.membershipId,
+            netSeconds: workSessions.netSeconds,
+            allocationBasisPoints: workSessionProjectLinks.allocationBasisPoints,
+          })
+          .from(workSessionProjectLinks)
+          .innerJoin(
+            workSessions,
+            eq(workSessions.id, workSessionProjectLinks.workSessionId),
+          )
+          .leftJoin(
+            projectMembers,
+            and(
+              eq(projectMembers.projectId, workSessionProjectLinks.projectId),
+              eq(projectMembers.membershipId, workSessions.membershipId),
+              isNull(projectMembers.leftAt),
+            ),
+          )
+          .where(
+            and(
+              eq(workSessionProjectLinks.projectId, projectId),
+              inArray(
+                workSessionProjectLinks.projectNodeId,
+                nodes.map((node) => node.id),
+              ),
+              eq(workSessions.organizationId, actor.organizationId),
+              eq(workSessions.recordKind, "fact"),
+              isNull(workSessions.deletedAt),
+              canViewAll
+                ? undefined
+                : or(
+                    eq(workSessions.membershipId, actor.membershipId),
+                    and(
+                      eq(workSessions.visibility, "project_visible"),
+                      eq(projectMembers.publicActivityVisible, true),
+                    ),
+                  ),
+            ),
+          )
+      : [];
+    const nodeWorkSummaries = summarizeProjectNodeWork(
+      nodes.map((node) => node.id),
+      linkedWorkRows,
+      actor.membershipId,
+      canViewAll,
+    );
     const milestones = await this.db
       .select()
       .from(projectMilestones)
       .where(eq(projectMilestones.projectId, projectId))
       .orderBy(asc(projectMilestones.dueAt));
-    return { project, branches, nodes, edges, nodeAssignees, milestones };
+    return {
+      project,
+      branches,
+      nodes,
+      edges,
+      nodeAssignees,
+      nodeWorkSummaries,
+      milestones,
+    };
   }
 
   async members(actor: ProjectActor, projectId: string, canViewAll: boolean) {
@@ -987,6 +1098,7 @@ export class ProjectService {
         approvalStatus: workSessions.approvalStatus,
         visibility: workSessions.visibility,
         isPrimary: workSessionProjectLinks.isPrimary,
+        allocationBasisPoints: workSessionProjectLinks.allocationBasisPoints,
         publicActivityVisible: projectMembers.publicActivityVisible,
       })
       .from(workSessionProjectLinks)
@@ -1054,6 +1166,7 @@ export class ProjectService {
         approvalStatus: null,
         visibility: null,
         isPrimary: row.isPrimary,
+        allocationBasisPoints: row.allocationBasisPoints,
       };
     });
   }

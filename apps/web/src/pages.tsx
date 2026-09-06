@@ -8305,21 +8305,74 @@ export function PayrollPage({ me }: { me: Me }) {
     const preview = payroll.data?.livePreview;
     const timeline = preview?.salaryTimeline ?? [];
     const currency = preview?.currency ?? "CNY";
+    const lastActualIndex = timeline.findLastIndex((item) => !item.forecast);
+    const futureBandBase = timeline.map((item, index) =>
+      item.forecast || index === lastActualIndex
+        ? Number(item.projectedLowerCumulativeAmount)
+        : null,
+    );
+    const futureBandWidth = timeline.map((item, index) =>
+      item.forecast || index === lastActualIndex
+        ? Math.max(
+            0,
+            Number(item.projectedUpperCumulativeAmount) -
+              Number(item.projectedLowerCumulativeAmount),
+          )
+        : null,
+    );
     return {
       animationDuration: 180,
       animationDurationUpdate: 160,
-      legend: { bottom: 0, textStyle: { color: chartPalette.textMuted } },
-      grid: { left: 18, right: 18, top: 24, bottom: 62, containLabel: true },
+      legend: {
+        type: "scroll",
+        top: 2,
+        left: 8,
+        right: 8,
+        data: [
+          "已批准薪资",
+          "待审核预估",
+          "未来日薪预测",
+          "已发生累计",
+          "月末趋势预测",
+          "90%预测区间",
+          "每日有效工时",
+          "周奖励工时",
+        ],
+        textStyle: { color: chartPalette.textMuted },
+      },
+      grid: { left: 18, right: 96, top: 58, bottom: 42, containLabel: true },
       tooltip: {
         trigger: "axis",
         confine: true,
         backgroundColor: chartPalette.surface,
         borderColor: chartPalette.border,
         textStyle: { color: chartPalette.text },
-        formatter: (items: Array<{ axisValue?: string; seriesName?: string; value?: number }>) => [
-          items[0]?.axisValue ?? "",
-          ...items.map((item) => `${item.seriesName ?? ""}：${item.seriesName?.includes("工时") ? `${Number(item.value ?? 0).toFixed(2)} 小时` : formatPayrollMoney(currency, String(item.value ?? 0))}`),
-        ].join("<br/>"),
+        formatter: (items: Array<{ dataIndex?: number }>) => {
+          const index = Number(items[0]?.dataIndex ?? 0);
+          const item = timeline[index];
+          if (!item) return "";
+          return [
+            item.date,
+            `已批准日薪：${formatPayrollMoney(currency, item.approvedAmount)}`,
+            `待审核预估：${formatPayrollMoney(currency, item.pendingAmount)}`,
+            item.forecast
+              ? `未来日薪：${formatPayrollMoney(currency, item.projectedDailyAmount)}`
+              : null,
+            `每日有效工时：${(item.workedSeconds / 3_600).toFixed(2)} 小时`,
+            item.bonusSeconds + item.projectedBonusSeconds > 0
+              ? `周奖励工时：${((item.bonusSeconds + item.projectedBonusSeconds) / 3_600).toFixed(2)} 小时`
+              : null,
+            item.actualCumulativeAmount !== null
+              ? `已发生累计：${formatPayrollMoney(currency, item.actualCumulativeAmount)}`
+              : null,
+            item.forecast
+              ? `${item.forecastSource === "known_future" ? "已录入未来记录" : "月末趋势预测"}：${formatPayrollMoney(currency, item.projectedCumulativeAmount)}`
+              : null,
+            item.forecast
+              ? `90%预测区间：${formatPayrollMoney(currency, item.projectedLowerCumulativeAmount)} – ${formatPayrollMoney(currency, item.projectedUpperCumulativeAmount)}`
+              : null,
+          ].filter(Boolean).join("<br/>");
+        },
       },
       xAxis: {
         type: "category",
@@ -8330,7 +8383,7 @@ export function PayrollPage({ me }: { me: Me }) {
       yAxis: [
         {
           type: "value",
-          name: "金额",
+          name: "累计金额",
           min: 0,
           axisLabel: {
             formatter: (value: number) => formatPayrollAxis(currency, value),
@@ -8345,12 +8398,26 @@ export function PayrollPage({ me }: { me: Me }) {
           axisLabel: { formatter: "{value}h", color: chartPalette.textSubtle },
           splitLine: { show: false },
         },
+        {
+          type: "value",
+          name: "日薪",
+          min: 0,
+          position: "right",
+          offset: 52,
+          axisLabel: {
+            formatter: (value: number) => formatPayrollAxis(currency, value),
+            color: chartPalette.textSubtle,
+          },
+          axisLine: { show: true, lineStyle: { color: chartPalette.border } },
+          splitLine: { show: false },
+        },
       ],
       dataZoom: [{ type: "inside", filterMode: "none" }],
       series: [
         {
           type: "bar",
           name: "已批准薪资",
+          yAxisIndex: 2,
           stack: "daily-pay",
           data: timeline.map((item) => Number(item.approvedAmount)),
           itemStyle: { color: chartPalette.accent, borderRadius: [5, 5, 0, 0] },
@@ -8358,6 +8425,7 @@ export function PayrollPage({ me }: { me: Me }) {
         {
           type: "bar",
           name: "待审核预估",
+          yAxisIndex: 2,
           stack: "daily-pay",
           data: timeline.map((item) => Number(item.pendingAmount)),
           itemStyle: { color: hexWithAlpha(chartPalette.warning, 0.62), borderRadius: [5, 5, 0, 0] },
@@ -8365,6 +8433,7 @@ export function PayrollPage({ me }: { me: Me }) {
         {
           type: "bar",
           name: "未来日薪预测",
+          yAxisIndex: 2,
           stack: "daily-pay",
           data: timeline.map((item) =>
             item.forecast ? Number(item.projectedDailyAmount) : null,
@@ -8398,80 +8467,12 @@ export function PayrollPage({ me }: { me: Me }) {
           lineStyle: { color: chartPalette.warning, width: 2 },
           itemStyle: { color: chartPalette.warning },
         },
-      ],
-    };
-  }, [chartPalette, payroll.data?.livePreview]);
-  const liveForecastOption = useMemo<EChartsCoreOption>(() => {
-    const preview = payroll.data?.livePreview;
-    const timeline = preview?.salaryTimeline ?? [];
-    const currency = preview?.currency ?? "CNY";
-    const lastActualIndex = timeline.findLastIndex((item) => !item.forecast);
-    const futureBandBase = timeline.map((item, index) =>
-      item.forecast || index === lastActualIndex
-        ? Number(item.projectedLowerCumulativeAmount)
-        : null,
-    );
-    const futureBandWidth = timeline.map((item, index) =>
-      item.forecast || index === lastActualIndex
-        ? Math.max(
-            0,
-            Number(item.projectedUpperCumulativeAmount) -
-              Number(item.projectedLowerCumulativeAmount),
-          )
-        : null,
-    );
-    return {
-      animationDuration: 180,
-      animationDurationUpdate: 160,
-      legend: { bottom: 0, textStyle: { color: chartPalette.textMuted } },
-      grid: { left: 18, right: 16, top: 24, bottom: 62, containLabel: true },
-      tooltip: {
-        trigger: "axis",
-        confine: true,
-        backgroundColor: chartPalette.surface,
-        borderColor: chartPalette.border,
-        textStyle: { color: chartPalette.text },
-        formatter: (items: Array<{ dataIndex?: number }>) => {
-          const index = Number(items[0]?.dataIndex ?? 0);
-          const item = timeline[index];
-          if (!item) return "";
-          if (!item.forecast) {
-            return `${item.date}<br/>已发生累计：${formatPayrollMoney(currency, item.actualCumulativeAmount ?? "0")}`;
-          }
-          return [
-            item.date,
-            `${item.forecastSource === "known_future" ? "已录入未来记录" : "模型预测"}：${formatPayrollMoney(currency, item.projectedCumulativeAmount)}`,
-            `预测区间：${formatPayrollMoney(currency, item.projectedLowerCumulativeAmount)} – ${formatPayrollMoney(currency, item.projectedUpperCumulativeAmount)}`,
-            item.projectedBonusSeconds
-              ? `预计在本日触发周奖励：${formatDuration(item.projectedBonusSeconds)}`
-              : null,
-          ].filter(Boolean).join("<br/>");
-        },
-      },
-      xAxis: {
-        type: "category",
-        data: timeline.map((item) => item.date.slice(5)),
-        axisLabel: { hideOverlap: true, color: chartPalette.textSubtle },
-        axisLine: { lineStyle: { color: chartPalette.border } },
-      },
-      yAxis: {
-        type: "value",
-        min: 0,
-        scale: true,
-        axisLabel: {
-          formatter: (value: number) => formatPayrollAxis(currency, value),
-          color: chartPalette.textSubtle,
-        },
-        splitLine: { lineStyle: { color: chartPalette.grid } },
-      },
-      dataZoom: [{ type: "inside", filterMode: "none" }],
-      series: [
         {
           type: "line",
           name: "已发生累计",
           connectNulls: false,
           smooth: 0.2,
-          symbolSize: 6,
+          symbolSize: 5,
           data: timeline.map((item) =>
             item.actualCumulativeAmount === null
               ? null
@@ -8479,7 +8480,8 @@ export function PayrollPage({ me }: { me: Me }) {
           ),
           lineStyle: { color: chartPalette.accent, width: 3 },
           itemStyle: { color: chartPalette.accent },
-          areaStyle: { color: hexWithAlpha(chartPalette.accent, 0.1) },
+          areaStyle: { color: hexWithAlpha(chartPalette.accent, 0.08) },
+          z: 4,
         },
         {
           type: "line",
@@ -8491,10 +8493,11 @@ export function PayrollPage({ me }: { me: Me }) {
           lineStyle: { opacity: 0 },
           areaStyle: { opacity: 0 },
           tooltip: { show: false },
+          z: 1,
         },
         {
           type: "line",
-          name: "预测区间",
+          name: "90%预测区间",
           stack: "salary-confidence",
           symbol: "none",
           silent: true,
@@ -8502,6 +8505,7 @@ export function PayrollPage({ me }: { me: Me }) {
           lineStyle: { opacity: 0 },
           areaStyle: { color: hexWithAlpha(chartPalette.warning, 0.2) },
           tooltip: { show: false },
+          z: 1,
         },
         {
           type: "line",
@@ -8513,8 +8517,9 @@ export function PayrollPage({ me }: { me: Me }) {
               ? Number(item.projectedCumulativeAmount)
               : null,
           ),
-          lineStyle: { color: chartPalette.warning, width: 2, type: "dashed" },
+          lineStyle: { color: chartPalette.warning, width: 2.5, type: "dashed" },
           itemStyle: { color: chartPalette.warning },
+          z: 5,
         },
       ],
     };
@@ -8577,17 +8582,13 @@ export function PayrollPage({ me }: { me: Me }) {
         </Card>
       ) : null}
       {!isPayrollManager && payroll.data?.livePreview?.salaryTimeline?.length ? (
-        <section className="mb-4 grid gap-4 xl:grid-cols-2" aria-label="实时薪资与预测图表">
-          <Card className="analytics-chart-card">
-            <CardHeader><h2 className="font-bold">每日薪资</h2><Badge>实时</Badge></CardHeader>
-            <CardContent><AnalyticsChart ariaLabel="本月每日薪资与周奖励" option={liveDailyOption} /></CardContent>
-          </Card>
-          <Card className="analytics-chart-card">
-            <CardHeader><h2 className="font-bold">薪资发展与月末预测</h2><Badge tone="warning">预测不锁定</Badge></CardHeader>
+        <section className="mb-4" aria-label="实时薪资与预测图表">
+          <Card className="analytics-chart-card salary-forecast-unified-card">
+            <CardHeader><h2 className="font-bold">每日工时、薪资与月末预测</h2><Badge tone="warning">图例可点选显隐</Badge></CardHeader>
             <CardContent>
-              <AnalyticsChart ariaLabel="本月薪资累计与未来预测" option={liveForecastOption} />
+              <AnalyticsChart ariaLabel="本月每日薪资、工时、累计金额与未来预测" option={liveDailyOption} />
               <p className="salary-forecast-note">
-                自适应组合星期规律、工作日/周末、指数平滑和稳健趋势，并用最近 {livePreview?.projection.validationPoints ?? 0} 个历史日做滚动回测与区间校准；已录入的未来记录和周奖励单独精确计算。样本 {livePreview?.projection.sampleDays ?? 0} 天（有工时 {livePreview?.projection.nonZeroSampleDays ?? 0} 天），预测 {livePreview?.projection.horizonDays ?? 0} 天{livePreview?.projection.validationWape !== null && livePreview?.projection.validationWape !== undefined ? ` · 回测加权误差 ${(livePreview.projection.validationWape * 100).toFixed(1)}%` : ""}。
+                点击图例可分别显示或隐藏日薪、累计金额、工时和 90% 预测区间；悬停某一天会列出该日全部口径。模型自适应组合星期规律、工作日/周末、指数平滑和稳健趋势，并用最近 {livePreview?.projection.validationPoints ?? 0} 个历史日做滚动回测与区间校准；已录入的未来记录和周奖励单独精确计算。样本 {livePreview?.projection.sampleDays ?? 0} 天（有工时 {livePreview?.projection.nonZeroSampleDays ?? 0} 天），预测 {livePreview?.projection.horizonDays ?? 0} 天{livePreview?.projection.validationWape !== null && livePreview?.projection.validationWape !== undefined ? ` · 回测加权误差 ${(livePreview.projection.validationWape * 100).toFixed(1)}%` : ""}。
               </p>
             </CardContent>
           </Card>
@@ -9665,6 +9666,13 @@ function BackgroundExportPanel({ from, to }: { from: Date; to: Date }) {
     queryFn: () => api<BackgroundExportCapabilities>("/api/exports/capabilities"),
     staleTime: 60_000,
   });
+  const storageReady = capabilities.data?.available === true;
+  const effectiveFormat =
+    capabilities.data?.available === false &&
+    (format === "xlsx" || format === "pdf")
+      ? "csv"
+      : format;
+  const directFormat = effectiveFormat === "csv" || effectiveFormat === "json";
   const jobs = useQuery({
     queryKey: ["background-exports"],
     queryFn: () => api<{ items: BackgroundExportJob[] }>("/api/exports"),
@@ -9712,10 +9720,52 @@ function BackgroundExportPanel({ from, to }: { from: Date; to: Date }) {
       anchor.remove();
     },
   });
+  const directExport = useMutation({
+    mutationFn: async () => {
+      const query = new URLSearchParams({
+        from: from.toISOString(),
+        to: to.toISOString(),
+      });
+      const fileName = `work-sessions.${effectiveFormat}`;
+      const response = await fetch(
+        `/api/exports/work-sessions.${effectiveFormat}?${query.toString()}`,
+        { credentials: "include" },
+      );
+      if (!response.ok) {
+        const failure = (await response.json().catch(() => null)) as {
+          message?: string;
+        } | null;
+        throw new Error(failure?.message ?? `直接导出失败（HTTP ${response.status}）。`);
+      }
+      return { blob: await response.blob(), fileName };
+    },
+    onSuccess: ({ blob, fileName }) => {
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = fileName;
+      document.body.append(anchor);
+      anchor.click();
+      anchor.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 0);
+    },
+  });
 
   const mutationError =
-    createExport.error ?? cancelExport.error ?? retryExport.error ?? downloadExport.error;
-  const storageReady = capabilities.data?.available === true;
+    createExport.error ??
+    cancelExport.error ??
+    retryExport.error ??
+    downloadExport.error ??
+    directExport.error;
+
+  const startExport = () => {
+    if (storageReady) {
+      createExport.mutate();
+      return;
+    }
+    if (!directFormat) return;
+    directExport.mutate();
+  };
 
   return (
     <Card className="mt-5">
@@ -9729,19 +9779,28 @@ function BackgroundExportPanel({ from, to }: { from: Date; to: Date }) {
             aria-label="导出格式"
             className={`${fieldClass} min-h-9 w-auto py-1`}
             onChange={(event) => setFormat(event.target.value as typeof format)}
-            value={format}
+            value={effectiveFormat}
           >
-            <option value="xlsx">Excel</option>
+            <option disabled={capabilities.data?.available === false} value="xlsx">Excel</option>
             <option value="csv">CSV</option>
-            <option value="pdf">PDF</option>
+            <option disabled={capabilities.data?.available === false} value="pdf">PDF</option>
             <option value="json">JSON</option>
           </select>
           <Button
-            disabled={!storageReady || createExport.isPending}
-            onClick={() => createExport.mutate()}
+            disabled={
+              capabilities.isPending ||
+              createExport.isPending ||
+              directExport.isPending ||
+              (!storageReady && !directFormat)
+            }
+            onClick={startExport}
             size="compact"
           >
-            {createExport.isPending ? "正在创建…" : "创建导出"}
+            {createExport.isPending || directExport.isPending
+              ? "正在创建…"
+              : storageReady
+                ? "创建导出"
+                : "直接导出"}
           </Button>
         </div>
       </CardHeader>
@@ -9750,6 +9809,7 @@ function BackgroundExportPanel({ from, to }: { from: Date; to: Date }) {
         {capabilities.data && !capabilities.data.available ? (
           <div className="rounded-2xl bg-[var(--warning-soft)] px-4 py-3 text-sm text-[var(--warning)]">
             {capabilities.data.unavailableReason ?? "私有对象存储尚未配置。"}
+            {" "}CSV 与 JSON 已切换为服务器直接生成下载；Excel、PDF 和文件证据上传仍需配置私有对象存储。
           </div>
         ) : null}
         {jobs.data?.items.length ? (
@@ -10047,7 +10107,7 @@ export function AnalyticsPage({ me }: { me: Me }) {
     series: [{ type: "funnel", left: "4%", width: "68%", top: 18, bottom: 18, minSize: "24%", maxSize: "100%", sort: "none", gap: 4, label: { color: chartPalette.text, formatter: "{b} {c}" }, labelLine: { length: 8 }, itemStyle: { borderColor: chartPalette.surface, borderWidth: 2 }, data: analytics.data?.funnel.map((item) => ({ name: item.stage, value: item.count })) ?? [] }],
   }), [analytics.data?.funnel, chartPalette]);
   const forecastOption = useMemo<EChartsCoreOption>(() => {
-    const observed = (analytics.data?.forecast.observed ?? []).slice(-42);
+    const observed = analytics.data?.forecast.observed ?? [];
     const predicted = analytics.data?.forecast.predicted ?? [];
     const labels = [...observed.map((item) => item.date.slice(5)), ...predicted.map((item) => item.date.slice(5))];
     const observedPadding = Array.from({ length: observed.length }, () => null);
@@ -10060,8 +10120,15 @@ export function AnalyticsPage({ me }: { me: Me }) {
     return {
       animationDuration: 240,
       animationDurationUpdate: 180,
-      legend: { bottom: 2, textStyle: { color: chartPalette.textMuted } },
-      grid: { left: 18, right: 14, top: 24, bottom: 66, containLabel: true },
+      legend: {
+        type: "scroll",
+        top: 2,
+        left: 8,
+        right: 8,
+        data: ["已发生事实", "程序预测", "90%预测区间"],
+        textStyle: { color: chartPalette.textMuted },
+      },
+      grid: { left: 18, right: 14, top: 52, bottom: 66, containLabel: true },
       tooltip: {
         trigger: "axis",
         confine: true,
@@ -10136,7 +10203,7 @@ export function AnalyticsPage({ me }: { me: Me }) {
         },
         {
           type: "line",
-          name: "预测区间",
+          name: "90%预测区间",
           stack: "forecast-band",
           symbol: "none",
           data: [...observedPadding, ...predicted.map((item) => item.upperSeconds - item.lowerSeconds)],
@@ -10466,7 +10533,7 @@ export function AnalyticsPage({ me }: { me: Me }) {
             </Card>
           </div>
           <div className="mt-5 grid gap-5 xl:grid-cols-2">
-            <Card className="analytics-chart-card">
+            <Card className="analytics-chart-card xl:col-span-2">
               <CardHeader>
                 <div><p className="app-section-label">趋势边界</p><h2 className="mt-2 font-extrabold tracking-[-0.025em]">事实与未来 {forecastDays} 天预测</h2></div>
                 <select
@@ -10485,7 +10552,7 @@ export function AnalyticsPage({ me }: { me: Me }) {
                 {analytics.data.forecast.predicted.length ? <AnalyticsChart ariaLabel="事实与未来工时预测带" option={forecastOption} /> : <EmptyState description="至少需要 7 个连续自然日且其中 2 天有工时，才能识别星期规律并计算预测区间。" icon={<CalendarDays />} title="样本不足" />}
                 {analytics.data.forecast.predicted.length ? (
                   <p className="analytics-model-note">
-                    由星期季节性、工作日/周末、指数平滑和 Theil-Sen 稳健趋势组成；各模型权重由最近 {analytics.data.forecast.model.validationPoints} 个历史日滚动回测自动确定，90% 经验残差和模型分歧共同形成区间。零工时日保留为真实样本。样本 {analytics.data.forecast.model.sampleDays} 天（有工时 {analytics.data.forecast.model.nonZeroSampleDays} 天）{analytics.data.forecast.model.validationWape !== null ? ` · 回测加权误差 ${(analytics.data.forecast.model.validationWape * 100).toFixed(1)}%` : ""}{analytics.data.forecast.model.intervalCoverage !== null ? ` · 区间历史覆盖率 ${(analytics.data.forecast.model.intervalCoverage * 100).toFixed(0)}%` : ""}。预测仅供排期，不进入薪资或考核。
+                    点击图例可独立显示或隐藏历史事实、程序预测和 90% 预测区间；底部滑块可查看完整日期，悬停会显示该日点预测、上下界和置信等级。模型由星期季节性、工作日/周末、指数平滑和 Theil-Sen 稳健趋势组成；各模型权重由最近 {analytics.data.forecast.model.validationPoints} 个历史日滚动回测自动确定，90% 经验残差和模型分歧共同形成区间。零工时日保留为真实样本。样本 {analytics.data.forecast.model.sampleDays} 天（有工时 {analytics.data.forecast.model.nonZeroSampleDays} 天）{analytics.data.forecast.model.validationWape !== null ? ` · 回测加权误差 ${(analytics.data.forecast.model.validationWape * 100).toFixed(1)}%` : ""}{analytics.data.forecast.model.intervalCoverage !== null ? ` · 区间历史覆盖率 ${(analytics.data.forecast.model.intervalCoverage * 100).toFixed(0)}%` : ""}。预测仅供排期，不进入薪资或考核。
                   </p>
                 ) : null}
               </CardContent>

@@ -34,6 +34,7 @@ import {
 import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import {
+  calculateDerivedProjectProgress,
   calculateNodeScheduleProgress,
   calculatePlannedHours,
   calculateProjectProgressSummary,
@@ -88,6 +89,7 @@ interface ProjectNode {
   sortOrder: number;
   startAt: string | null;
   dueAt: string | null;
+  deletedAt?: string | null;
 }
 
 interface Branch {
@@ -101,6 +103,7 @@ interface Branch {
   mergedIntoBranchId?: string | null;
   mergedAt?: string | null;
   archivedAt?: string | null;
+  deletedAt?: string | null;
 }
 interface ProjectEdge {
   id: string;
@@ -141,6 +144,15 @@ interface ProjectTree {
   nodes: ProjectNode[];
   edges: ProjectEdge[];
   nodeAssignees: ProjectNodeAssignee[];
+  nodeWorkSummaries: ProjectNodeWorkSummary[];
+}
+
+interface ProjectNodeWorkSummary {
+  nodeId: string;
+  visibleSessionCount: number;
+  timedSessionCount: number;
+  visibleContributorCount: number;
+  allocatedSeconds: number;
 }
 
 type ProjectEdgeType =
@@ -182,6 +194,7 @@ interface ProjectWorkSession {
   submissionStatus: string | null;
   approvalStatus: string | null;
   isPrimary: boolean;
+  allocationBasisPoints?: number;
 }
 
 interface ProjectWorkEvidence {
@@ -327,6 +340,27 @@ function projectProgressSummary(nodes: ProjectNode[]) {
       startAt: node.startAt,
       dueAt: node.dueAt,
     })),
+  );
+}
+
+function refreshDerivedNodeProgress(nodes: ProjectNode[]): ProjectNode[] {
+  const derived = calculateDerivedProjectProgress(
+    nodes.map((node) => ({
+      id: node.id,
+      parentId: node.parentId,
+      type: node.type,
+      status: node.status,
+      progress: safeProgress(node.progress),
+      progressMode: node.progressMode,
+      weight: Math.max(0, Number(node.weight) || 0),
+      startAt: node.startAt,
+      dueAt: node.dueAt,
+    })),
+  );
+  return nodes.map((node) =>
+    node.progressMode === "manual"
+      ? node
+      : { ...node, progress: String(derived.get(node.id) ?? node.progress) },
   );
 }
 
@@ -739,11 +773,13 @@ function ProjectOverview({
   nodes,
   branches,
   assigneesByNodeId,
+  workSummariesByNodeId,
 }: {
   project: Project;
   nodes: ProjectNode[];
   branches: Branch[];
   assigneesByNodeId: Map<string, ProjectNodeAssignee[]>;
+  workSummariesByNodeId: Map<string, ProjectNodeWorkSummary>;
 }) {
   const summary = projectProgressSummary(nodes);
   const progress = Math.round(summary.executionProgress);
@@ -754,6 +790,11 @@ function ProjectOverview({
   ).size;
   const completed = nodes.filter((node) => node.status === "completed").length;
   const blocked = nodes.filter((node) => node.status === "blocked").length;
+  const allocatedSeconds = nodes.reduce(
+    (total, node) =>
+      total + (workSummariesByNodeId.get(node.id)?.allocatedSeconds ?? 0),
+    0,
+  );
   return (
     <section className="project-overview" aria-label="项目总览">
       <div className="project-overview-identity">
@@ -774,11 +815,15 @@ function ProjectOverview({
           <strong>{scheduleProgress === null ? "未排期" : `${scheduleProgress}%`}</strong>
         </span>
         <i className="is-schedule"><span style={{ width: `${scheduleProgress ?? 0}%` }} /></i>
+        <small className="project-overview-progress-note">
+          完成度按末级节点的基础权重 × 计划工期汇总；时间进度只表示排期推移，实际工时独立统计，不自动冒充完成度。
+        </small>
       </div>
       <dl className="project-overview-stats">
         <div><dt><GitBranch size={14} />活跃分支</dt><dd>{branches.length}</dd></div>
         <div><dt><FolderTree size={14} />工作节点</dt><dd>{nodes.length}</dd></div>
         <div><dt><UsersRound size={14} />参与成员</dt><dd>{contributors}</dd></div>
+        <div><dt><Clock3 size={14} />分摊工时</dt><dd>{formatProjectWorkDuration(allocatedSeconds)}</dd></div>
         <div className={blocked ? "has-risk" : undefined}><dt><CheckCircle2 size={14} />完成 / 受阻</dt><dd>{completed} / {blocked}</dd></div>
       </dl>
     </section>
@@ -1278,9 +1323,42 @@ function NodeInspectorContent({
         method: "DELETE",
         body: { expectedVersion: node.version },
       }),
+    onMutate: () =>
+      queryClient.cancelQueries({ queryKey: ["project-tree", projectId] }),
     onSuccess: async () => {
-      await refresh();
+      queryClient.setQueryData<ProjectTree>(
+        ["project-tree", projectId],
+        (current) => {
+          if (!current) return current;
+          const retainedNodes = current.nodes.filter(
+            (item) => item.id !== node.id,
+          );
+          return {
+            ...current,
+            nodes: refreshDerivedNodeProgress(retainedNodes),
+            edges: current.edges.filter(
+              (edge) =>
+                edge.sourceNodeId !== node.id && edge.targetNodeId !== node.id,
+            ),
+            nodeAssignees: (current.nodeAssignees ?? []).filter(
+              (assignee) => assignee.nodeId !== node.id,
+            ),
+            nodeWorkSummaries: (current.nodeWorkSummaries ?? []).filter(
+              (summary) => summary.nodeId !== node.id,
+            ),
+          };
+        },
+      );
       onClose();
+      await Promise.all([
+        queryClient.invalidateQueries({
+          queryKey: ["project-tree", projectId],
+          refetchType: "none",
+        }),
+        queryClient.invalidateQueries({
+          queryKey: ["project-recycle-bin", projectId],
+        }),
+      ]);
     },
   });
   const createRelation = useMutation({
@@ -1354,7 +1432,12 @@ function NodeInspectorContent({
   }, []);
   const linkedWorkItems = linkedWork.data?.items ?? [];
   const visibleWorkSeconds = linkedWorkItems.reduce(
-    (total, session) => total + (session.netSeconds ?? 0),
+    (total, session) =>
+      total +
+      Math.round(
+        ((session.netSeconds ?? 0) * (session.allocationBasisPoints ?? 10_000)) /
+          10_000,
+      ),
     0,
   );
   const visibleContributors = new Set(
@@ -1533,7 +1616,7 @@ function NodeInspectorContent({
           <div className="project-node-work-summary">
             <span><strong>{visibleContributors}</strong><small>可见参与人</small></span>
             <span><strong>{linkedWorkItems.length}</strong><small>工作记录</small></span>
-            <span><strong>{formatProjectWorkDuration(visibleWorkSeconds)}</strong><small>可见工时</small></span>
+            <span><strong>{formatProjectWorkDuration(visibleWorkSeconds)}</strong><small>分摊后工时</small></span>
           </div>
           {linkedWork.isPending ? (
             <p className="mt-3 text-xs text-[var(--text-muted)]">
@@ -1556,7 +1639,9 @@ function NodeInspectorContent({
                     <WorkSessionEvidence sessionId={session.id} />
                   </span>
                   <Badge tone={session.isPrimary ? "info" : "neutral"}>
-                    {session.isPrimary ? "主关联" : "辅助关联"}
+                    {session.isPrimary
+                      ? `主关联 · ${(session.allocationBasisPoints ?? 10_000) / 100}%`
+                      : `辅助关联 · ${(session.allocationBasisPoints ?? 10_000) / 100}%`}
                   </Badge>
                 </div>
               ))}
@@ -2061,9 +2146,19 @@ export function ProjectDetailPage({ me }: { me: Me }) {
     queryFn: () =>
       api<ProjectTree>(`/api/projects/${projectId}/tree`),
   });
-  const branches = tree.data?.branches ?? [];
-  const activeBranches = branches.filter((branch) => !branch.archivedAt);
-  const archivedBranches = branches.filter((branch) => branch.archivedAt);
+  const branches = useMemo(
+    () =>
+      (tree.data?.branches ?? []).filter((branch) => !branch.deletedAt),
+    [tree.data?.branches],
+  );
+  const activeBranches = useMemo(
+    () => branches.filter((branch) => !branch.archivedAt),
+    [branches],
+  );
+  const archivedBranches = useMemo(
+    () => branches.filter((branch) => branch.archivedAt),
+    [branches],
+  );
   const canManage = me.permissions.some(
     (grant) =>
       grant.permission === "project.manage" &&
@@ -2210,15 +2305,56 @@ export function ProjectDetailPage({ me }: { me: Me }) {
   });
   const archiveBranch = useMutation({
     mutationFn: (branch: Branch) =>
-      api(`/api/projects/${projectId}/branches/${branch.id}/archive`, {
+      api<{ branch: Branch }>(`/api/projects/${projectId}/branches/${branch.id}/archive`, {
         method: "POST",
         body: { expectedVersion: branch.version ?? 1 },
       }),
-    onSuccess: async (_, branch) => {
+    onMutate: () =>
+      queryClient.cancelQueries({ queryKey: ["project-tree", projectId] }),
+    onSuccess: async (result, branch) => {
+      queryClient.setQueryData<ProjectTree>(
+        ["project-tree", projectId],
+        (current) => {
+          if (!current) return current;
+          const branchNodeIds = new Set(
+            current.nodes
+              .filter((node) => node.branchId === branch.id)
+              .map((node) => node.id),
+          );
+          return {
+            ...current,
+            branches: current.branches.map((item) =>
+              item.id === branch.id
+                ? {
+                    ...item,
+                    ...result.branch,
+                    archivedAt:
+                      result.branch.archivedAt ?? new Date().toISOString(),
+                  }
+                : item,
+            ),
+            nodes: current.nodes.filter((node) => node.branchId !== branch.id),
+            edges: current.edges.filter(
+              (edge) =>
+                !branchNodeIds.has(edge.sourceNodeId) &&
+                !branchNodeIds.has(edge.targetNodeId),
+            ),
+            nodeAssignees: (current.nodeAssignees ?? []).filter(
+              (assignee) => !branchNodeIds.has(assignee.nodeId),
+            ),
+            nodeWorkSummaries: (current.nodeWorkSummaries ?? []).filter(
+              (summary) => !branchNodeIds.has(summary.nodeId),
+            ),
+          };
+        },
+      );
       if (branchId === branch.id) setBranchId("all");
       if (mergeSourceBranchId === branch.id) setMergeSourceBranchId(null);
       setSelectedNodeId(null);
-      await refresh();
+      await queryClient.invalidateQueries({
+        queryKey: ["project-tree", projectId],
+        refetchType: "none",
+      });
     },
   });
   const restoreBranch = useMutation({
@@ -2252,21 +2388,20 @@ export function ProjectDetailPage({ me }: { me: Me }) {
       await refresh();
     },
   });
-  const allNodes = tree.data?.nodes ?? EMPTY_NODES;
-  const visibleNodes = useMemo(
-    () =>
-      allNodes.filter((node) => {
-        const matchesBranch = branchId === "all" || node.branchId === branchId;
-        const keyword = search.trim().toLocaleLowerCase();
-        const matchesSearch =
-          !keyword ||
-          [node.title, node.type, node.status, node.description ?? ""].some(
-            (value) => value.toLocaleLowerCase().includes(keyword),
-          );
-        return matchesBranch && matchesSearch;
-      }),
-    [allNodes, branchId, search],
+  const activeBranchIds = new Set(activeBranches.map((branch) => branch.id));
+  const allNodes = (tree.data?.nodes ?? EMPTY_NODES).filter(
+    (node) => !node.deletedAt && activeBranchIds.has(node.branchId),
   );
+  const visibleNodes = allNodes.filter((node) => {
+    const matchesBranch = branchId === "all" || node.branchId === branchId;
+    const keyword = search.trim().toLocaleLowerCase();
+    const matchesSearch =
+      !keyword ||
+      [node.title, node.type, node.status, node.description ?? ""].some(
+        (value) => value.toLocaleLowerCase().includes(keyword),
+      );
+    return matchesBranch && matchesSearch;
+  });
   const visibleNodeIds = new Set(visibleNodes.map((node) => node.id));
   const visibleEdges = (tree.data?.edges ?? EMPTY_EDGES).filter(
     (edge) =>
@@ -2283,29 +2418,42 @@ export function ProjectDetailPage({ me }: { me: Me }) {
     });
     return assignments;
   }, [tree.data?.nodeAssignees]);
-  const visibleCanvasNodes = useMemo(
+  const workSummariesByNodeId = useMemo(
     () =>
-      visibleNodes.map((node) => {
-        const branch = activeBranches.find(
-          (candidate) => candidate.id === node.branchId,
-        );
-        const sourceVisible =
-          !node.parentId &&
-          branch?.sourceNodeId &&
-          visibleNodes.some((candidate) => candidate.id === branch.sourceNodeId);
-        return {
-          ...node,
-          // Cross-branch derivation is metadata in the database because a
-          // node parent must stay inside its own branch. Project it as a
-          // hierarchy edge on the all-structure canvas so the work line is
-          // visually attached to the node it came from.
-          parentId: sourceVisible ? branch.sourceNodeId! : node.parentId,
-          branchName: branch?.name ?? "未知分支",
-          assignees: assigneesByNodeId.get(node.id) ?? [],
-        };
-      }),
-    [activeBranches, assigneesByNodeId, visibleNodes],
+      new Map(
+        (tree.data?.nodeWorkSummaries ?? []).map((summary) => [
+          summary.nodeId,
+          summary,
+        ]),
+      ),
+    [tree.data?.nodeWorkSummaries],
   );
+  const visibleCanvasNodes = visibleNodes.map((node) => {
+    const branch = activeBranches.find(
+      (candidate) => candidate.id === node.branchId,
+    );
+    const sourceVisible =
+      !node.parentId &&
+      branch?.sourceNodeId &&
+      visibleNodes.some((candidate) => candidate.id === branch.sourceNodeId);
+    return {
+      ...node,
+      // Cross-branch derivation is metadata in the database because a
+      // node parent must stay inside its own branch. Project it as a
+      // hierarchy edge on the all-structure canvas so the work line is
+      // visually attached to the node it came from.
+      parentId: sourceVisible ? branch.sourceNodeId! : node.parentId,
+      branchName: branch?.name ?? "未知分支",
+      assignees: assigneesByNodeId.get(node.id) ?? [],
+      workSummary: workSummariesByNodeId.get(node.id) ?? {
+        nodeId: node.id,
+        visibleSessionCount: 0,
+        timedSessionCount: 0,
+        visibleContributorCount: 0,
+        allocatedSeconds: 0,
+      },
+    };
+  });
   const selected = allNodes.find((node) => node.id === selectedNodeId) ?? null;
   const branchSource = allNodes.find((node) => node.id === branchSourceNodeId) ?? null;
   const relationSource =
@@ -2426,6 +2574,7 @@ export function ProjectDetailPage({ me }: { me: Me }) {
             branches={activeBranches}
             nodes={allNodes}
             project={tree.data.project}
+            workSummariesByNodeId={workSummariesByNodeId}
           />
           <div className="project-workbench-toolbar">
             <div className="project-view-tabs">

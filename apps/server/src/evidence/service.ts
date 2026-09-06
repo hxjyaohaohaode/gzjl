@@ -253,9 +253,14 @@ export class EvidenceService {
     private readonly db: Database,
     private readonly config: ServerConfig,
   ) {
-    const hasStorageCredentials = Boolean(
-      config.S3_BUCKET && config.S3_ACCESS_KEY_ID && config.S3_SECRET_ACCESS_KEY,
-    );
+    const missingCredentialVariables = [
+      ["S3_BUCKET", config.S3_BUCKET],
+      ["S3_ACCESS_KEY_ID", config.S3_ACCESS_KEY_ID],
+      ["S3_SECRET_ACCESS_KEY", config.S3_SECRET_ACCESS_KEY],
+    ]
+      .filter(([, value]) => !value)
+      .map(([name]) => name);
+    const hasStorageCredentials = missingCredentialVariables.length === 0;
     // The PWA uploads direct to a pre-signed storage URL. Production CSP must
     // know the exact public origin in advance; without it a partly configured
     // bucket would look available in the UI but the browser would block PUT.
@@ -263,7 +268,7 @@ export class EvidenceService {
       config.NODE_ENV !== "production" || Boolean(config.S3_BROWSER_ORIGIN);
     const configured = hasStorageCredentials && hasBrowserUploadOrigin;
     this.storageUnavailableReason = !hasStorageCredentials
-      ? "对象存储凭据尚未完整配置。"
+      ? `对象存储凭据尚未完整配置（缺少 ${missingCredentialVariables.join("、")}）。`
       : !hasBrowserUploadOrigin
         ? "对象存储浏览器直传 origin 尚未配置。"
         : null;

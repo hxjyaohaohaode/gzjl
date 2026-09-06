@@ -53,7 +53,8 @@ describe("evidence storage capabilities", () => {
       fileUploads: {
         available: false,
         maxBytes: 100 * 1024 * 1024,
-        unavailableReason: "对象存储凭据尚未完整配置。",
+        unavailableReason:
+          "对象存储凭据尚未完整配置（缺少 S3_BUCKET、S3_ACCESS_KEY_ID、S3_SECRET_ACCESS_KEY）。",
         acceptsArbitraryFormats: true,
       },
       references: { url: true, text: true },

@@ -5,7 +5,7 @@
 ## 第一次创建只需四步
 
 1. 将仓库的 `main` 分支连接到 Render，选择 **New + → Blueprint**，确认根目录的 `render.yaml`。
-2. 审核 Render 展示的 `gzjl-hxjyaohaohaode-postgres`、`gzjl-hxjyaohaohaode-web` 和 `gzjl-hxjyaohaohaode-worker` 的区域与价格。若要立即启用文件附件，填写 Blueprint 提示的五项私有对象存储变量：`S3_ENDPOINT`、`S3_BROWSER_ORIGIN`、`S3_BUCKET`、`S3_ACCESS_KEY_ID`、`S3_SECRET_ACCESS_KEY`。数据库 URL、会话密钥、初始化令牌和 AI 加密密钥由 Blueprint 自动生成或在 Render 内部引用。
+2. 审核 Render 展示的 `gzjl-hxjyaohaohaode-postgres`、`gzjl-hxjyaohaohaode-web` 和 `gzjl-hxjyaohaohaode-worker` 的区域与价格。Blueprint 已固定当前生产 B2 的 endpoint、浏览器 origin 和 bucket；若要立即启用文件附件，只需填写它提示的两项私密凭据：`S3_ACCESS_KEY_ID`、`S3_SECRET_ACCESS_KEY`。数据库 URL、会话密钥、初始化令牌和 AI 加密密钥由 Blueprint 自动生成或在 Render 内部引用。
 3. 等 Web Service 显示 Live 后打开 `https://你的服务.onrender.com/healthz`，确认返回 HTTP 200。
 4. 在 Web Service 的 Environment 页面查看 Render 自动生成的 `SETUP_TOKEN`，访问 `https://你的服务.onrender.com/setup`，用该值创建唯一的首位 Owner。完成后移除或轮换 `SETUP_TOKEN`。
 
@@ -13,7 +13,7 @@ Render 的 `RENDER_EXTERNAL_URL` 会自动提供 Web Service 的 `onrender.com` 
 
 ## 后续按需开启外部能力
 
-系统的核心账号、组织、工时、项目、审批、薪资、审计、实时同步和 Owner 级 AI 配置页面可先上线。文件附件需要私有对象存储；新 Blueprint 会提示填写，既有 Blueprint 不会因后来新增的 `sync: false` 变量重新弹窗，必须到 **Render → 对应服务 → Environment** 手工添加。邮件和短信仍是可选自动投递渠道：
+系统的核心账号、组织、工时、项目、审批、薪资、审计、实时同步和 Owner 级 AI 配置页面可先上线。文件附件需要私有对象存储；endpoint、浏览器 origin 和 bucket 会由 Blueprint 同步，私密访问凭据不会被写入 Git。既有 Blueprint 不会因后来新增的 `sync: false` 变量重新弹窗，若两项凭据尚未存在，必须到 **Render → 对应服务 → Environment** 手工添加。邮件和短信仍是可选自动投递渠道：
 
 | 能力 | 服务 | 变量 |
 | --- | --- | --- |

@@ -29,12 +29,17 @@ export class ExportArtifactStore implements ExportArtifactAccess {
   private readonly unavailableReason: string | null;
 
   constructor(private readonly config: ServerConfig) {
-    const complete = Boolean(
-      config.S3_BUCKET && config.S3_ACCESS_KEY_ID && config.S3_SECRET_ACCESS_KEY,
-    );
+    const missingVariables = [
+      ["S3_BUCKET", config.S3_BUCKET],
+      ["S3_ACCESS_KEY_ID", config.S3_ACCESS_KEY_ID],
+      ["S3_SECRET_ACCESS_KEY", config.S3_SECRET_ACCESS_KEY],
+    ]
+      .filter(([, value]) => !value)
+      .map(([name]) => name);
+    const complete = missingVariables.length === 0;
     this.unavailableReason = complete
       ? null
-      : "私有对象存储尚未完整配置，暂时不能生成可下载的后台导出文件。";
+      : `私有对象存储尚未完整配置（缺少 ${missingVariables.join("、")}），暂时不能生成可下载的后台导出文件。`;
     this.client = complete
       ? new S3Client({
           region: config.S3_REGION,
