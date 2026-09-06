@@ -715,6 +715,22 @@ export function AppShell({
       await queryClient.invalidateQueries({ queryKey: ["notifications"] });
     },
   });
+  const markUnread = useMutation({
+    mutationFn: (id: string) =>
+      api(`/api/notifications/${id}/unread`, { method: "POST" }),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["notifications"] });
+    },
+  });
+  const markAllRead = useMutation({
+    mutationFn: () =>
+      api<{ updatedCount: number }>("/api/notifications/read-all", {
+        method: "POST",
+      }),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["notifications"] });
+    },
+  });
   const unreadCount =
     notifications.data?.items.filter((item) => !item.readAt).length ?? 0;
   const displayedSyncStatus = online ? syncStatus : "offline";
@@ -1177,11 +1193,24 @@ export function AppShell({
             </Button>
             {notificationsOpen ? (
               <div className="app-utility-popover absolute right-0 top-12 z-50 max-h-[min(70vh,560px)] w-[min(92vw,380px)] overflow-y-auto rounded-[18px] border border-[var(--border)] bg-[var(--surface-raised)] p-3 shadow-[var(--shadow-float)]">
-                <div className="flex items-center justify-between px-1 pb-2">
+                <div className="flex items-center justify-between gap-3 px-1 pb-2">
                   <p className="font-bold">通知中心</p>
-                  <span className="text-xs text-[var(--text-muted)]">
-                    {unreadCount} 条未读
-                  </span>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-[var(--text-muted)]">
+                      {unreadCount} 条未读
+                    </span>
+                    {unreadCount ? (
+                      <Button
+                        disabled={markAllRead.isPending}
+                        onClick={() => markAllRead.mutate()}
+                        size="compact"
+                        type="button"
+                        variant="ghost"
+                      >
+                        {markAllRead.isPending ? "处理中…" : "全部已读"}
+                      </Button>
+                    ) : null}
+                  </div>
                 </div>
                 {notifications.isPending ? (
                   <p className="p-3 text-sm text-[var(--text-muted)]">
@@ -1194,22 +1223,25 @@ export function AppShell({
                 ) : notifications.data?.items.length ? (
                   <div className="space-y-1">
                     {notifications.data.items.map((item) => (
-                      <button
+                      <div
                         className={cn(
-                          "w-full rounded-xl p-3 text-left transition hover:bg-[var(--surface-subtle)]",
+                          "group relative w-full rounded-xl p-3 pr-20 text-left transition hover:bg-[var(--surface-subtle)]",
                           !item.readAt && "bg-[var(--accent-soft)]",
                         )}
                         key={item.id}
-                        onClick={() => {
-                          if (!item.readAt) markRead.mutate(item.id);
-                          if (item.actionUrl) {
-                            setNotificationsOpen(false);
-                            navigate(item.actionUrl);
-                          }
-                        }}
-                        type="button"
                       >
-                        <div className="flex gap-2">
+                        <button
+                          aria-label={`${item.title}：${item.body}`}
+                          className="flex w-full gap-2 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
+                          onClick={() => {
+                            if (!item.readAt) markRead.mutate(item.id);
+                            if (item.actionUrl) {
+                              setNotificationsOpen(false);
+                              navigate(item.actionUrl);
+                            }
+                          }}
+                          type="button"
+                        >
                           <span
                             className={cn(
                               "mt-1.5 size-2 shrink-0 rounded-full",
@@ -1236,8 +1268,21 @@ export function AppShell({
                               }).format(new Date(item.createdAt))}
                             </span>
                           </span>
-                        </div>
-                      </button>
+                        </button>
+                        <Button
+                          className="absolute right-2 top-2 opacity-80 group-hover:opacity-100"
+                          disabled={markRead.isPending || markUnread.isPending}
+                          onClick={() => {
+                            if (item.readAt) markUnread.mutate(item.id);
+                            else markRead.mutate(item.id);
+                          }}
+                          size="compact"
+                          type="button"
+                          variant="ghost"
+                        >
+                          {item.readAt ? "标未读" : "标已读"}
+                        </Button>
+                      </div>
                     ))}
                   </div>
                 ) : (

@@ -194,24 +194,114 @@ export async function registerNotificationRoutes(
   );
 
   app.post(
+    "/api/notifications/read-all",
+    { preHandler: [app.csrfProtection, authenticate] },
+    async (request) => {
+      const changed = await db.transaction(async (tx) => {
+        const items = await tx
+          .update(notifications)
+          .set({ readAt: new Date() })
+          .where(
+            and(
+              eq(
+                notifications.recipientMembershipId,
+                request.auth!.membershipId,
+              ),
+              isNull(notifications.readAt),
+            ),
+          )
+          .returning({ id: notifications.id });
+        if (items.length > 0) {
+          await tx.insert(outboxEvents).values({
+            organizationId: request.auth!.organizationId,
+            eventType: "notification.read_state_changed",
+            entityType: "membership_notifications",
+            entityId: request.auth!.membershipId,
+            entityVersion: 1,
+            payload: {
+              recipientMembershipId: request.auth!.membershipId,
+              read: true,
+              count: items.length,
+            },
+          });
+        }
+        return items;
+      });
+      return { updatedCount: changed.length };
+    },
+  );
+
+  app.post(
     "/api/notifications/:notificationId/read",
     { preHandler: [app.csrfProtection, authenticate] },
     async (request, reply) => {
       const { notificationId } = notificationParams.parse(request.params);
-      const [item] = await db
-        .update(notifications)
-        .set({ readAt: new Date() })
-        .where(
-          and(
-            eq(notifications.id, notificationId),
-            eq(
-              notifications.recipientMembershipId,
-              request.auth!.membershipId,
+      const item = await db.transaction(async (tx) => {
+        const [updated] = await tx
+          .update(notifications)
+          .set({ readAt: new Date() })
+          .where(
+            and(
+              eq(notifications.id, notificationId),
+              eq(
+                notifications.recipientMembershipId,
+                request.auth!.membershipId,
+              ),
             ),
-            isNull(notifications.readAt),
-          ),
-        )
-        .returning();
+          )
+          .returning();
+        if (updated) {
+          await tx.insert(outboxEvents).values({
+            organizationId: request.auth!.organizationId,
+            eventType: "notification.read_state_changed",
+            entityType: "notification",
+            entityId: updated.id,
+            entityVersion: 1,
+            payload: { recipientMembershipId: request.auth!.membershipId, read: true },
+          });
+        }
+        return updated;
+      });
+      return item
+        ? { notification: item }
+        : reply.code(404).send({
+            error: "notification_not_found",
+            message: "通知不存在。",
+          });
+    },
+  );
+
+  app.post(
+    "/api/notifications/:notificationId/unread",
+    { preHandler: [app.csrfProtection, authenticate] },
+    async (request, reply) => {
+      const { notificationId } = notificationParams.parse(request.params);
+      const item = await db.transaction(async (tx) => {
+        const [updated] = await tx
+          .update(notifications)
+          .set({ readAt: null })
+          .where(
+            and(
+              eq(notifications.id, notificationId),
+              eq(
+                notifications.recipientMembershipId,
+                request.auth!.membershipId,
+              ),
+            ),
+          )
+          .returning();
+        if (updated) {
+          await tx.insert(outboxEvents).values({
+            organizationId: request.auth!.organizationId,
+            eventType: "notification.read_state_changed",
+            entityType: "notification",
+            entityId: updated.id,
+            entityVersion: 1,
+            payload: { recipientMembershipId: request.auth!.membershipId, read: false },
+          });
+        }
+        return updated;
+      });
       return item
         ? { notification: item }
         : reply.code(404).send({

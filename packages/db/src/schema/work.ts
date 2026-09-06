@@ -6,6 +6,7 @@ import {
   index,
   integer,
   jsonb,
+  numeric,
   pgEnum,
   pgTable,
   text,
@@ -205,6 +206,8 @@ export const workSessionProjectLinks = pgTable(
       .references(() => projectBranches.id, { onDelete: "restrict" }),
     isPrimary: boolean("is_primary").notNull().default(false),
     allocationBasisPoints: integer("allocation_basis_points").notNull().default(10_000),
+    reportedProgress: numeric("reported_progress", { precision: 5, scale: 2 }),
+    progressReportedAt: timestamp("progress_reported_at", { withTimezone: true }),
   },
   (table) => [
     uniqueIndex("work_session_project_links_session_node_uidx").on(
@@ -215,6 +218,10 @@ export const workSessionProjectLinks = pgTable(
     check(
       "work_session_project_links_allocation_check",
       sql`${table.allocationBasisPoints} between 0 and 10000`,
+    ),
+    check(
+      "work_session_project_links_progress_check",
+      sql`${table.reportedProgress} is null or ${table.reportedProgress} between 0 and 100`,
     ),
   ],
 );

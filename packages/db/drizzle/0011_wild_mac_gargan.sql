@@ -1,0 +1,3 @@
+ALTER TABLE "work_session_project_links" ADD COLUMN "reported_progress" numeric(5, 2);--> statement-breakpoint
+ALTER TABLE "work_session_project_links" ADD COLUMN "progress_reported_at" timestamp with time zone;--> statement-breakpoint
+ALTER TABLE "work_session_project_links" ADD CONSTRAINT "work_session_project_links_progress_check" CHECK ("work_session_project_links"."reported_progress" is null or "work_session_project_links"."reported_progress" between 0 and 100);

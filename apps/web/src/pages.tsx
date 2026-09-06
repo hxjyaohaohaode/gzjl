@@ -2761,6 +2761,8 @@ interface WorkSessionProjectLink {
   projectNodeTitle: string;
   isPrimary: boolean;
   allocationBasisPoints: number;
+  reportedProgress?: string | null;
+  progressReportedAt?: string | null;
 }
 interface WorkSession {
   id: string;
@@ -2942,6 +2944,7 @@ interface LocalManualPrefill {
   linkedProjectId: string;
   primaryProjectNodeId: string;
   linkedProjectNodes: LinkedProjectNode[];
+  reportedProgress?: string;
 }
 
 const manualPrefillStorageKey = "workbench:manual-work-prefill:v1";
@@ -3856,9 +3859,15 @@ function EvidenceFileActions({ item }: { item: EvidenceAttachment }) {
   );
 }
 
-function EvidencePanel({ sessionId }: { sessionId: string }) {
+function EvidencePanel({
+  sessionId,
+  defaultOpen = false,
+}: {
+  sessionId: string;
+  defaultOpen?: boolean;
+}) {
   const queryClient = useQueryClient();
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(defaultOpen);
   const [queuedFiles, setQueuedFiles] = useState<QueuedEvidenceFile[]>([]);
   const [reference, setReference] = useState("");
   const [textReference, setTextReference] = useState("");
@@ -3869,6 +3878,13 @@ function EvidencePanel({ sessionId }: { sessionId: string }) {
   const [replacementFor, setReplacementFor] = useState<string | null>(null);
   const [replacementReason, setReplacementReason] = useState("");
   const [versionsFor, setVersionsFor] = useState<string | null>(null);
+  const [editingEvidence, setEditingEvidence] =
+    useState<EvidenceAttachment | null>(null);
+  const [evidenceEdit, setEvidenceEdit] = useState({
+    visibility: "management_only",
+    note: "",
+    value: "",
+  });
   const evidence = useQuery({
     queryKey: ["evidence", sessionId],
     queryFn: () =>
@@ -3978,11 +3994,11 @@ function EvidencePanel({ sessionId }: { sessionId: string }) {
     updateQueuedFile(queued.id, { state: "complete" });
   };
   const upload = useMutation({
-    mutationFn: async (onlyIds?: string[]) => {
-      const candidates = queuedFiles.filter(
-        (item) =>
-          (item.state === "queued" || item.state === "failed") &&
-          (!onlyIds || onlyIds.includes(item.id)),
+    mutationFn: async (selectedFiles?: QueuedEvidenceFile[]) => {
+      const candidates = (
+        selectedFiles ?? queuedFiles
+      ).filter(
+        (item) => item.state === "queued" || item.state === "failed",
       );
       if (!candidates.length) {
         throw new Error("请先选择至少一个待上传或待重试的文件。 ");
@@ -4060,6 +4076,28 @@ function EvidencePanel({ sessionId }: { sessionId: string }) {
       }),
     onSuccess: refresh,
   });
+  const updateEvidence = useMutation({
+    mutationFn: () => {
+      if (!editingEvidence) throw new Error("请选择要编辑的证据。");
+      return api(`/api/attachments/${editingEvidence.id}`, {
+        method: "PATCH",
+        body: {
+          expectedVersion: editingEvidence.version,
+          visibility: evidenceEdit.visibility,
+          note: evidenceEdit.note.trim() || null,
+          ...(editingEvidence.kind === "url"
+            ? { externalUrl: evidenceEdit.value.trim() }
+            : editingEvidence.kind === "text"
+              ? { textContent: evidenceEdit.value.trim() }
+              : {}),
+        },
+      });
+    },
+    onSuccess: async () => {
+      setEditingEvidence(null);
+      await refresh();
+    },
+  });
   const fileUploads = capabilities.data?.fileUploads;
   return (
     <div className="mt-3 rounded-2xl bg-[var(--surface-subtle)] p-3">
@@ -4090,23 +4128,18 @@ function EvidencePanel({ sessionId }: { sessionId: string }) {
                     const selected = Array.from(event.currentTarget.files ?? []);
                     if (!selected.length) return;
                     const files = replacementFor ? selected.slice(0, 1) : selected;
+                    const queued = files.map((file) => ({
+                      id: crypto.randomUUID(),
+                      file,
+                      state: "queued" as const,
+                    }));
                     setQueuedFiles((current) =>
                       replacementFor
-                        ? files.map((file) => ({
-                            id: crypto.randomUUID(),
-                            file,
-                            state: "queued" as const,
-                          }))
-                        : [
-                            ...current,
-                            ...files.map((file) => ({
-                              id: crypto.randomUUID(),
-                              file,
-                              state: "queued" as const,
-                            })),
-                          ],
+                        ? queued
+                        : [...current, ...queued],
                     );
                     event.currentTarget.value = "";
+                    upload.mutate(queued);
                   }}
                   type="file"
                 />
@@ -4122,12 +4155,12 @@ function EvidencePanel({ sessionId }: { sessionId: string }) {
                   {upload.isPending
                     ? "上传中…"
                     : replacementFor
-                      ? "确认替换"
-                      : "上传队列"}
+                      ? "重新上传"
+                      : "重试未完成项"}
                 </Button>
               </div>
               <p className="text-xs leading-5 text-[var(--text-muted)]">
-                任意格式，可多选；单件上限 {formatFileSize(fileUploads.maxBytes)}。
+                选择后会自动上传文件内容并完成 SHA-256 核验；单件上限 {formatFileSize(fileUploads.maxBytes)}。
               </p>
             </>
           ) : (
@@ -4186,6 +4219,98 @@ function EvidencePanel({ sessionId }: { sessionId: string }) {
               <option value="project_visible">关联项目可见</option>
             </select>
           </div>
+          {editingEvidence ? (
+            <section className="evidence-edit-card" aria-label="编辑证据">
+              <div className="evidence-edit-card-head">
+                <div>
+                  <strong>编辑证据</strong>
+                  <small>
+                    v{editingEvidence.version} · 修改会保留旧版本和审计记录
+                  </small>
+                </div>
+                <button
+                  onClick={() => setEditingEvidence(null)}
+                  type="button"
+                >
+                  取消
+                </button>
+              </div>
+              {editingEvidence.kind !== "file" ? (
+                editingEvidence.kind === "url" ? (
+                  <input
+                    aria-label="编辑证据链接"
+                    className={fieldClass}
+                    onChange={(event) =>
+                      setEvidenceEdit({
+                        ...evidenceEdit,
+                        value: event.target.value,
+                      })
+                    }
+                    type="url"
+                    value={evidenceEdit.value}
+                  />
+                ) : (
+                  <textarea
+                    aria-label="编辑文字证据"
+                    className={`${textAreaClass} min-h-24`}
+                    maxLength={20_000}
+                    onChange={(event) =>
+                      setEvidenceEdit({
+                        ...evidenceEdit,
+                        value: event.target.value,
+                      })
+                    }
+                    value={evidenceEdit.value}
+                  />
+                )
+              ) : (
+                <p className="evidence-edit-file-note">
+                  文件内容请使用“替换”；这里可以修改备注和审核可见范围。
+                </p>
+              )}
+              <div className="evidence-edit-meta">
+                <input
+                  aria-label="编辑证据备注"
+                  className={fieldClass}
+                  maxLength={2_000}
+                  onChange={(event) =>
+                    setEvidenceEdit({
+                      ...evidenceEdit,
+                      note: event.target.value,
+                    })
+                  }
+                  placeholder="证据备注（可选）"
+                  value={evidenceEdit.note}
+                />
+                <select
+                  aria-label="编辑证据可见范围"
+                  className={fieldClass}
+                  onChange={(event) =>
+                    setEvidenceEdit({
+                      ...evidenceEdit,
+                      visibility: event.target.value,
+                    })
+                  }
+                  value={evidenceEdit.visibility}
+                >
+                  <option value="private">仅本人</option>
+                  <option value="management_only">审核与管理</option>
+                  <option value="project_visible">关联项目</option>
+                </select>
+              </div>
+              <Button
+                disabled={
+                  updateEvidence.isPending ||
+                  (editingEvidence.kind !== "file" &&
+                    !evidenceEdit.value.trim())
+                }
+                onClick={() => updateEvidence.mutate()}
+                size="compact"
+              >
+                {updateEvidence.isPending ? "正在保存…" : "保存证据修改"}
+              </Button>
+            </section>
+          ) : null}
           {queuedFiles.length ? (
             <div className="evidence-upload-queue" role="status">
               {queuedFiles.map((queued) => (
@@ -4202,7 +4327,7 @@ function EvidencePanel({ sessionId }: { sessionId: string }) {
                       {queued.state === "failed" ? (
                         <Button
                           disabled={upload.isPending}
-                          onClick={() => upload.mutate([queued.id])}
+                          onClick={() => upload.mutate([queued])}
                           size="compact"
                           variant="secondary"
                         >
@@ -4283,6 +4408,7 @@ function EvidencePanel({ sessionId }: { sessionId: string }) {
               addUrl.error ??
               addText.error ??
               remove.error ??
+              updateEvidence.error ??
               evidence.error ??
               capabilities.error ??
               versionHistory.error
@@ -4320,7 +4446,9 @@ function EvidencePanel({ sessionId }: { sessionId: string }) {
                             : "管理可见"}
                         {" · "}
                         {item.status === "available"
-                          ? "已通过核验"
+                          ? item.kind === "file"
+                            ? "文件内容已保存并通过 SHA-256 核验"
+                            : "内容已保存"
                           : item.status === "pending_upload"
                             ? "待完成上传"
                             : item.status === "quarantined"
@@ -4331,6 +4459,25 @@ function EvidencePanel({ sessionId }: { sessionId: string }) {
                       </span>
                     </span>
                     <span className="flex shrink-0 flex-wrap gap-1">
+                      <Button
+                        onClick={() => {
+                          setEditingEvidence(item);
+                          setEvidenceEdit({
+                            visibility: item.visibility,
+                            note: item.note ?? "",
+                            value:
+                              item.kind === "url"
+                                ? item.externalUrl ?? ""
+                                : item.kind === "text"
+                                  ? item.textContent ?? ""
+                                  : "",
+                          });
+                        }}
+                        size="compact"
+                        variant="secondary"
+                      >
+                        编辑
+                      </Button>
                       {item.kind === "file" ? (
                         <>
                           <EvidenceFileActions item={item} />
@@ -4770,6 +4917,21 @@ export function WorkPage() {
   const [linkedProjectNodes, setLinkedProjectNodes] = useState<
     LinkedProjectNode[]
   >([]);
+  const [reportedProgress, setReportedProgress] = useState("");
+  const [projectNodeSearch, setProjectNodeSearch] = useState("");
+  const [recommendationQuery, setRecommendationQuery] = useState("");
+  useEffect(() => {
+    const debounceTimer = window.setTimeout(() => {
+      setRecommendationQuery(
+        [manual.content, manual.result, projectNodeSearch]
+          .map((value) => value.trim())
+          .filter(Boolean)
+          .join(" ")
+          .slice(0, 2_000),
+      );
+    }, 280);
+    return () => window.clearTimeout(debounceTimer);
+  }, [manual.content, manual.result, projectNodeSearch]);
   const work = useQuery({
     queryKey: ["work-sessions", "work-editor", "all", 100],
     queryFn: () =>
@@ -4804,6 +4966,20 @@ export function WorkPage() {
       ),
     enabled: showForm && Boolean(linkedProjectId),
   });
+  const recommendedNodes = useQuery({
+    queryKey: ["work-project-node-recommendations", recommendationQuery],
+    queryFn: () => {
+      const query = new URLSearchParams({
+        q: recommendationQuery,
+        limit: "12",
+      });
+      return api<{ items: RecommendedProjectNode[] }>(
+        `/api/work-sessions/project-node-recommendations?${query.toString()}`,
+      );
+    },
+    enabled: showForm && recommendationQuery.length >= 2,
+    staleTime: 10_000,
+  });
   const activeProject = projects.data?.items.find(
     (project) => project.id === linkedProjectId,
   );
@@ -4819,11 +4995,24 @@ export function WorkPage() {
       title: node.title,
       type: node.type,
       status: node.status,
+      progress: node.progress,
+      progressMode: node.progressMode,
     }),
   );
+  const normalizedNodeSearch = projectNodeSearch.trim().toLocaleLowerCase("zh-CN");
+  const filteredActiveNodeOptions = normalizedNodeSearch
+    ? activeNodeOptions.filter((node) =>
+        `${node.projectLabel} ${node.title} ${node.type} ${node.status}`
+          .toLocaleLowerCase("zh-CN")
+          .includes(normalizedNodeSearch),
+      )
+    : activeNodeOptions;
   const primaryChoices = [...linkedProjectNodes, ...activeNodeOptions].filter(
     (node, index, items) =>
       items.findIndex((candidate) => candidate.id === node.id) === index,
+  );
+  const selectedPrimaryNode = primaryChoices.find(
+    (node) => node.id === primaryProjectNodeId,
   );
   const addLinkedNode = (node: LinkedProjectNode, primary = false) => {
     setLinkedProjectNodes((current) =>
@@ -4836,8 +5025,10 @@ export function WorkPage() {
   const removeLinkedNode = (nodeId: string) => {
     const remaining = linkedProjectNodes.filter((node) => node.id !== nodeId);
     setLinkedProjectNodes(remaining);
-    if (primaryProjectNodeId === nodeId)
+    if (primaryProjectNodeId === nodeId) {
       setPrimaryProjectNodeId(remaining[0]?.id ?? "");
+      setReportedProgress("");
+    }
   };
   const toggleLinkedNode = (node: LinkedProjectNode, checked: boolean) => {
     if (checked) addLinkedNode(node);
@@ -4847,9 +5038,27 @@ export function WorkPage() {
     const node = primaryChoices.find((candidate) => candidate.id === nodeId);
     if (!node) {
       setPrimaryProjectNodeId("");
+      setReportedProgress("");
       return;
     }
+    if (node.id !== primaryProjectNodeId) setReportedProgress("");
     addLinkedNode(node, true);
+  };
+  const addRecommendedNode = (node: RecommendedProjectNode) => {
+    addLinkedNode(
+      {
+        id: node.id,
+        projectId: node.projectId,
+        projectLabel: `${node.projectKey} · ${node.projectName}`,
+        title: node.title,
+        type: node.type,
+        status: node.status,
+        progress: node.progress,
+        progressMode: node.progressMode,
+      },
+      linkedProjectNodes.length === 0,
+    );
+    setLinkedProjectId(node.projectId);
   };
   const resetManualEditor = () => {
     const resetAt = new Date();
@@ -4872,6 +5081,8 @@ export function WorkPage() {
     setLinkedProjectId("");
     setPrimaryProjectNodeId("");
     setLinkedProjectNodes([]);
+    setReportedProgress("");
+    setProjectNodeSearch("");
     setPrefillMessage(null);
   };
   const refresh = async () => {
@@ -4938,6 +5149,10 @@ export function WorkPage() {
         nextStep: manual.nextStep,
         primaryProjectNodeId: primaryProjectNodeId || null,
         projectNodeIds: linkedProjectNodes.map((node) => node.id),
+        reportedProgress:
+          recordKind === "fact" && reportedProgress !== ""
+            ? Number(reportedProgress)
+            : null,
         visibility:
           recordKind === "plan" || editingSession?.recordKind === "plan"
             ? "private"
@@ -4976,6 +5191,7 @@ export function WorkPage() {
             blockers: "",
             nextStep: "",
             breaks: [],
+            reportedProgress: null,
           },
           evidence: segment.evidence,
           requestedKind: "fact" as const,
@@ -5047,6 +5263,8 @@ export function WorkPage() {
       setLinkedProjectId("");
       setPrimaryProjectNodeId("");
       setLinkedProjectNodes([]);
+      setReportedProgress("");
+      setProjectNodeSearch("");
       setSaveMessage(
         result.evidenceFailures.length
           ? `已保存 ${result.savedCount} 段工作；${result.evidenceFailures.length} 项证据未上传，请在对应记录中重试。${result.evidenceFailures[0]}`
@@ -5156,6 +5374,9 @@ export function WorkPage() {
       })),
     );
     setPrimaryProjectNodeId(item.primaryProjectNodeId ?? "");
+    setReportedProgress(
+      links.find((link) => link.isPrimary)?.reportedProgress ?? "",
+    );
     setLinkedProjectId(
       links.find((link) => link.isPrimary)?.projectId ?? links[0]?.projectId ?? "",
     );
@@ -5208,6 +5429,9 @@ export function WorkPage() {
       })),
     );
     setPrimaryProjectNodeId(item.primaryProjectNodeId ?? "");
+    setReportedProgress(
+      links.find((link) => link.isPrimary)?.reportedProgress ?? "",
+    );
     setLinkedProjectId(
       links.find((link) => link.isPrimary)?.projectId ??
         links[0]?.projectId ??
@@ -5226,6 +5450,7 @@ export function WorkPage() {
       linkedProjectId,
       primaryProjectNodeId,
       linkedProjectNodes,
+      reportedProgress,
     };
     try {
       window.localStorage.setItem(manualPrefillStorageKey, JSON.stringify(payload));
@@ -5296,6 +5521,11 @@ export function WorkPage() {
           : "",
       );
       setLinkedProjectNodes(storedNodes);
+      setReportedProgress(
+        typeof candidate.reportedProgress === "string"
+          ? candidate.reportedProgress
+          : "",
+      );
       setShowForm(true);
       setPrefillMessage("已恢复本机预填写。保存草稿前请再次核验时间和项目关联。");
     } catch {
@@ -5655,6 +5885,14 @@ export function WorkPage() {
                     </section>
                   </div>
                 ) : null}
+                {editingSession || correctionSession ? (
+                  <div className="md:col-span-2">
+                    <EvidencePanel
+                      defaultOpen
+                      sessionId={(editingSession ?? correctionSession)!.id}
+                    />
+                  </div>
+                ) : null}
                 <Field
                   hint="如依赖、风险或等待项；它会进入可追溯记录。"
                   label="阻塞与风险（可选）"
@@ -5803,6 +6041,71 @@ export function WorkPage() {
                     <option value="project_visible">项目成员</option>
                   </select>
                 </Field>
+                <div className="work-project-recommender md:col-span-2">
+                  <div className="work-project-recommender-head">
+                    <div>
+                      <span><Sparkles size={16} />智能关联推荐</span>
+                      <small>
+                        根据工作内容、结果、你的负责节点和最近使用记录实时排序
+                      </small>
+                    </div>
+                    <Badge tone="info">
+                      {recommendedNodes.isFetching
+                        ? "匹配中"
+                        : `${recommendedNodes.data?.items.length ?? 0} 条建议`}
+                    </Badge>
+                  </div>
+                  <input
+                    aria-label="搜索项目节点"
+                    className={fieldClass}
+                    onChange={(event) => setProjectNodeSearch(event.target.value)}
+                    placeholder="继续输入项目名、节点名或关键词搜索…"
+                    type="search"
+                    value={projectNodeSearch}
+                  />
+                  {recommendationQuery.length < 2 ? (
+                    <p className="work-project-recommender-empty">
+                      填写上方工作内容后，这里会自动出现相关项目节点；也可以直接输入搜索。
+                    </p>
+                  ) : recommendedNodes.isPending ? (
+                    <p className="work-project-recommender-empty">正在匹配可访问项目节点…</p>
+                  ) : recommendedNodes.data?.items.length ? (
+                    <div className="work-project-recommendation-list" role="listbox" aria-label="推荐项目节点">
+                      {recommendedNodes.data.items.map((node) => {
+                        const selected = linkedProjectNodes.some(
+                          (candidate) => candidate.id === node.id,
+                        );
+                        return (
+                          <button
+                            aria-selected={selected}
+                            className={selected ? "is-selected" : ""}
+                            key={node.id}
+                            onClick={() =>
+                              selected
+                                ? removeLinkedNode(node.id)
+                                : addRecommendedNode(node)
+                            }
+                            role="option"
+                            type="button"
+                          >
+                            <i style={{ backgroundColor: node.projectColor }} />
+                            <span>
+                              <strong>{node.title}</strong>
+                              <small>{node.projectKey} · {node.projectName} · 当前 {Number(node.progress)}%</small>
+                              <em>{node.reasons.join(" · ") || "可关联节点"}</em>
+                            </span>
+                            <b>{selected ? "已选择" : "选择"}</b>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <p className="work-project-recommender-empty">
+                      暂未找到匹配节点，可以更换关键词或从下方项目中浏览。
+                    </p>
+                  )}
+                  <ErrorMessage error={recommendedNodes.error} />
+                </div>
                 <Field
                   hint="可不关联；选定项目后，可将一条工作同时关联至多条任务节点。"
                   label="关联项目（可选）"
@@ -5836,8 +6139,8 @@ export function WorkPage() {
                           <p className="px-2 py-3 text-sm text-[var(--text-muted)]">
                             正在读取节点…
                           </p>
-                        ) : activeNodeOptions.length ? (
-                          activeNodeOptions.map((node) => {
+                        ) : filteredActiveNodeOptions.length ? (
+                          filteredActiveNodeOptions.map((node) => {
                             const selected = linkedProjectNodes.some(
                               (candidate) => candidate.id === node.id,
                             );
@@ -5873,7 +6176,9 @@ export function WorkPage() {
                           })
                         ) : (
                           <p className="px-2 py-3 text-sm text-[var(--text-muted)]">
-                            该项目暂无可关联节点。
+                            {activeNodeOptions.length
+                              ? "当前搜索没有匹配节点。"
+                              : "该项目暂无可关联节点。"}
                           </p>
                         )}
                       </div>
@@ -5913,6 +6218,69 @@ export function WorkPage() {
                         </select>
                       </Field>
                     </div>
+                    {primaryProjectNodeId ? (
+                      <div className="work-progress-reporter md:col-span-2">
+                        <div className="work-progress-reporter-head">
+                          <div>
+                            <strong>同步主节点完成度</strong>
+                            <small>
+                              {selectedPrimaryNode?.progressMode &&
+                              selectedPrimaryNode.progressMode !== "manual"
+                                ? "该节点由子节点自动汇总，请改选其手动进度子节点"
+                                : `项目总图当前为 ${Number(selectedPrimaryNode?.progress ?? 0)}%；留空则只关联工作、不修改进度`}
+                            </small>
+                          </div>
+                          <output>
+                            {reportedProgress === ""
+                              ? "不更新"
+                              : `${reportedProgress}%`}
+                          </output>
+                        </div>
+                        <div className="work-progress-reporter-controls">
+                          <input
+                            aria-label="主项目节点完成度滑块"
+                            disabled={
+                              selectedPrimaryNode?.progressMode !== undefined &&
+                              selectedPrimaryNode.progressMode !== "manual"
+                            }
+                            max="100"
+                            min="0"
+                            onChange={(event) =>
+                              setReportedProgress(event.target.value)
+                            }
+                            step="1"
+                            type="range"
+                            value={
+                              reportedProgress === ""
+                                ? String(Number(selectedPrimaryNode?.progress ?? 0))
+                                : reportedProgress
+                            }
+                          />
+                          <input
+                            aria-label="主项目节点完成度"
+                            className={fieldClass}
+                            disabled={
+                              selectedPrimaryNode?.progressMode !== undefined &&
+                              selectedPrimaryNode.progressMode !== "manual"
+                            }
+                            max="100"
+                            min="0"
+                            onChange={(event) =>
+                              setReportedProgress(event.target.value)
+                            }
+                            placeholder="留空"
+                            step="1"
+                            type="number"
+                            value={reportedProgress}
+                          />
+                        </div>
+                        {reportedProgress !== "" ? (
+                          <p>
+                            保存真实工作后会立即更新主节点；项目总图、团队动态、分析和薪资缓存将通过实时事件重新拉取。
+                          </p>
+                        ) : null}
+                      </div>
+                    ) : null}
                     {linkedProjectNodes.length ? (
                       <div className="md:col-span-2">
                         <div className="w-full rounded-xl bg-[var(--surface-subtle)] p-3">
@@ -6363,8 +6731,14 @@ interface ProjectNode {
   parentId: string | null;
   type: string;
   title: string;
+  description?: string | null;
   status: string;
   progress: string;
+  progressMode?:
+    | "manual"
+    | "weighted_children"
+    | "time_weighted_children"
+    | "milestone_based";
   version: number;
   sortOrder: number;
 }
@@ -6375,6 +6749,23 @@ interface LinkedProjectNode {
   title: string;
   type: string;
   status: string;
+  progress?: string;
+  progressMode?: ProjectNode["progressMode"];
+}
+interface RecommendedProjectNode {
+  id: string;
+  projectId: string;
+  projectKey: string;
+  projectName: string;
+  projectColor: string;
+  title: string;
+  description: string | null;
+  type: string;
+  status: string;
+  progress: string;
+  progressMode: NonNullable<ProjectNode["progressMode"]>;
+  score: number;
+  reasons: string[];
 }
 interface Branch {
   id: string;
@@ -7351,6 +7742,8 @@ interface PayrollOwnResponse {
     currency: string;
     planType: CompensationPlanType;
     baseAmount: string;
+    subsidies?: Array<{ name: string; amount: string }>;
+    subsidyTotal?: string;
     approvedSeconds: number;
     pendingSeconds: number;
     weeklyBonusSeconds: number;
@@ -7364,6 +7757,8 @@ interface PayrollOwnResponse {
     projectedPeriodAmount: string;
     projection: {
       method: "adaptive_weekday_backtest_v3";
+      historyWindowDays: number;
+      trainedThrough: string | null;
       sampleDays: number;
       nonZeroSampleDays: number;
       horizonDays: number;
@@ -7458,7 +7853,10 @@ interface PayrollManagementOverview {
         pendingReviewCountsInEstimate: boolean;
         effectiveFrom: string;
         effectiveTo: string | null;
-        config: { fixedAmount?: string };
+        config: {
+          fixedAmount?: string;
+          subsidies?: Array<{ name: string; amount: string }>;
+        };
       };
       rules: Array<{
         id: string;
@@ -7594,6 +7992,7 @@ function PayrollManagementPanel() {
     currency: "CNY",
     baseAmount: "",
     fixedAmount: "",
+    subsidies: [] as Array<{ id: string; name: string; amount: string }>,
     effectiveFrom: localInput(new Date(Date.now() + 60_000)),
     pendingReviewCountsInEstimate: true,
     weekdayEnabled: false,
@@ -7716,6 +8115,12 @@ function PayrollManagementPanel() {
       currency: selected?.plan?.plan.currency ?? "CNY",
       baseAmount: selected?.plan?.version.baseAmount ?? "",
       fixedAmount: selected?.plan?.version.config.fixedAmount ?? "",
+      subsidies: (selected?.plan?.version.config.subsidies ?? []).map(
+        (subsidy, index) => ({
+          id: `${index}-${subsidy.name}-${subsidy.amount}`,
+          ...subsidy,
+        }),
+      ),
       pendingReviewCountsInEstimate:
         selected?.plan?.version.pendingReviewCountsInEstimate ?? true,
       weekdayEnabled: Boolean(weekdayRule),
@@ -7798,6 +8203,10 @@ function PayrollManagementPanel() {
           currency: planForm.currency,
           baseAmount: planForm.baseAmount,
           ...(planForm.type === "hybrid" ? { fixedAmount: planForm.fixedAmount } : {}),
+          subsidies: planForm.subsidies.map(({ name, amount }) => ({
+            name: name.trim(),
+            amount,
+          })),
           effectiveFrom: zonedInputToDate(planForm.effectiveFrom).toISOString(),
           pendingReviewCountsInEstimate: planForm.pendingReviewCountsInEstimate,
           rules,
@@ -7981,6 +8390,91 @@ function PayrollManagementPanel() {
                 <input className={fieldClass} min="0" onChange={(event) => setPlanForm({ ...planForm, fixedAmount: event.target.value })} required step="0.000001" type="number" value={planForm.fixedAmount} />
               </Field>
             ) : null}
+            <section className="salary-subsidy-editor xl:col-span-4" aria-label="补贴配置">
+              <div className="salary-subsidy-editor-head">
+                <div>
+                  <h3>固定补贴</h3>
+                  <p>可配置多项名称与月度金额；保存后进入方案版本、实时预测及正式结算明细。</p>
+                </div>
+                <Button
+                  onClick={() => setPlanForm((current) => ({
+                    ...current,
+                    subsidies: [
+                      ...current.subsidies,
+                      { id: crypto.randomUUID(), name: "", amount: "" },
+                    ],
+                  }))}
+                  size="compact"
+                  type="button"
+                  variant="secondary"
+                >
+                  <Plus size={15} /> 添加补贴
+                </Button>
+              </div>
+              {planForm.subsidies.length ? (
+                <div className="salary-subsidy-list">
+                  {planForm.subsidies.map((subsidy, index) => (
+                    <div className="salary-subsidy-row" key={subsidy.id}>
+                      <label>
+                        <span>补贴名称</span>
+                        <input
+                          aria-label={`第 ${index + 1} 项补贴名称`}
+                          className={fieldClass}
+                          maxLength={60}
+                          onChange={(event) => setPlanForm((current) => ({
+                            ...current,
+                            subsidies: current.subsidies.map((item) =>
+                              item.id === subsidy.id
+                                ? { ...item, name: event.target.value }
+                                : item,
+                            ),
+                          }))}
+                          placeholder="例如：交通补贴"
+                          required
+                          value={subsidy.name}
+                        />
+                      </label>
+                      <label>
+                        <span>月度金额</span>
+                        <input
+                          aria-label={`第 ${index + 1} 项补贴金额`}
+                          className={fieldClass}
+                          inputMode="decimal"
+                          min="0"
+                          onChange={(event) => setPlanForm((current) => ({
+                            ...current,
+                            subsidies: current.subsidies.map((item) =>
+                              item.id === subsidy.id
+                                ? { ...item, amount: event.target.value }
+                                : item,
+                            ),
+                          }))}
+                          placeholder="例如：500.00"
+                          required
+                          step="0.000001"
+                          type="number"
+                          value={subsidy.amount}
+                        />
+                      </label>
+                      <Button
+                        aria-label={`删除第 ${index + 1} 项补贴`}
+                        onClick={() => setPlanForm((current) => ({
+                          ...current,
+                          subsidies: current.subsidies.filter((item) => item.id !== subsidy.id),
+                        }))}
+                        size="compact"
+                        type="button"
+                        variant="ghost"
+                      >
+                        删除
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="salary-subsidy-empty">暂未配置补贴；基础工资计算不受影响。</p>
+              )}
+            </section>
             <label className="flex min-h-11 items-center gap-3 rounded-xl bg-[var(--surface-subtle)] px-3 text-sm">
               <input checked={planForm.pendingReviewCountsInEstimate} onChange={(event) => setPlanForm({ ...planForm, pendingReviewCountsInEstimate: event.target.checked })} type="checkbox" />
               待审核工时计入预估
@@ -8598,6 +9092,8 @@ export function PayrollPage({ me }: { me: Me }) {
     };
   }, [chartPalette, payroll.data?.livePreview]);
   const livePreview = payroll.data?.livePreview ?? null;
+  const salarySubsidies = livePreview?.subsidies ?? [];
+  const salarySubsidyTotal = livePreview?.subsidyTotal ?? "0";
   const activeSalaryWeeks = (livePreview?.weeklyBreakdown ?? []).filter(
     (week) =>
       week.approvedSeconds +
@@ -8610,6 +9106,23 @@ export function PayrollPage({ me }: { me: Me }) {
     (day) => day.workedSeconds + day.bonusSeconds > 0,
   );
   const monthEndForecast = livePreview?.salaryTimeline.at(-1) ?? null;
+  const forecastDays = livePreview?.salaryTimeline.filter(
+    (day) => day.forecast,
+  ) ?? [];
+  const forecastConfidence = forecastDays.some(
+    (day) => day.forecastConfidence === "high",
+  )
+    ? "较高"
+    : forecastDays.some((day) => day.forecastConfidence === "medium")
+      ? "中等"
+      : "谨慎";
+  const projectedIncrement = livePreview
+    ? Math.max(
+        0,
+        Number(livePreview.projectedPeriodAmount) -
+          Number(livePreview.estimatedAmount),
+      )
+    : 0;
   return (
     <>
       <PageHeader
@@ -8622,6 +9135,7 @@ export function PayrollPage({ me }: { me: Me }) {
           <Card><CardContent><StatusLine label={livePreview.currentWeek ? `本周已记录工时 · ${payrollWeekRangeLabel(livePreview.currentWeek)}` : "本周已记录工时"} value={formatDuration(livePreview.currentWeek?.totalSeconds ?? 0)} /><p className="mt-1 text-xs text-[var(--text-muted)]">已批准 {formatDuration(livePreview.currentWeek?.approvedSeconds ?? 0)}{livePreview.currentWeek?.pendingSeconds ? ` · 待审核 ${formatDuration(livePreview.currentWeek.pendingSeconds)}` : ""}</p></CardContent></Card>
           <Card><CardContent><StatusLine label="本月总工时" value={formatDuration(livePreview.approvedSeconds + livePreview.pendingSeconds)} /><p className="mt-1 text-xs text-[var(--text-muted)]">已批准 {formatDuration(livePreview.approvedSeconds)}{livePreview.pendingSeconds ? ` · 待审核 ${formatDuration(livePreview.pendingSeconds)}` : ""}</p></CardContent></Card>
           <Card><CardContent><StatusLine label={livePreview.weeklyBonusEstimatedSeconds ? "周奖励工时（含预估）" : "周奖励工时"} value={formatDuration(livePreview.weeklyBonusSeconds + livePreview.weeklyBonusEstimatedSeconds)} /><p className="mt-1 text-xs text-[var(--text-muted)]">已确认 {formatDuration(livePreview.weeklyBonusSeconds)}{livePreview.weeklyBonusEstimatedSeconds ? ` · 待审核预估 ${formatDuration(livePreview.weeklyBonusEstimatedSeconds)}` : ""}</p></CardContent></Card>
+          {salarySubsidies.length ? <Card><CardContent><StatusLine label={`${salarySubsidies.length} 项固定补贴`} value={money(livePreview.currency, salarySubsidyTotal)} /><p className="mt-1 break-words text-xs text-[var(--text-muted)]">{salarySubsidies.map((item) => `${item.name} ${money(livePreview.currency, item.amount)}`).join(" · ")}</p></CardContent></Card> : null}
           <Card><CardContent><StatusLine label="本月实时预估" value={money(livePreview.currency, livePreview.estimatedAmount)} /></CardContent></Card>
           <Card><CardContent><StatusLine label="月末趋势预测" value={money(livePreview.currency, livePreview.projectedPeriodAmount)} />{monthEndForecast ? <p className="mt-1 text-xs text-[var(--text-muted)]">合理区间 {money(livePreview.currency, monthEndForecast.projectedLowerCumulativeAmount)} – {money(livePreview.currency, monthEndForecast.projectedUpperCumulativeAmount)}{livePreview.projectedWeeklyBonusSeconds ? ` · 另预计奖励 ${formatDuration(livePreview.projectedWeeklyBonusSeconds)}` : ""}</p> : null}</CardContent></Card>
           <Card><CardContent><StatusLine label="预计发薪" value={formatDateTime(livePreview.period.cutoffAt)} /></CardContent></Card>
@@ -8641,6 +9155,11 @@ export function PayrollPage({ me }: { me: Me }) {
               {` + ${money(livePreview.currency, livePreview.calculationBreakdown.estimatedBonusAmount)} 待审核奖励预估`}
               {` = ${money(livePreview.currency, livePreview.estimatedAmount)}`}
             </p>
+            {salarySubsidies.length ? (
+              <p className="mt-2 text-xs leading-5 text-[var(--text-muted)]">
+                上述已批准工作计薪中包含固定补贴 {money(livePreview.currency, salarySubsidyTotal)}：{salarySubsidies.map((item) => `${item.name} ${money(livePreview.currency, item.amount)}`).join("、")}。补贴随方案版本留痕，正式结算时按版本生效区间折算。
+              </p>
+            ) : null}
             {(livePreview.planType === "hourly" || livePreview.planType === "hybrid") ? (
               <p className="mt-2 text-xs leading-5 text-[var(--text-muted)]">
                 工作计薪以 {money(livePreview.currency, livePreview.baseAmount)} / 小时 × 本月有效工时为基础；若启用了周末、节假日、夜间或超时倍率，上述金额已经逐段包含对应倍率。
@@ -8654,23 +9173,29 @@ export function PayrollPage({ me }: { me: Me }) {
           </CardContent>
         </Card>
       ) : null}
-      {!isPayrollManager && payroll.data?.livePreview?.salaryTimeline?.length ? (
+      {!isPayrollManager && livePreview && livePreview.salaryTimeline.length ? (
         <section className="mb-4" aria-label="实时薪资与预测图表">
           <Card className="analytics-chart-card salary-forecast-unified-card">
             <CardHeader><div><p className="app-page-kicker">本月趋势</p><h2 className="mt-1 font-bold">每日工时、薪资与月末预测</h2></div><Badge tone="warning">事实与预测分开展示</Badge></CardHeader>
             <CardContent>
+              <div className="salary-forecast-summary" aria-label="预测摘要">
+                <div><span>当前已发生</span><strong>{money(livePreview.currency, livePreview.estimatedAmount)}</strong></div>
+                <div><span>预计剩余增长</span><strong>+{money(livePreview.currency, String(projectedIncrement))}</strong></div>
+                <div><span>月末预测</span><strong>{money(livePreview.currency, livePreview.projectedPeriodAmount)}</strong></div>
+                <div><span>模型可信度</span><strong>{forecastConfidence}</strong><small>{livePreview.projection.historyWindowDays} 天滚动历史 · 截至 {livePreview.projection.trainedThrough ?? "暂无历史"}</small></div>
+              </div>
               <div className="salary-forecast-grid">
                 <section className="salary-forecast-panel" aria-label="每日薪资与工时图表">
-                  <div><strong>每日薪资与工时</strong><small>柱形看日薪，折线看有效与奖励工时</small></div>
+                  <div className="salary-forecast-panel-head"><span><strong>01 · 每日投入与回报</strong><small>柱形比较日薪构成，折线对照有效工时；左右轴分离</small></span><Badge>日度</Badge></div>
                   <AnalyticsChart ariaLabel="本月每日薪资、工时、累计金额与未来预测" option={liveDailyOption} />
                 </section>
                 <section className="salary-forecast-panel" aria-label="累计薪资与月末预测图表">
-                  <div><strong>累计薪资与月末预测</strong><small>实线为已发生事实，虚线与色带为未来范围</small></div>
+                  <div className="salary-forecast-panel-head"><span><strong>02 · 月末预测路径</strong><small>事实截至今天；后续虚线来自 84 天滚动历史，色带表示 90% 区间</small></span><Badge tone="warning">预测</Badge></div>
                   <AnalyticsChart ariaLabel="本月薪资累计与未来预测" option={liveForecastOption} />
                 </section>
               </div>
               <p className="salary-forecast-note">
-                左图用于比较每天投入与对应日薪，右图专注累计事实、趋势预测与 90% 区间；点击图例可单独显隐，悬停可查看完整口径。模型自适应组合星期规律、工作日/周末、指数平滑和稳健趋势，并用最近 {livePreview?.projection.validationPoints ?? 0} 个历史日做滚动回测与区间校准；已录入的未来记录和周奖励单独精确计算。样本 {livePreview?.projection.sampleDays ?? 0} 天（有工时 {livePreview?.projection.nonZeroSampleDays ?? 0} 天），预测 {livePreview?.projection.horizonDays ?? 0} 天{livePreview?.projection.validationWape !== null && livePreview?.projection.validationWape !== undefined ? ` · 回测加权误差 ${(livePreview.projection.validationWape * 100).toFixed(1)}%` : ""}。
+                两张图均可点击图例显隐并在触屏上横向缩放。预测现在使用跨月滚动历史，不再因月初本月样本不足而失效；模型组合星期规律、工作日/周末、指数平滑和稳健趋势，并用最近 {livePreview?.projection.validationPoints ?? 0} 个历史日回测校准。有效样本 {livePreview?.projection.sampleDays ?? 0} 天（有工时 {livePreview?.projection.nonZeroSampleDays ?? 0} 天），预测未来 {livePreview?.projection.horizonDays ?? 0} 天{livePreview?.projection.validationWape !== null && livePreview?.projection.validationWape !== undefined ? ` · 回测加权误差 ${(livePreview.projection.validationWape * 100).toFixed(1)}%` : ""}；已录入未来记录与周奖励仍按确定数据单独计算。
               </p>
             </CardContent>
           </Card>

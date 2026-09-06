@@ -34,6 +34,10 @@ const planSchema = z.object({
   currency: z.string().trim().toUpperCase().regex(/^[A-Z]{3}$/).default("CNY"),
   baseAmount: money,
   fixedAmount: money.optional(),
+  subsidies: z.array(z.object({
+    name: z.string().trim().min(1, "补贴名称不能为空。").max(60),
+    amount: money,
+  })).max(20, "每份薪资方案最多配置 20 项补贴。").default([]),
   effectiveFrom: z.iso.datetime({ offset: true }).transform((value) => new Date(value)),
   pendingReviewCountsInEstimate: z.boolean().default(true),
   rules: z.array(rateRuleSchema).max(32).default([]),

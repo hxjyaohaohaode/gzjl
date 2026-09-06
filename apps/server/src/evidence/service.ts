@@ -840,6 +840,106 @@ export class EvidenceService {
     }).from(attachmentVersions).where(eq(attachmentVersions.attachmentId, attachmentId)).orderBy(attachmentVersions.version);
   }
 
+  async update(
+    actor: AuthContext,
+    attachmentId: string,
+    input: {
+      expectedVersion: number;
+      visibility?: EvidenceVisibility | undefined;
+      note?: string | null | undefined;
+      externalUrl?: string | undefined;
+      textContent?: string | undefined;
+    },
+  ) {
+    const row = await this.linkedAttachment(actor, attachmentId);
+    if (
+      row.attachment.uploadedBy !== actor.membershipId &&
+      !this.canManage(actor)
+    ) {
+      throw new EvidenceForbiddenError();
+    }
+    if (row.attachment.version !== input.expectedVersion) {
+      throw new EvidenceValidationError(
+        "证据刚刚被其他设备更新，请刷新后重新编辑。",
+      );
+    }
+    if (input.externalUrl !== undefined && row.attachment.kind !== "url") {
+      throw new EvidenceValidationError("只有链接证据可以修改链接地址。");
+    }
+    if (input.textContent !== undefined && row.attachment.kind !== "text") {
+      throw new EvidenceValidationError("只有文字证据可以修改文字内容。");
+    }
+    return this.db.transaction(async (tx) => {
+      await tx.insert(attachmentVersions).values({
+        attachmentId,
+        version: row.attachment.version,
+        snapshot: row.attachment,
+        objectKey: row.attachment.objectKey,
+        sha256: row.attachment.sha256,
+        replacedBy: actor.membershipId,
+        reason: "在工作记录编辑器中修改证据信息",
+      });
+      const [updated] = await tx
+        .update(attachments)
+        .set({
+          visibility: input.visibility,
+          note:
+            input.note === undefined
+              ? undefined
+              : input.note?.trim() || null,
+          externalUrl:
+            input.externalUrl === undefined
+              ? undefined
+              : input.externalUrl.trim(),
+          textContent:
+            input.textContent === undefined
+              ? undefined
+              : input.textContent.trim(),
+          version: row.attachment.version + 1,
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(attachments.id, attachmentId),
+            eq(attachments.version, input.expectedVersion),
+            isNull(attachments.deletedAt),
+          ),
+        )
+        .returning();
+      if (!updated) {
+        throw new EvidenceValidationError(
+          "证据刚刚被其他设备更新，请刷新后重新编辑。",
+        );
+      }
+      await tx.insert(auditLogs).values({
+        organizationId: actor.organizationId,
+        actorMembershipId: actor.membershipId,
+        action: "evidence.updated",
+        entityType: "attachment",
+        entityId: attachmentId,
+        before: {
+          version: row.attachment.version,
+          visibility: row.attachment.visibility,
+          note: row.attachment.note,
+        },
+        after: {
+          version: updated.version,
+          visibility: updated.visibility,
+          note: updated.note,
+        },
+      });
+      await tx.insert(outboxEvents).values({
+        organizationId: actor.organizationId,
+        eventType: "evidence.changed",
+        entityType: "work_session",
+        entityId: row.link.entityId,
+        entityVersion: updated.version,
+        payload: { change: "updated", attachmentId },
+      });
+      return updated;
+    });
+  }
+
   async remove(actor: AuthContext, attachmentId: string, reason: string) {
     const row = await this.linkedAttachment(actor, attachmentId);
     if (row.attachment.uploadedBy !== actor.membershipId && !this.canManage(actor)) throw new EvidenceForbiddenError();

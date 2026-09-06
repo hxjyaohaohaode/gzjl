@@ -34,6 +34,22 @@ const replacementInput = fileInput.extend({
 const deleteInput = z.object({
   reason: z.string().trim().min(1).max(1_000),
 });
+const updateInput = z
+  .object({
+    expectedVersion: z.number().int().positive(),
+    visibility: visibility.optional(),
+    note: z.string().trim().max(2_000).nullable().optional(),
+    externalUrl: z.url().max(2_048).optional(),
+    textContent: z.string().trim().min(1).max(20_000).optional(),
+  })
+  .refine(
+    ({ visibility: nextVisibility, note, externalUrl, textContent }) =>
+      nextVisibility !== undefined ||
+      note !== undefined ||
+      externalUrl !== undefined ||
+      textContent !== undefined,
+    { message: "至少需要修改一个证据字段。" },
+  );
 const referenceInput = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("url"),
@@ -139,6 +155,25 @@ export async function registerEvidenceRoutes(
         return reply.code(201).send(
           await service.createReference(request.auth!, sessionId, referenceInput.parse(request.body)),
         );
+      } catch (error) {
+        return mapEvidenceError(error, reply);
+      }
+    },
+  );
+
+  app.patch(
+    "/api/attachments/:attachmentId",
+    { preHandler: [app.csrfProtection, authenticate] },
+    async (request, reply) => {
+      try {
+        const { attachmentId } = attachmentParams.parse(request.params);
+        return {
+          attachment: await service.update(
+            request.auth!,
+            attachmentId,
+            updateInput.parse(request.body),
+          ),
+        };
       } catch (error) {
         return mapEvidenceError(error, reply);
       }

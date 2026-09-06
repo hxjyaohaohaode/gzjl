@@ -128,6 +128,26 @@ describe("employee payroll view and receipt acknowledgement", () => {
       approvalStatus: "approved",
       visibility: "management_only",
     });
+    await db.insert(workSessions).values(
+      Array.from({ length: 10 }, (_, index) => {
+        const startAt = new Date(`2026-08-${String(15 + index).padStart(2, "0")}T01:00:00.000Z`);
+        return {
+          organizationId: organization!.id,
+          membershipId: membership!.id,
+          startAt,
+          endAt: new Date(startAt.getTime() + 3_600_000),
+          timezone: "Asia/Shanghai",
+          grossSeconds: 3_600,
+          netSeconds: 3_600,
+          source: "manual" as const,
+          content: "跨月预测训练样本",
+          result: "完成",
+          submissionStatus: "submitted" as const,
+          approvalStatus: "approved" as const,
+          visibility: "management_only" as const,
+        };
+      }),
+    );
 
     const [period] = await db
       .insert(payPeriods)
@@ -183,7 +203,12 @@ describe("employee payroll view and receipt acknowledgement", () => {
       currency: "CNY",
       approvedSeconds: 3_600,
       estimatedAmount: "100.000000",
+      projection: {
+        method: "adaptive_weekday_backtest_v3",
+        nonZeroSampleDays: 10,
+      },
     });
+    expect(Number(before.livePreview?.projectedPeriodAmount)).toBeGreaterThan(100);
     const ownerOverview = await service.managementOverview(ownerActor);
     expect(ownerOverview.liveItems).toHaveLength(1);
     expect(ownerOverview.liveItems[0]).toMatchObject({
@@ -595,5 +620,90 @@ describe("employee payroll view and receipt acknowledgement", () => {
       .from(payrollItemComponents)
       .where(eq(payrollItemComponents.payrollItemId, item!.id));
     expect(components.filter((component) => component.type === "bonus")).toHaveLength(1);
+  });
+
+  it("versions multiple owner-configured subsidies and includes them in formal settlement", async () => {
+    const db = await createTestDatabase();
+    const [organization] = await db.insert(organizations).values({
+      name: "多补贴结算测试",
+      timezone: "UTC",
+      payrollCutoffDay: 10,
+    }).returning();
+    const [ownerUser, employeeUser] = await db.insert(users).values([
+      { displayName: "Owner" },
+      { displayName: "员工" },
+    ]).returning();
+    const [ownerMembership, employeeMembership] = await db.insert(orgMemberships).values([
+      {
+        organizationId: organization!.id,
+        userId: ownerUser!.id,
+        status: "active",
+        joinedAt: new Date("2025-01-01T00:00:00.000Z"),
+      },
+      {
+        organizationId: organization!.id,
+        userId: employeeUser!.id,
+        status: "active",
+        joinedAt: new Date("2025-01-01T00:00:00.000Z"),
+      },
+    ]).returning();
+    await db.insert(organizationOwners).values({
+      organizationId: organization!.id,
+      membershipId: ownerMembership!.id,
+    });
+    const ownerActor = {
+      organizationId: organization!.id,
+      membershipId: ownerMembership!.id,
+    };
+    const service = new PayrollService(db);
+    const configured = await service.configurePlan(ownerActor, {
+      membershipId: employeeMembership!.id,
+      name: "时薪与固定补贴",
+      type: "hourly",
+      currency: "CNY",
+      baseAmount: "100",
+      subsidies: [
+        { name: "交通补贴", amount: "500" },
+        { name: "通信补贴", amount: "300" },
+      ],
+      effectiveFrom: new Date("2026-09-01T00:00:00.000Z"),
+      pendingReviewCountsInEstimate: true,
+      rules: [],
+    });
+    expect(configured.version.config).toEqual({
+      subsidies: [
+        { name: "交通补贴", amount: "500" },
+        { name: "通信补贴", amount: "300" },
+      ],
+    });
+
+    const [period] = await db.insert(payPeriods).values({
+      organizationId: organization!.id,
+      name: "2026 年 9 月",
+      timezone: "UTC",
+      startsAt: new Date("2026-09-01T00:00:00.000Z"),
+      endsAt: new Date("2026-10-01T00:00:00.000Z"),
+      cutoffAt: new Date("2026-10-10T10:00:00.000Z"),
+    }).returning();
+    const run = await service.calculate(ownerActor, period!.id);
+    const [item] = await db.select().from(payrollItems).where(
+      eq(payrollItems.payrollRunId, run.id),
+    );
+    expect(item).toMatchObject({
+      grossAmount: "800.000000",
+      finalAmount: "800.000000",
+      estimate: false,
+    });
+    const components = await db.select().from(payrollItemComponents).where(
+      eq(payrollItemComponents.payrollItemId, item!.id),
+    );
+    expect(
+      components
+        .filter((component) => component.type === "allowance")
+        .map((component) => ({ label: component.label, amount: component.amount })),
+    ).toEqual([
+      { label: "交通补贴", amount: "500.000000" },
+      { label: "通信补贴", amount: "300.000000" },
+    ]);
   });
 });

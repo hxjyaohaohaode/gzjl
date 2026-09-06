@@ -6,6 +6,10 @@ import {
   auditLogs,
   approvalActions,
   approvalRequests,
+  projectActivityLog,
+  projectMembers,
+  projectNodeAssignees,
+  projectNodeVersions,
   projectNodes,
   projects,
   orgMemberships,
@@ -46,8 +50,10 @@ export class WorkSessionVersionConflictError extends Error {
 }
 
 export class WorkSessionEvidenceRequiredError extends Error {
-  constructor() {
-    super("提交审核前必须至少提供一项审核人可见且已完成核验的证据。可上传任意格式文件，或添加链接/文字证据。");
+  constructor(
+    message = "提交审核前必须至少提供一项审核人可见且已完成核验的证据。可上传任意格式文件，或添加链接/文字证据。",
+  ) {
+    super(message);
     this.name = "WorkSessionEvidenceRequiredError";
   }
 }
@@ -74,6 +80,27 @@ export interface WorkSessionListOptions {
 
 const maximumPlanHorizonMs = 366 * 86_400_000;
 const factualFutureGraceMs = 5 * 60_000;
+
+function normalizedRecommendationText(value: string): string {
+  return value
+    .normalize("NFKC")
+    .toLocaleLowerCase("zh-CN")
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim();
+}
+
+function recommendationTokens(value: string): string[] {
+  const words = normalizedRecommendationText(value)
+    .split(/\s+/u)
+    .filter((word) => word.length > 1);
+  const grams = words.flatMap((word) => {
+    if (!/[\p{Script=Han}]/u.test(word) || word.length < 4) return [];
+    return Array.from({ length: word.length - 1 }, (_, index) =>
+      word.slice(index, index + 2),
+    );
+  });
+  return [...new Set([...words, ...grams])].slice(0, 48);
+}
 
 function isPlanRecord(value: string): value is "plan" {
   return value === "plan";
@@ -102,10 +129,260 @@ function assertPlanWindow(startAt: Date, endAt: Date): void {
 }
 
 /** The subset shared by the root Drizzle client and a transaction client. */
-export type WorkExecutor = Pick<Database, "select" | "insert">;
+export type WorkExecutor = Pick<Database, "select" | "insert" | "update">;
 
 export class WorkSessionService {
   constructor(private readonly db: Database) {}
+
+  async recommendProjectNodes(
+    actor: WorkActor,
+    query: string,
+    limit: number,
+  ) {
+    const candidates = await this.db
+      .select({
+        id: projectNodes.id,
+        projectId: projects.id,
+        projectKey: projects.key,
+        projectName: projects.name,
+        projectColor: projects.color,
+        title: projectNodes.title,
+        description: projectNodes.description,
+        type: projectNodes.type,
+        status: projectNodes.status,
+        progress: projectNodes.progress,
+        progressMode: projectNodes.progressMode,
+        updatedAt: projectNodes.updatedAt,
+      })
+      .from(projectNodes)
+      .innerJoin(projects, eq(projects.id, projectNodes.projectId))
+      .innerJoin(
+        projectMembers,
+        and(
+          eq(projectMembers.projectId, projects.id),
+          eq(projectMembers.membershipId, actor.membershipId),
+          isNull(projectMembers.leftAt),
+        ),
+      )
+      .where(
+        and(
+          eq(projects.organizationId, actor.organizationId),
+          ne(projects.status, "archived"),
+          isNull(projects.deletedAt),
+          isNull(projectNodes.deletedAt),
+          ne(projectNodes.status, "cancelled"),
+        ),
+      )
+      .orderBy(desc(projectNodes.updatedAt))
+      .limit(1_000);
+    if (!candidates.length) return [];
+    const nodeIds = candidates.map((candidate) => candidate.id);
+    const [recentLinks, assignments] = await Promise.all([
+      this.db
+        .select({ nodeId: workSessionProjectLinks.projectNodeId })
+        .from(workSessionProjectLinks)
+        .innerJoin(
+          workSessions,
+          eq(workSessions.id, workSessionProjectLinks.workSessionId),
+        )
+        .where(
+          and(
+            eq(workSessions.organizationId, actor.organizationId),
+            eq(workSessions.membershipId, actor.membershipId),
+            eq(workSessions.recordKind, "fact"),
+            isNull(workSessions.deletedAt),
+            inArray(workSessionProjectLinks.projectNodeId, nodeIds),
+          ),
+        )
+        .orderBy(desc(workSessions.startAt))
+        .limit(200),
+      this.db
+        .select({ nodeId: projectNodeAssignees.nodeId })
+        .from(projectNodeAssignees)
+        .where(
+          and(
+            eq(projectNodeAssignees.membershipId, actor.membershipId),
+            inArray(projectNodeAssignees.nodeId, nodeIds),
+          ),
+        ),
+    ]);
+    const recentCounts = new Map<string, number>();
+    recentLinks.forEach(({ nodeId }) =>
+      recentCounts.set(nodeId, (recentCounts.get(nodeId) ?? 0) + 1),
+    );
+    const assignedIds = new Set(assignments.map(({ nodeId }) => nodeId));
+    const normalizedQuery = normalizedRecommendationText(query);
+    const tokens = recommendationTokens(query);
+    return candidates
+      .map((candidate) => {
+        const title = normalizedRecommendationText(candidate.title);
+        const description = normalizedRecommendationText(
+          candidate.description ?? "",
+        );
+        const project = normalizedRecommendationText(
+          `${candidate.projectKey} ${candidate.projectName}`,
+        );
+        const recentCount = recentCounts.get(candidate.id) ?? 0;
+        const assigned = assignedIds.has(candidate.id);
+        let score = Math.min(24, recentCount * 4) + (assigned ? 18 : 0);
+        if (candidate.status === "in_progress") score += 10;
+        if (normalizedQuery.length > 1 && title.includes(normalizedQuery)) {
+          score += 100;
+        }
+        for (const token of tokens) {
+          if (title.includes(token)) score += 22;
+          else if (description.includes(token)) score += 9;
+          else if (project.includes(token)) score += 7;
+        }
+        const reasons = [
+          score >= 70 ? "内容高度匹配" : score >= 25 ? "内容相关" : null,
+          assigned ? "分配给你" : null,
+          recentCount ? "最近使用" : null,
+          candidate.status === "in_progress" ? "正在推进" : null,
+        ].filter((reason): reason is string => Boolean(reason));
+        return { ...candidate, score, reasons: reasons.slice(0, 3) };
+      })
+      .filter((candidate) =>
+        normalizedQuery.length > 1
+          ? candidate.score > 0
+          : candidate.score >= 10,
+      )
+      .sort(
+        (left, right) =>
+          right.score - left.score ||
+          right.updatedAt.getTime() - left.updatedAt.getTime(),
+      )
+      .slice(0, limit);
+  }
+
+  private async applyReportedProgress(
+    db: WorkExecutor,
+    actor: WorkActor,
+    sessionId: string,
+    projectNodeId: string | null,
+    reportedProgress: number | null,
+    recordKind: WorkRecordKind,
+  ): Promise<void> {
+    if (
+      recordKind !== "fact" ||
+      projectNodeId === null ||
+      reportedProgress === null
+    ) {
+      return;
+    }
+    const before = await db
+      .select()
+      .from(projectNodes)
+      .innerJoin(projects, eq(projects.id, projectNodes.projectId))
+      .innerJoin(
+        projectMembers,
+        and(
+          eq(projectMembers.projectId, projects.id),
+          eq(projectMembers.membershipId, actor.membershipId),
+          isNull(projectMembers.leftAt),
+        ),
+      )
+      .where(
+        and(
+          eq(projectNodes.id, projectNodeId),
+          eq(projects.organizationId, actor.organizationId),
+          isNull(projectNodes.deletedAt),
+          isNull(projects.deletedAt),
+        ),
+      )
+      .limit(1)
+      .then((rows) => rows[0]?.project_nodes);
+    if (!before) {
+      throw new WorkSessionValidationError(
+        "主项目节点不存在、已删除或你尚未加入该项目。",
+      );
+    }
+    if (before.progressMode !== "manual") {
+      throw new WorkSessionValidationError(
+        "该节点使用自动汇总进度，不能由工作记录直接填写完成度；请选择其手动进度子节点。",
+      );
+    }
+    const nextProgress = reportedProgress.toFixed(2);
+    const nextStatus =
+      reportedProgress >= 100
+        ? "completed"
+        : reportedProgress > 0 &&
+            before.status !== "blocked" &&
+            before.status !== "in_review"
+          ? "in_progress"
+          : before.status;
+    if (
+      Number(before.progress) === reportedProgress &&
+      before.status === nextStatus
+    ) {
+      return;
+    }
+    const [updated] = await db
+      .update(projectNodes)
+      .set({
+        progress: nextProgress,
+        status: nextStatus,
+        version: before.version + 1,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(projectNodes.id, before.id),
+          eq(projectNodes.version, before.version),
+          isNull(projectNodes.deletedAt),
+        ),
+      )
+      .returning();
+    if (!updated) {
+      throw new WorkSessionVersionConflictError();
+    }
+    await db.insert(projectNodeVersions).values({
+      nodeId: updated.id,
+      version: updated.version,
+      snapshot: updated,
+      changeSummary: `工作记录完成度同步：${reportedProgress}%`,
+      createdBy: actor.membershipId,
+    });
+    await db.insert(projectActivityLog).values({
+      projectId: updated.projectId,
+      actorMembershipId: actor.membershipId,
+      activityType: "updated",
+      entityType: "project_node",
+      entityId: updated.id,
+      entityVersion: updated.version,
+      details: {
+        source: "work_session_progress_report",
+        workSessionId: sessionId,
+        beforeProgress: before.progress,
+        afterProgress: updated.progress,
+      },
+    });
+    await db.insert(auditLogs).values({
+      organizationId: actor.organizationId,
+      actorMembershipId: actor.membershipId,
+      action: "project.node_progress_reported_from_work",
+      entityType: "project_node",
+      entityId: updated.id,
+      before: { progress: before.progress, status: before.status },
+      after: {
+        progress: updated.progress,
+        status: updated.status,
+        workSessionId: sessionId,
+      },
+    });
+    await db.insert(outboxEvents).values({
+      organizationId: actor.organizationId,
+      eventType: "project.changed",
+      entityType: "project_node",
+      entityId: updated.id,
+      entityVersion: updated.version,
+      payload: {
+        change: "progress_reported_from_work",
+        projectId: updated.projectId,
+        workSessionId: sessionId,
+      },
+    });
+  }
 
   async createManual(
     actor: WorkActor,
@@ -361,15 +638,25 @@ export class WorkSessionService {
         ]),
       );
       const primaryProjectNodeId = input.primaryProjectNodeId ?? null;
+      const reportedProgress = input.reportedProgress ?? null;
       const linkedNodes = linkedNodeIds.length
         ? await tx
             .select({
               id: projectNodes.id,
               projectId: projectNodes.projectId,
               branchId: projectNodes.branchId,
+              progressMode: projectNodes.progressMode,
             })
             .from(projectNodes)
             .innerJoin(projects, eq(projects.id, projectNodes.projectId))
+            .innerJoin(
+              projectMembers,
+              and(
+                eq(projectMembers.projectId, projects.id),
+                eq(projectMembers.membershipId, actor.membershipId),
+                isNull(projectMembers.leftAt),
+              ),
+            )
             .where(
               and(
                 inArray(projectNodes.id, linkedNodeIds),
@@ -468,11 +755,27 @@ export class WorkSessionService {
           projectBranchId: node.branchId,
           isPrimary: node.id === primaryProjectNodeId,
           allocationBasisPoints: node.id === primaryProjectNodeId ? 10_000 : 0,
+          reportedProgress:
+            node.id === primaryProjectNodeId && reportedProgress !== null
+              ? reportedProgress.toFixed(2)
+              : null,
+          progressReportedAt:
+            node.id === primaryProjectNodeId && reportedProgress !== null
+              ? now
+              : null,
         };
       });
       if (projectLinks.length > 0) {
         await tx.insert(workSessionProjectLinks).values(projectLinks);
       }
+      await this.applyReportedProgress(
+        tx,
+        actor,
+        sessionId,
+        primaryProjectNodeId,
+        reportedProgress,
+        recordKind,
+      );
       const snapshot = { ...updated, breaks, projectLinks };
       await tx.insert(workSessionVersions).values({
         workSessionId: sessionId,
@@ -585,15 +888,25 @@ export class WorkSessionService {
       ]),
     );
     const primaryProjectNodeId = input.primaryProjectNodeId ?? null;
+    const reportedProgress = input.reportedProgress ?? null;
     const linkedNodes = linkedNodeIds.length
       ? await db
-          .select({
-            id: projectNodes.id,
-            projectId: projectNodes.projectId,
-            branchId: projectNodes.branchId,
-          })
-          .from(projectNodes)
-          .innerJoin(projects, eq(projects.id, projectNodes.projectId))
+        .select({
+          id: projectNodes.id,
+          projectId: projectNodes.projectId,
+          branchId: projectNodes.branchId,
+          progressMode: projectNodes.progressMode,
+        })
+        .from(projectNodes)
+        .innerJoin(projects, eq(projects.id, projectNodes.projectId))
+        .innerJoin(
+          projectMembers,
+          and(
+            eq(projectMembers.projectId, projects.id),
+            eq(projectMembers.membershipId, actor.membershipId),
+            isNull(projectMembers.leftAt),
+          ),
+        )
           .where(
             and(
               inArray(projectNodes.id, linkedNodeIds),
@@ -671,11 +984,27 @@ export class WorkSessionService {
         projectBranchId: node.branchId,
         isPrimary: node.id === primaryProjectNodeId,
         allocationBasisPoints: node.id === primaryProjectNodeId ? 10_000 : 0,
+        reportedProgress:
+          node.id === primaryProjectNodeId && reportedProgress !== null
+            ? reportedProgress.toFixed(2)
+            : null,
+        progressReportedAt:
+          node.id === primaryProjectNodeId && reportedProgress !== null
+            ? new Date()
+            : null,
       };
     });
     if (projectLinks.length > 0) {
       await db.insert(workSessionProjectLinks).values(projectLinks);
     }
+    await this.applyReportedProgress(
+      db,
+      actor,
+      session.id,
+      primaryProjectNodeId,
+      reportedProgress,
+      recordKind,
+    );
     const snapshot = { ...session, breaks, projectLinks };
     await db.insert(workSessionVersions).values({
       workSessionId: session.id,
@@ -739,6 +1068,8 @@ export class WorkSessionService {
           projectBranchId: workSessionProjectLinks.projectBranchId,
           isPrimary: workSessionProjectLinks.isPrimary,
           allocationBasisPoints: workSessionProjectLinks.allocationBasisPoints,
+          reportedProgress: workSessionProjectLinks.reportedProgress,
+          progressReportedAt: workSessionProjectLinks.progressReportedAt,
           projectNodeTitle: projectNodes.title,
         })
         .from(workSessionProjectLinks)
@@ -1082,8 +1413,13 @@ export class WorkSessionService {
 
   async submit(actor: WorkActor, sessionId: string, expectedVersion: number) {
     return this.db.transaction(async (tx) => {
-      const [reviewableEvidence] = await tx
-        .select({ id: attachments.id })
+      const evidence = await tx
+        .select({
+          id: attachments.id,
+          kind: attachments.kind,
+          status: attachments.status,
+          visibility: attachments.visibility,
+        })
         .from(attachmentLinks)
         .innerJoin(attachments, eq(attachments.id, attachmentLinks.attachmentId))
         .where(
@@ -1091,13 +1427,30 @@ export class WorkSessionService {
             eq(attachmentLinks.entityType, "work_session"),
             eq(attachmentLinks.entityId, sessionId),
             eq(attachments.organizationId, actor.organizationId),
-            eq(attachments.status, "available"),
-            inArray(attachments.visibility, ["management_only", "project_visible"]),
             isNull(attachments.deletedAt),
           ),
-        )
-        .limit(1);
-      if (!reviewableEvidence) throw new WorkSessionEvidenceRequiredError();
+        );
+      const reviewableEvidence = evidence.find(
+        (item) =>
+          item.status === "available" &&
+          item.visibility !== "private",
+      );
+      if (!reviewableEvidence) {
+        const message = !evidence.length
+          ? "当前记录没有已上传证据。只在浏览器中选择文件并不等于上传完成，请等待文件显示“内容已核验”，或添加链接/文字证据。"
+          : evidence.some((item) => item.status === "pending_upload")
+            ? "文件内容仍在上传或服务端完整性核验中，请等待状态变为“内容已核验”后再提交审核。"
+            : evidence.some((item) => item.status === "quarantined")
+              ? "已提交的文件未通过大小或 SHA-256 内容核验，请替换该文件后再提交审核。"
+              : evidence.some(
+                    (item) =>
+                      item.status === "available" &&
+                      item.visibility === "private",
+                  )
+                ? "证据已经保存，但当前仅本人可见。请把证据可见范围改为“审核与管理”或“关联项目”后再提交。"
+                : "当前记录没有审核人可见且已完成内容核验的证据。请检查上传状态和可见范围。";
+        throw new WorkSessionEvidenceRequiredError(message);
+      }
       const [updated] = await tx
         .update(workSessions)
         .set({

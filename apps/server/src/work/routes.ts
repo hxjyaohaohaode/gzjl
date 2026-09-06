@@ -25,6 +25,10 @@ const listQuerySchema = z.object({
 const versionListQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(30),
 });
+const recommendationQuerySchema = z.object({
+  q: z.string().trim().max(2_000).default(""),
+  limit: z.coerce.number().int().min(1).max(24).default(12),
+});
 const submitParamsSchema = z.object({ sessionId: z.uuid() });
 const submitBodySchema = z.object({ expectedVersion: z.number().int().positive() });
 const updateWorkSessionSchema = z
@@ -52,6 +56,21 @@ export async function registerWorkRoutes(
     scopeKind: "self",
     scopeId: request.auth?.membershipId ?? null,
   }));
+
+  app.get(
+    "/api/work-sessions/project-node-recommendations",
+    { preHandler: [authenticate, ownPermission] },
+    async (request) => {
+      const query = recommendationQuerySchema.parse(request.query);
+      return {
+        items: await service.recommendProjectNodes(
+          request.auth!,
+          query.q,
+          query.limit,
+        ),
+      };
+    },
+  );
 
   app.get(
     "/api/work-sessions",

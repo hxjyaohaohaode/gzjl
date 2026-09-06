@@ -56,6 +56,7 @@ export interface ConfigureCompensationPlanInput {
   effectiveFrom: Date;
   pendingReviewCountsInEstimate: boolean;
   fixedAmount?: string | undefined;
+  subsidies?: Array<{ name: string; amount: string }> | undefined;
   rules: Array<
     | {
         type: "weekly_bonus";
@@ -127,6 +128,19 @@ function splitMicros(value: bigint, count: number): bigint[] {
     const extra = remainder > 0n ? 1n : -1n;
     remainder -= extra;
     return quotient + extra;
+  });
+}
+
+function planSubsidies(config: unknown): Array<{ name: string; amount: string }> {
+  if (!config || typeof config !== "object") return [];
+  const subsidies = (config as Record<string, unknown>).subsidies;
+  if (!Array.isArray(subsidies)) return [];
+  return subsidies.flatMap((item) => {
+    if (!item || typeof item !== "object") return [];
+    const { name, amount } = item as Record<string, unknown>;
+    return typeof name === "string" && typeof amount === "string"
+      ? [{ name, amount }]
+      : [];
   });
 }
 
@@ -397,6 +411,8 @@ export class PayrollService {
   ) {
     const startsAt = zonedMonthBoundary(organization.timezone, 0);
     const endsAt = zonedMonthBoundary(organization.timezone, 1);
+    const now = new Date();
+    const today = localDateKey(now, organization.timezone);
     // A payroll month is a hard reward boundary. A natural week that spans
     // two months is intentionally evaluated as two independent partial weeks
     // (for example Sep 28-30 and Oct 1-4).
@@ -443,6 +459,56 @@ export class PayrollService {
       weeklyContextIntervals,
       startsAt,
       endsAt,
+    );
+    const forecastHistoryStartsAt = new Date(
+      now.getTime() - 84 * 86_400_000,
+    );
+    const historicalSessions = await this.db
+      .select()
+      .from(workSessions)
+      .where(
+        and(
+          eq(workSessions.organizationId, actor.organizationId),
+          eq(workSessions.membershipId, actor.membershipId),
+          eq(workSessions.recordKind, "fact"),
+          inArray(workSessions.approvalStatus, [
+            "approved",
+            "pending_review",
+            "locked",
+          ]),
+          isNull(workSessions.deletedAt),
+          lt(workSessions.startAt, now),
+          gt(workSessions.endAt, forecastHistoryStartsAt),
+        ),
+      );
+    const historicalSessionIds = historicalSessions.map(
+      (session) => session.id,
+    );
+    const historicalBreaks = historicalSessionIds.length
+      ? await this.db
+          .select()
+          .from(workBreaks)
+          .where(inArray(workBreaks.workSessionId, historicalSessionIds))
+      : [];
+    const historicalBreaksBySession = new Map<
+      string,
+      Array<typeof workBreaks.$inferSelect>
+    >();
+    historicalBreaks.forEach((entry) =>
+      historicalBreaksBySession.set(entry.workSessionId, [
+        ...(historicalBreaksBySession.get(entry.workSessionId) ?? []),
+        entry,
+      ]),
+    );
+    const historicalIntervals = clipPayableIntervals(
+      historicalSessions.flatMap((session) =>
+        payableIntervals(
+          session,
+          historicalBreaksBySession.get(session.id) ?? [],
+        ),
+      ),
+      forecastHistoryStartsAt,
+      now,
     );
     const approvedSeconds = intervals
       .filter((interval) => interval.approvalStatus === "approved")
@@ -588,6 +654,22 @@ export class PayrollService {
         }),
       );
     }
+    const subsidies = planSubsidies(version.config);
+    const subsidyTotal = addDecimalAmounts(...subsidies.map((item) => item.amount));
+    for (const subsidy of subsidies) {
+      estimatedAmount = addDecimalAmounts(estimatedAmount, subsidy.amount);
+      const allocations = splitMicros(decimalMicros(subsidy.amount), monthDates.length);
+      monthDates.forEach((date, index) =>
+        liveComponents.push({
+          date,
+          amount: formatMicros(allocations[index] ?? 0n),
+          seconds: 0,
+          estimate: false,
+          bonus: false,
+          recurring: true,
+        }),
+      );
+    }
     const daily = new Map<
       string,
       {
@@ -666,8 +748,6 @@ export class PayrollService {
         estimatedBonusAmount: 0n,
       },
     );
-    const today = localDateKey(new Date(), organization.timezone);
-    const elapsedDates = monthDates.filter((date) => date <= today);
     const futureDates = monthDates.filter((date) => date > today);
     const toSafeMicros = (value: number) =>
       BigInt(
@@ -676,21 +756,55 @@ export class PayrollService {
           Math.round(Math.min(Number.MAX_SAFE_INTEGER, Number.isFinite(value) ? value : 0)),
         ),
       );
+    const historicalSeconds = workSecondsByLocalDate(
+      historicalIntervals,
+      organization.timezone,
+    );
+    const historicalDates = localDateKeysForIntervals(
+      [{ startAt: forecastHistoryStartsAt, endAt: now }],
+      organization.timezone,
+    )
+      .filter((date) => date < today)
+      .slice(-84);
+    const eligibleHistoricalSeconds = (date: string) => {
+      const seconds = historicalSeconds.get(date) ?? {
+        approvedSeconds: 0,
+        pendingSeconds: 0,
+      };
+      return (
+        seconds.approvedSeconds +
+        (version.pendingReviewCountsInEstimate ? seconds.pendingSeconds : 0)
+      );
+    };
+    const baseMicros = Number(decimalMicros(version.baseAmount));
+    const historicalVariableAmount = (date: string): number => {
+      const currentMonthAmount = daily.get(date);
+      if (currentMonthAmount) {
+        const dailyTotal =
+          currentMonthAmount.approvedAmount + currentMonthAmount.pendingAmount;
+        const bonusAmount =
+          currentMonthAmount.approvedBonusAmount +
+          currentMonthAmount.pendingBonusAmount;
+        return Number(
+          dailyTotal - bonusAmount - currentMonthAmount.recurringAmount > 0n
+            ? dailyTotal - bonusAmount - currentMonthAmount.recurringAmount
+            : 0n,
+        );
+      }
+      const seconds = eligibleHistoricalSeconds(date);
+      if (version.type === "hourly" || version.type === "hybrid") {
+        return Math.max(0, Math.round((baseMicros * seconds) / 3_600));
+      }
+      if (version.type === "daily") return seconds > 0 ? baseMicros : 0;
+      return 0;
+    };
+    const forecastHorizon = futureDates.length + 1;
     const variableAmountForecast = forecastCalendarSeries(
-      elapsedDates.map((date) => {
-        const amount = daily.get(date)!;
-        const bonusAmount = amount.approvedBonusAmount + amount.pendingBonusAmount;
-        const dailyTotal = amount.approvedAmount + amount.pendingAmount;
-        return {
-          date,
-          value: Number(
-            dailyTotal - bonusAmount - amount.recurringAmount > 0n
-              ? dailyTotal - bonusAmount - amount.recurringAmount
-              : 0n,
-          ),
-        };
-      }),
-      futureDates.length,
+      historicalDates.map((date) => ({
+        date,
+        value: historicalVariableAmount(date),
+      })),
+      forecastHorizon,
     );
     const eligibleSecondsForDate = (date: string) => {
       const amount = daily.get(date)!;
@@ -698,8 +812,11 @@ export class PayrollService {
         (version.pendingReviewCountsInEstimate ? amount.pendingSeconds : 0);
     };
     const workForecast = forecastCalendarSeries(
-      elapsedDates.map((date) => ({ date, value: eligibleSecondsForDate(date) })),
-      futureDates.length,
+      historicalDates.map((date) => ({
+        date,
+        value: eligibleHistoricalSeconds(date),
+      })),
+      forecastHorizon,
     );
     const variableForecastByDate = new Map(
       variableAmountForecast.points.map((point) => [point.date, point]),
@@ -864,6 +981,8 @@ export class PayrollService {
       currency: currentPlan.plan.currency,
       planType: version.type,
       baseAmount: version.baseAmount,
+      subsidies,
+      subsidyTotal,
       approvedSeconds,
       pendingSeconds,
       weeklyBonusSeconds,
@@ -877,6 +996,8 @@ export class PayrollService {
       projectedPeriodAmount: formatMicros(projectedCumulative),
       projection: {
         method: variableAmountForecast.method,
+        historyWindowDays: historicalDates.length,
+        trainedThrough: historicalDates.at(-1) ?? null,
         sampleDays: variableAmountForecast.sampleDays,
         nonZeroSampleDays: variableAmountForecast.nonZeroSampleDays,
         horizonDays: futureDates.length,
@@ -1149,10 +1270,12 @@ export class PayrollService {
         project_based: "project",
         hybrid: "hour",
       };
-      const versionConfig =
-        input.type === "hybrid" && input.fixedAmount
+      const versionConfig = {
+        ...(input.type === "hybrid" && input.fixedAmount
           ? { fixedAmount: input.fixedAmount }
-          : {};
+          : {}),
+        subsidies: input.subsidies ?? [],
+      };
       const existing = existingPlans[0];
       let plan: typeof compensationPlans.$inferSelect;
       let versionNumber = 1;
@@ -1548,7 +1671,7 @@ export class PayrollService {
       let estimate = false;
       let needsReview = false;
       const components: Array<{
-        type: "base" | "weekday" | "weekend" | "holiday" | "night" | "overtime" | "project" | "bonus";
+        type: "base" | "weekday" | "weekend" | "holiday" | "night" | "overtime" | "project" | "allowance" | "bonus";
         label: string;
         amount: string;
         planVersionId: string;
@@ -1683,19 +1806,20 @@ export class PayrollService {
         } else if (version.type === "project_based") {
           // A project amount is not time-proportional. Only the newest version
           // in the period is proposed and it always requires human review.
-          if (version.id !== latestVersion.id) continue;
-          grossAmount = addDecimalAmounts(grossAmount, version.baseAmount);
-          needsReview = true;
-          components.push({
-            type: "project",
-            label: "项目制金额（待人工确认项目范围）",
-            amount: version.baseAmount,
-            planVersionId: version.id,
-            planVersion: version.version,
-            quantity: "1",
-            unit: version.baseUnit,
-            trace: { effectiveFrom: segmentStart, effectiveTo: segmentEnd },
-          });
+          if (version.id === latestVersion.id) {
+            grossAmount = addDecimalAmounts(grossAmount, version.baseAmount);
+            needsReview = true;
+            components.push({
+              type: "project",
+              label: "项目制金额（待人工确认项目范围）",
+              amount: version.baseAmount,
+              planVersionId: version.id,
+              planVersion: version.version,
+              quantity: "1",
+              unit: version.baseUnit,
+              trace: { effectiveFrom: segmentStart, effectiveTo: segmentEnd },
+            });
+          }
         } else {
           const segmentSeconds = Math.floor(
             (segmentEnd.getTime() - segmentStart.getTime()) / 1_000,
@@ -1718,6 +1842,34 @@ export class PayrollService {
             quantity: String(segmentSeconds),
             unit: "period_second",
             trace: { effectiveFrom: segmentStart, effectiveTo: segmentEnd },
+          });
+        }
+
+        const segmentSeconds = Math.floor(
+          (segmentEnd.getTime() - segmentStart.getTime()) / 1_000,
+        );
+        for (const subsidy of planSubsidies(version.config)) {
+          const amount = prorateDecimalAmount(
+            subsidy.amount,
+            segmentSeconds,
+            periodSeconds,
+          );
+          grossAmount = addDecimalAmounts(grossAmount, amount);
+          components.push({
+            type: "allowance",
+            label: subsidy.name,
+            amount,
+            planVersionId: version.id,
+            planVersion: version.version,
+            quantity: String(segmentSeconds),
+            unit: "period_second",
+            rate: subsidy.amount,
+            trace: {
+              kind: "configured_subsidy",
+              configuredAmount: subsidy.amount,
+              effectiveFrom: segmentStart,
+              effectiveTo: segmentEnd,
+            },
           });
         }
       }

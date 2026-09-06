@@ -750,6 +750,12 @@ test("Owner can configure a versioned hourly plan and create a pay period", asyn
     .selectOption(memberId);
   await page.getByLabel("计薪类型").selectOption("hourly");
   await page.getByLabel("基础时薪").fill("88.50");
+  await page.getByRole("button", { name: "添加补贴" }).click();
+  await page.getByLabel("第 1 项补贴名称").fill("交通补贴");
+  await page.getByLabel("第 1 项补贴金额").fill("500");
+  await page.getByRole("button", { name: "添加补贴" }).click();
+  await page.getByLabel("第 2 项补贴名称").fill("通信补贴");
+  await page.getByLabel("第 2 项补贴金额").fill("300");
   await page.getByText("周末倍率", { exact: true }).click();
   await page.getByLabel("启用周超时奖励").check();
   await page.getByRole("button", { name: "保存薪资方案新版本" }).click();
@@ -759,6 +765,10 @@ test("Owner can configure a versioned hourly plan and create a pay period", asyn
     currency: "CNY",
     baseAmount: "88.50",
     pendingReviewCountsInEstimate: true,
+    subsidies: [
+      { name: "交通补贴", amount: "500" },
+      { name: "通信补贴", amount: "300" },
+    ],
   });
   expect(planPayload?.rules).toEqual([
     { type: "weekend", priority: 100, multiplier: "2" },
@@ -897,6 +907,11 @@ test("personal payroll renders reconciled totals, daily pay, period trend, and c
           currency: "CNY",
           planType: "hourly",
           baseAmount: "100.000000",
+          subsidies: [
+            { name: "交通补贴", amount: "50.000000" },
+            { name: "通信补贴", amount: "30.000000" },
+          ],
+          subsidyTotal: "80.000000",
           approvedSeconds: 28_800,
           pendingSeconds: 3_600,
           weeklyBonusSeconds: 0,
@@ -910,6 +925,8 @@ test("personal payroll renders reconciled totals, daily pay, period trend, and c
           projectedPeriodAmount: "3600.000000",
           projection: {
             method: "adaptive_weekday_backtest_v3",
+            historyWindowDays: 84,
+            trainedThrough: "2026-09-04",
             sampleDays: 4,
             nonZeroSampleDays: 2,
             horizonDays: 26,
@@ -1092,6 +1109,8 @@ test("personal payroll renders reconciled totals, daily pay, period trend, and c
   await expect(page.getByText("本月实时预估", { exact: true })).toBeVisible();
   await expect(page.getByText(/本周已记录工时 · 9月1日—9月6日（月界截断）/)).toBeVisible();
   await expect(page.getByText("周奖励工时（含预估）", { exact: true })).toBeVisible();
+  await expect(page.getByText("2 项固定补贴", { exact: true })).toBeVisible();
+  await expect(page.getByText(/交通补贴 ¥50\.00/).first()).toBeVisible();
   await expect(page.getByText(/待审核预估 5 小时 0 分/)).toBeVisible();
   await expect(page.getByText("本月实时预估怎样计算", { exact: true })).toBeVisible();
   await expect(page.getByText(/¥800.00 已批准工作计薪/)).toBeVisible();
@@ -1112,6 +1131,9 @@ test("personal payroll renders reconciled totals, daily pay, period trend, and c
   await expect(salaryPanels).toHaveCount(2);
   const firstPanelBox = await salaryPanels.first().boundingBox();
   expect(firstPanelBox?.width).toBeGreaterThan(240);
+  const secondPanelBox = await salaryPanels.nth(1).boundingBox();
+  expect(Math.abs((firstPanelBox?.width ?? 0) - (secondPanelBox?.width ?? 0))).toBeLessThan(2);
+  await expect(page.getByText(/84 天滚动历史/).first()).toBeVisible();
   await expect(page.getByText("当前应结")).toBeVisible();
   await expect(page.getByText("¥900.00", { exact: true }).first()).toBeVisible();
   await expect(page.getByRole("img", { name: "2026 年 9 月每日薪资" })).toBeVisible();
@@ -1285,11 +1307,11 @@ test("account security creates a pending phone binding through the authenticated
   await expect(page.getByRole("status")).toContainText("手机号验证消息已发送");
 });
 
-test("notification panel shows real unread items and marks them read", async ({
+test("notification panel marks one item read or unread and supports all read", async ({
   page,
 }) => {
   await mockAuthenticatedWorkspace(page);
-  const notification = {
+  const notifications = [{
     id: "00000000-0000-4000-8000-000000000041",
     title: "待审核提醒",
     body: "有一条工时等待处理",
@@ -1297,26 +1319,47 @@ test("notification panel shows real unread items and marks them read", async ({
     actionUrl: "/approvals",
     readAt: null,
     createdAt: "2026-09-02T01:00:00.000Z",
-  };
+  }, {
+    id: "00000000-0000-4000-8000-000000000042",
+    title: "项目到期提醒",
+    body: "有一个项目节点即将到期",
+    severity: "info",
+    actionUrl: "/projects",
+    readAt: null as string | null,
+    createdAt: "2026-09-02T01:30:00.000Z",
+  }];
   await page.route("**/api/notifications", (route) =>
-    route.fulfill({ json: { items: [notification] } }),
+    route.fulfill({ json: { items: notifications } }),
   );
-  await page.route(
-    "**/api/notifications/00000000-0000-4000-8000-000000000041/read",
-    (route) =>
-      route.fulfill({
-        json: {
-          notification: { ...notification, readAt: "2026-09-02T02:00:00.000Z" },
-        },
-      }),
-  );
+  await page.route("**/api/notifications/*/read", async (route) => {
+    const id = new URL(route.request().url()).pathname.split("/").at(-2);
+    const notification = notifications.find((item) => item.id === id)!;
+    notification.readAt = "2026-09-02T02:00:00.000Z";
+    await route.fulfill({ json: { notification } });
+  });
+  await page.route("**/api/notifications/*/unread", async (route) => {
+    const id = new URL(route.request().url()).pathname.split("/").at(-2);
+    const notification = notifications.find((item) => item.id === id)!;
+    notification.readAt = null;
+    await route.fulfill({ json: { notification } });
+  });
+  await page.route("**/api/notifications/read-all", async (route) => {
+    notifications.forEach((item) => { item.readAt = "2026-09-02T02:00:00.000Z"; });
+    await route.fulfill({ json: { updatedCount: notifications.length } });
+  });
   await page.goto("/login");
   await page.getByLabel("邮箱或手机号").fill("owner@example.test");
   await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
   await page.getByRole("button", { name: "登录", exact: true }).click();
-  await page.getByRole("button", { name: /通知，1 条未读/ }).click();
+  await page.getByRole("button", { name: /通知，2 条未读/ }).click();
   await expect(page.getByText("待审核提醒")).toBeVisible();
-  await page.getByText("待审核提醒").click();
+  await page.getByRole("button", { name: "标已读", exact: true }).first().click();
+  await expect(page.getByRole("button", { name: "标未读", exact: true })).toHaveCount(1);
+  await page.getByRole("button", { name: "标未读", exact: true }).click();
+  await expect(page.getByText("2 条未读")).toBeVisible();
+  await page.getByRole("button", { name: "全部已读" }).click();
+  await expect(page.getByText("0 条未读")).toBeVisible();
+  await expect(page.getByRole("button", { name: "标未读", exact: true })).toHaveCount(2);
 });
 
 test("notification preferences can disable a worker-backed category", async ({
@@ -1532,6 +1575,27 @@ test("manual work recording persists primary and auxiliary project-node associat
   await page.route("**/api/projects", (route) =>
     route.fulfill({ json: { items: [project] } }),
   );
+  await page.route("**/api/work-sessions/project-node-recommendations?**", (route) =>
+    route.fulfill({
+      json: {
+        items: [{
+          id: "00000000-0000-4000-8000-000000000007",
+          projectId: project.id,
+          projectKey: project.key,
+          projectName: project.name,
+          projectColor: project.color,
+          title: "实现项目画布",
+          description: "关联项目节点的补录",
+          type: "task",
+          status: "in_progress",
+          progress: "65",
+          progressMode: "manual",
+          score: 122,
+          reasons: ["内容高度匹配", "正在推进"],
+        }],
+      },
+    }),
+  );
   await page.route("**/api/work-sessions", async (route) => {
     expect(route.request().method()).toBe("POST");
     expect(route.request().postDataJSON()).toMatchObject({
@@ -1541,6 +1605,7 @@ test("manual work recording persists primary and auxiliary project-node associat
         "00000000-0000-4000-8000-000000000007",
         "00000000-0000-4000-8000-000000000006",
       ],
+      reportedProgress: 85,
       source: "manual",
     });
     await route.fulfill({ json: { ok: true } });
@@ -1555,6 +1620,7 @@ test("manual work recording persists primary and auxiliary project-node associat
   ).toHaveCount(0);
   await page.getByRole("button", { name: "手工录入" }).click();
   await page.getByLabel("工作内容").fill("关联项目节点的补录");
+  await page.getByRole("option", { name: /实现项目画布/ }).click();
   await page
     .getByLabel("关联项目（可选）", { exact: true })
     .selectOption(project.id);
@@ -1562,6 +1628,7 @@ test("manual work recording persists primary and auxiliary project-node associat
     .getByLabel("主项目节点", { exact: true })
     .selectOption("00000000-0000-4000-8000-000000000007");
   await page.getByLabel("关联 工作台正式版", { exact: true }).check();
+  await page.getByLabel("主项目节点完成度", { exact: true }).fill("85");
   expect(
     await page.evaluate(
       () => document.documentElement.scrollWidth <= window.innerWidth + 1,
@@ -1883,7 +1950,7 @@ test("evidence uploads arbitrary file formats one by one and completes every sel
   await expect(
     page.getByText(/浏览器不适合直接展示此格式/).first(),
   ).toBeVisible();
-  const uploadQueueButton = page.getByRole("button", { name: "上传队列" });
+  const uploadQueueButton = page.getByRole("button", { name: /上传中|重试未完成项/ });
   if (testInfo.project.name.startsWith("mobile")) {
     // The bottom navigation is fixed.  A control scrolled into view must keep
     // a real tap clearance above it instead of merely being present in the
@@ -1900,7 +1967,6 @@ test("evidence uploads arbitrary file formats one by one and completes every sel
     expect(navigationClearance).not.toBeNull();
     expect(navigationClearance!).toBeGreaterThanOrEqual(8);
   }
-  await uploadQueueButton.click();
   await expect.poll(() => completedAttachmentIds.length).toBe(5);
   expect(uploadIntents).toHaveLength(5);
   expect(uploadIntents[0]).toMatchObject({
@@ -1930,6 +1996,7 @@ test("the uploader can inspect rich file details and use direct preview or downl
   const attachmentId = "00000000-0000-4000-8000-000000000090";
   const startedAt = new Date();
   startedAt.setHours(8, 0, 0, 0);
+  let evidenceUpdate: Record<string, unknown> | null = null;
   await page.route("**/api/work-sessions?**", (route) => route.fulfill({ json: {
     items: [{
       id: sessionId,
@@ -1976,6 +2043,20 @@ test("the uploader can inspect rich file details and use direct preview or downl
       updatedAt: new Date(startedAt.getTime() + 60_000).toISOString(),
     }],
   } }));
+  await page.route(`**/api/attachments/${attachmentId}`, async (route) => {
+    expect(route.request().method()).toBe("PATCH");
+    evidenceUpdate = route.request().postDataJSON() as Record<string, unknown>;
+    await route.fulfill({
+      json: {
+        attachment: {
+          id: attachmentId,
+          version: 4,
+          visibility: "project_visible",
+          note: "由提交人与项目成员共同核对",
+        },
+      },
+    });
+  });
 
   await page.goto("/login");
   await page.getByLabel("邮箱或手机号").fill("owner@example.test");
@@ -1990,6 +2071,15 @@ test("the uploader can inspect rich file details and use direct preview or downl
   await page.getByText("查看内容详情", { exact: true }).click();
   await expect(page.getByText("由提交人核对", { exact: true })).toBeVisible();
   await expect(page.getByText("b".repeat(64), { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "编辑", exact: true }).click();
+  await page.getByLabel("编辑证据备注").fill("由提交人与项目成员共同核对");
+  await page.getByLabel("编辑证据可见范围").selectOption("project_visible");
+  await page.getByRole("button", { name: "保存证据修改" }).click();
+  await expect.poll(() => evidenceUpdate).toEqual({
+    expectedVersion: 3,
+    visibility: "project_visible",
+    note: "由提交人与项目成员共同核对",
+  });
 });
 
 test("evidence keeps text references usable when private object storage is not configured", async ({

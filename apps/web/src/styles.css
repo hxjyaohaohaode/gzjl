@@ -2568,6 +2568,212 @@ input[type="file"]::file-selector-button {
   }
 }
 
+/* Work association is a bounded picker: dense projects remain searchable
+ * without forcing the whole editor or the mobile page to grow indefinitely. */
+.work-project-recommender,
+.work-progress-reporter {
+  min-width: 0;
+  border: 1px solid color-mix(in srgb, var(--accent) 18%, var(--border));
+  border-radius: 1rem;
+  background: color-mix(in srgb, var(--accent-soft) 38%, var(--surface));
+  padding: 0.85rem;
+}
+
+.work-project-recommender-head,
+.work-progress-reporter-head,
+.work-progress-reporter-controls {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.work-project-recommender-head {
+  margin-bottom: 0.65rem;
+}
+
+.work-project-recommender-head > div,
+.work-project-recommender-head span,
+.work-project-recommender-head small,
+.work-progress-reporter-head > div,
+.work-progress-reporter-head strong,
+.work-progress-reporter-head small {
+  display: block;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.work-project-recommender-head span,
+.work-project-recommender-head span > svg {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--accent-strong);
+  font-size: 0.78rem;
+  font-weight: 760;
+}
+
+.work-project-recommender-head small,
+.work-progress-reporter-head small,
+.work-project-recommender-empty {
+  margin-top: 0.2rem;
+  color: var(--text-muted);
+  font-size: 0.66rem;
+  line-height: 1.5;
+}
+
+.work-project-recommendation-list {
+  display: grid;
+  max-height: 15rem;
+  margin-top: 0.6rem;
+  gap: 0.35rem;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.work-project-recommendation-list > button {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: 0.35rem minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.65rem;
+  border: 1px solid transparent;
+  border-radius: 0.8rem;
+  background: var(--surface);
+  padding: 0.65rem;
+  text-align: left;
+}
+
+.work-project-recommendation-list > button:hover,
+.work-project-recommendation-list > button:focus-visible,
+.work-project-recommendation-list > button.is-selected {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+  background: var(--accent-soft);
+}
+
+.work-project-recommendation-list i {
+  width: 0.28rem;
+  height: 2.2rem;
+  border-radius: 99rem;
+}
+
+.work-project-recommendation-list span,
+.work-project-recommendation-list strong,
+.work-project-recommendation-list small,
+.work-project-recommendation-list em {
+  display: block;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.work-project-recommendation-list strong { font-size: 0.74rem; }
+.work-project-recommendation-list small,
+.work-project-recommendation-list em {
+  margin-top: 0.14rem;
+  color: var(--text-muted);
+  font-size: 0.62rem;
+  font-style: normal;
+  line-height: 1.4;
+}
+.work-project-recommendation-list b {
+  color: var(--accent-strong);
+  font-size: 0.64rem;
+  white-space: nowrap;
+}
+
+.work-progress-reporter-head output {
+  flex: none;
+  color: var(--accent-strong);
+  font-size: 1rem;
+  font-weight: 800;
+}
+
+.work-progress-reporter-controls { margin-top: 0.7rem; }
+.work-progress-reporter-controls input[type="range"] { min-width: 0; flex: 1; accent-color: var(--accent); }
+.work-progress-reporter-controls input[type="number"] { width: 6.25rem; flex: none; }
+
+/* Salary forecast cards now follow their actual container width. The charts
+ * are stacked so neither is squeezed into a misleading half-width plot. */
+.salary-forecast-summary {
+  display: grid;
+  margin-bottom: 1rem;
+  gap: 0.65rem;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.salary-forecast-summary > div {
+  min-width: 0;
+  border-radius: 0.85rem;
+  background: var(--surface-subtle);
+  padding: 0.7rem 0.8rem;
+}
+
+.salary-forecast-summary span,
+.salary-forecast-summary strong,
+.salary-forecast-summary small,
+.salary-forecast-panel-head span,
+.salary-forecast-panel-head strong,
+.salary-forecast-panel-head small {
+  display: block;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.salary-forecast-summary span { color: var(--text-muted); font-size: 0.64rem; }
+.salary-forecast-summary strong { margin-top: 0.18rem; font-size: 0.98rem; font-variant-numeric: tabular-nums; }
+.salary-forecast-summary small { margin-top: 0.18rem; color: var(--text-subtle); font-size: 0.58rem; line-height: 1.4; }
+.salary-forecast-grid { grid-template-columns: minmax(0, 1fr) !important; }
+.salary-forecast-panel-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 0.75rem; padding: 0.15rem 0.2rem 0.65rem; }
+.salary-forecast-panel-head strong { font-size: 0.78rem; }
+.salary-forecast-panel-head small { margin-top: 0.18rem; color: var(--text-subtle); font-size: 0.64rem; line-height: 1.45; }
+.salary-forecast-note { overflow-wrap: anywhere; }
+
+.salary-subsidy-editor {
+  min-width: 0;
+  border-radius: 1rem;
+  background: color-mix(in srgb, var(--accent-soft) 34%, var(--surface-subtle));
+  padding: 0.85rem;
+}
+.salary-subsidy-editor-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 0.75rem; }
+.salary-subsidy-editor-head h3 { font-size: 0.78rem; font-weight: 760; }
+.salary-subsidy-editor-head p,
+.salary-subsidy-empty { margin-top: 0.2rem; color: var(--text-muted); font-size: 0.64rem; line-height: 1.5; overflow-wrap: anywhere; }
+.salary-subsidy-list { display: grid; margin-top: 0.7rem; gap: 0.5rem; }
+.salary-subsidy-row { display: grid; min-width: 0; grid-template-columns: minmax(0, 1.4fr) minmax(9rem, 0.8fr) auto; align-items: end; gap: 0.55rem; }
+.salary-subsidy-row label { min-width: 0; }
+.salary-subsidy-row label > span { display: block; margin-bottom: 0.25rem; color: var(--text-muted); font-size: 0.62rem; font-weight: 680; }
+
+@media (min-width: 1180px) {
+  .work-editor-grid { grid-template-columns: minmax(0, 1.45fr) minmax(18rem, 0.55fr); }
+}
+
+@media (max-width: 840px) {
+  .salary-forecast-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .salary-subsidy-row { grid-template-columns: minmax(0, 1fr) minmax(8rem, 0.7fr) auto; }
+}
+
+@media (max-width: 640px) {
+  .work-editor-form,
+  .work-editor-preview { min-width: 0; padding: 0.85rem; }
+  .work-project-recommender,
+  .work-progress-reporter { padding: 0.7rem; }
+  .work-project-recommender-head,
+  .work-progress-reporter-head,
+  .work-progress-reporter-controls,
+  .salary-subsidy-editor-head { align-items: stretch; flex-direction: column; }
+  .work-progress-reporter-controls input[type="number"] { width: 100%; }
+  .work-project-recommendation-list { max-height: min(16rem, 42dvh); }
+  .work-project-recommendation-list > button { grid-template-columns: 0.28rem minmax(0, 1fr); }
+  .work-project-recommendation-list b { grid-column: 2; }
+  .work-timeline-frame { min-height: 17rem; }
+  .salary-forecast-summary { grid-template-columns: 1fr; }
+  .salary-forecast-unified-card .salary-forecast-panel [role="img"] { min-width: 0; height: 20rem !important; }
+  .salary-subsidy-row { grid-template-columns: 1fr; }
+  .salary-subsidy-row [data-ui="button"] { width: 100%; }
+}
+
 .project-relation-target-picker {
   min-width: 0;
   overflow: hidden;

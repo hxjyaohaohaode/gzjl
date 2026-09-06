@@ -31,6 +31,7 @@ export const createWorkSessionSchema = z
     nextStep: z.string().trim().max(5_000).default(""),
     primaryProjectNodeId: uuidSchema.nullable().default(null),
     projectNodeIds: z.array(uuidSchema).max(32).default([]),
+    reportedProgress: z.number().min(0).max(100).nullable().optional(),
     visibility: z.enum(workSessionVisibilities).default("management_only"),
     parallelWork: z.boolean().default(false),
     breaks: z
@@ -44,7 +45,10 @@ export const createWorkSessionSchema = z
       .default([]),
   })
   .superRefine(
-    ({ startAt, endAt, primaryProjectNodeId, projectNodeIds }, context) => {
+    (
+      { startAt, endAt, primaryProjectNodeId, projectNodeIds, reportedProgress },
+      context,
+    ) => {
       if (new Date(endAt) <= new Date(startAt)) {
         context.addIssue({
           code: "custom",
@@ -75,6 +79,17 @@ export const createWorkSessionSchema = z
           code: "custom",
           path: ["primaryProjectNodeId"],
           message: "主项目节点必须包含在关联项目节点中。",
+        });
+      }
+      if (
+        reportedProgress !== null &&
+        reportedProgress !== undefined &&
+        !primaryProjectNodeId
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: ["reportedProgress"],
+          message: "填写完成度时必须选择主项目节点。",
         });
       }
     },
