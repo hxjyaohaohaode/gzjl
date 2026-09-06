@@ -9,12 +9,13 @@ import {
   useNodesState,
   type Edge,
   type Node,
+  type ReactFlowInstance,
 } from "@xyflow/react";
 import {
   calculateNodeScheduleProgress,
   calculatePlannedHours,
 } from "@workbench/shared";
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 
 import "@xyflow/react/dist/style.css";
@@ -114,6 +115,10 @@ function formatWorkDuration(seconds: number): string {
 }
 
 function layoutTree(nodes: ProjectCanvasNode[]): Map<string, { x: number; y: number }> {
+  const dense = nodes.length > 18;
+  const veryDense = nodes.length > 40;
+  const columnGap = veryDense ? 224 : dense ? 258 : 306;
+  const rowGap = veryDense ? 172 : dense ? 238 : 318;
   const byId = new Map(nodes.map((node) => [node.id, node]));
   const children = new Map<string, string[]>();
   for (const node of nodes) {
@@ -136,7 +141,7 @@ function layoutTree(nodes: ProjectCanvasNode[]): Map<string, { x: number; y: num
     const known = positions.get(id);
     if (known) return known;
     if (visiting.has(id)) {
-      const cycleFallback = { x: nextColumn * 306, y: depth * 318 };
+      const cycleFallback = { x: nextColumn * columnGap, y: depth * rowGap };
       nextColumn += 1;
       return cycleFallback;
     }
@@ -145,8 +150,8 @@ function layoutTree(nodes: ProjectCanvasNode[]): Map<string, { x: number; y: num
     const childPositions = childIds.map((childId) => visit(childId, depth + 1));
     const x = childPositions.length
       ? (childPositions[0]!.x + childPositions[childPositions.length - 1]!.x) / 2
-      : nextColumn++ * 306;
-    const position = { x, y: depth * 318 };
+      : nextColumn++ * columnGap;
+    const position = { x, y: depth * rowGap };
     positions.set(id, position);
     visiting.delete(id);
     return position;
@@ -188,6 +193,29 @@ export default function ProjectCanvas({
   onNodeSelect?: (nodeId: string) => void;
 }) {
   const projectAccent = accessibleAccent(accent);
+  const dense = nodes.length > 18;
+  const veryDense = nodes.length > 40;
+  const [focusRelationships, setFocusRelationships] = useState(false);
+  const flowInstanceRef = useRef<ReactFlowInstance | null>(null);
+  const relatedNodeIds = useMemo(() => {
+    if (!selectedNodeId) return new Set<string>();
+    const ids = new Set<string>([selectedNodeId]);
+    const byId = new Map(nodes.map((node) => [node.id, node]));
+    let parentId = byId.get(selectedNodeId)?.parentId ?? null;
+    while (parentId && !ids.has(parentId)) {
+      ids.add(parentId);
+      parentId = byId.get(parentId)?.parentId ?? null;
+    }
+    nodes.forEach((node) => {
+      if (node.parentId === selectedNodeId) ids.add(node.id);
+    });
+    edges.forEach((edge) => {
+      if (edge.sourceNodeId === selectedNodeId) ids.add(edge.targetNodeId);
+      if (edge.targetNodeId === selectedNodeId) ids.add(edge.sourceNodeId);
+    });
+    return ids;
+  }, [edges, nodes, selectedNodeId]);
+  const focusActive = focusRelationships && Boolean(selectedNodeId);
   const flowNodes = useMemo<Node[]>(() => {
     const positions = layoutTree(nodes);
     const directChildCount = new Map<string, number>();
@@ -212,6 +240,9 @@ export default function ProjectCanvas({
             ? "var(--success)"
             : projectAccent;
       const childCount = directChildCount.get(node.id) ?? 0;
+      const relationCount = edges.filter(
+        (edge) => edge.sourceNodeId === node.id || edge.targetNodeId === node.id,
+      ).length;
       const scheduleProgress = calculateNodeScheduleProgress(node);
       const plannedHours = calculatePlannedHours(node);
       return {
@@ -221,7 +252,7 @@ export default function ProjectCanvas({
         data: {
           label: (
             <div
-              className={`project-flow-node project-flow-node--${node.status} ${selectedNodeId === node.id ? "is-selected" : ""}`}
+              className={`project-flow-node project-flow-node--${node.status} ${selectedNodeId === node.id ? "is-selected" : ""} ${dense ? "is-dense" : ""} ${veryDense ? "is-very-dense" : ""}`}
               style={{ "--node-accent": nodeAccent } as CSSProperties}
             >
               <div className="project-flow-node-top">
@@ -233,13 +264,13 @@ export default function ProjectCanvas({
                 </strong>
               </div>
               <p className="project-flow-node-title">{node.title}</p>
-              {node.description ? (
+              {!dense && node.description ? (
                 <p className="project-flow-node-description">{node.description}</p>
               ) : null}
               <div className="project-flow-node-progress">
                 <span style={{ width: `${progress}%` }} />
               </div>
-              <div className="project-flow-node-schedule">
+              {!veryDense ? <div className="project-flow-node-schedule">
                 <span>
                   <small>时间进度</small>
                   <strong>{scheduleProgress === null ? "未排期" : `${Math.round(scheduleProgress)}%`}</strong>
@@ -251,7 +282,7 @@ export default function ProjectCanvas({
                     : "尚未设置开始与截止时间"}
                   {plannedHours === null ? "" : ` · ${Math.max(1, Math.round(plannedHours / 24))} 天`}
                 </small>
-              </div>
+              </div> : null}
               <div className="project-flow-node-assignees">
                 <span>{progressModeLabel(node.progressMode)} · 权重 {Number(node.weight ?? 1)}</span>
                 {node.assignees?.length ? (
@@ -285,13 +316,13 @@ export default function ProjectCanvas({
               </div>
               <div className="project-flow-node-footer">
                 <span>
-                  {statusLabel(node.status)} · {childCount ? `${childCount} 个子节点` : "末级节点"}
+                  {statusLabel(node.status)} · {childCount ? `${childCount} 个子节点` : "末级节点"}{relationCount ? ` · ${relationCount} 条关联` : ""}
                 </span>
                 <span>
                   v{node.version}
                 </span>
               </div>
-              <div className="project-flow-node-work">
+              {!dense ? <div className="project-flow-node-work">
                 <span>实际投入</span>
                 <strong>{formatWorkDuration(node.workSummary?.allocatedSeconds ?? 0)}</strong>
                 <small>
@@ -301,7 +332,7 @@ export default function ProjectCanvas({
                     ? " · 部分工时受权限保护"
                     : " · 已按关联比例分摊"}
                 </small>
-              </div>
+              </div> : null}
               {canManage ? (
                 <div className="nodrag nopan project-flow-node-actions" aria-label={`${node.title} 快捷操作`}>
                   <button
@@ -339,8 +370,10 @@ export default function ProjectCanvas({
         style: {
           background: "transparent",
           border: "none",
+          opacity: focusActive && !relatedNodeIds.has(node.id) ? 0.16 : 1,
           padding: 0,
-          width: 246,
+          transition: "opacity 160ms ease",
+          width: veryDense ? 210 : dense ? 232 : 246,
         },
         sourcePosition: Position.Bottom,
         targetPosition: Position.Top,
@@ -348,12 +381,17 @@ export default function ProjectCanvas({
     });
   }, [
     canManage,
+    dense,
+    edges,
+    focusActive,
     nodes,
     onAddChild,
     onAddRelation,
     onDeriveBranch,
     projectAccent,
+    relatedNodeIds,
     selectedNodeId,
+    veryDense,
   ]);
 
   const [canvasNodes, setCanvasNodes, onNodesChange] = useNodesState(flowNodes);
@@ -393,6 +431,11 @@ export default function ProjectCanvas({
           style: {
             stroke: "color-mix(in srgb, var(--project-accent) 28%, var(--border))",
             strokeWidth: 1.8,
+            opacity:
+              focusActive &&
+              (!relatedNodeIds.has(node.parentId!) || !relatedNodeIds.has(node.id))
+                ? 0.1
+                : 1,
           },
         }));
       const seenRelationships = new Set<string>();
@@ -432,7 +475,15 @@ export default function ProjectCanvas({
               : structural
                 ? { strokeDasharray: "5 5" }
                 : {}),
-            opacity: blocks ? 0.92 : structural ? 0.58 : 0.76,
+            opacity:
+              focusActive &&
+              (!relatedNodeIds.has(edge.sourceNodeId) || !relatedNodeIds.has(edge.targetNodeId))
+                ? 0.08
+                : blocks
+                  ? 0.92
+                  : structural
+                    ? 0.58
+                    : 0.76,
           },
           labelStyle: {
             fill: "var(--text-muted)",
@@ -444,8 +495,15 @@ export default function ProjectCanvas({
       });
       return [...hierarchy, ...relationships];
     },
-    [edges, nodes, projectAccent],
+    [edges, focusActive, nodes, projectAccent, relatedNodeIds],
   );
+
+  const resetLayout = () => {
+    setCanvasNodes(flowNodes);
+    window.requestAnimationFrame(() =>
+      void flowInstanceRef.current?.fitView({ padding: 0.22, duration: 260 }),
+    );
+  };
 
   return (
     <div
@@ -460,10 +518,14 @@ export default function ProjectCanvas({
         nodes={canvasNodes}
         nodesConnectable={false}
         nodesDraggable
+        onlyRenderVisibleElements
         minZoom={0.15}
         maxZoom={2.5}
         onNodeClick={(_, node) => onNodeSelect?.(node.id)}
         onNodesChange={onNodesChange}
+        onInit={(instance) => {
+          flowInstanceRef.current = instance;
+        }}
         panOnDrag
         panOnScroll
         preventScrolling
@@ -489,6 +551,18 @@ export default function ProjectCanvas({
             阻塞
           </span>
           <small>拖动节点自由排布 · 拖拽空白处平移 · 滚轮缩放 · 点击节点查看详情</small>
+        </Panel>
+        <Panel className="project-flow-tools" position="top-right">
+          <button onClick={resetLayout} type="button">自动重排</button>
+          <button
+            aria-pressed={focusActive}
+            disabled={!selectedNodeId}
+            onClick={() => setFocusRelationships((value) => !value)}
+            type="button"
+          >
+            {focusActive ? "显示全部" : "聚焦关联"}
+          </button>
+          {dense ? <span>{veryDense ? "超紧凑视图" : "紧凑视图"}</span> : null}
         </Panel>
         <Controls showInteractive={false} />
         <MiniMap

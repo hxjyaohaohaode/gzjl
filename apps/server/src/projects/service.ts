@@ -293,6 +293,38 @@ export class ProjectService {
       .then((rows) => rows.map((row) => row.project));
   }
 
+  async catalog(actor: ProjectActor, canViewAll: boolean) {
+    const rows = await this.db
+      .select({
+        project: projects,
+        memberId: projectMembers.id,
+        memberRole: projectMembers.role,
+      })
+      .from(projects)
+      .leftJoin(
+        projectMembers,
+        and(
+          eq(projectMembers.projectId, projects.id),
+          eq(projectMembers.membershipId, actor.membershipId),
+          isNull(projectMembers.leftAt),
+        ),
+      )
+      .where(
+        and(
+          eq(projects.organizationId, actor.organizationId),
+          isNull(projects.deletedAt),
+          ne(projects.status, "archived"),
+        ),
+      )
+      .orderBy(desc(projects.updatedAt));
+    return rows.map(({ project, memberId, memberRole }) => ({
+      ...project,
+      isMember: Boolean(memberId),
+      memberRole: memberRole ?? null,
+      canAccess: canViewAll || Boolean(memberId),
+    }));
+  }
+
   /**
    * Calendar overlays deliberately derive from milestone nodes instead of the
    * legacy project_milestones table. This keeps project-tree editing and the
@@ -820,7 +852,7 @@ export class ProjectService {
       await tx.insert(projectActivityLog).values({
         projectId,
         actorMembershipId: actor.membershipId,
-        activityType: "updated",
+        activityType: "updated" as const,
         entityType: "project_member",
         entityId: member.id,
         details: { before, after: member },
@@ -829,6 +861,94 @@ export class ProjectService {
         organizationId: actor.organizationId,
         actorMembershipId: actor.membershipId,
         action: "project.member_upserted",
+        entityType: "project_member",
+        entityId: member.id,
+        before,
+        after: member,
+      });
+      return member;
+    });
+  }
+
+  async joinProject(actor: ProjectActor, projectId: string) {
+    return this.db.transaction(async (tx) => {
+      const [project] = await tx
+        .select({ id: projects.id, status: projects.status })
+        .from(projects)
+        .where(
+          and(
+            eq(projects.id, projectId),
+            eq(projects.organizationId, actor.organizationId),
+            isNull(projects.deletedAt),
+            ne(projects.status, "archived"),
+          ),
+        )
+        .for("update")
+        .limit(1);
+      if (!project) throw new ProjectNotFoundError();
+      const [activeMembership] = await tx
+        .select({ id: orgMemberships.id })
+        .from(orgMemberships)
+        .innerJoin(users, eq(users.id, orgMemberships.userId))
+        .where(
+          and(
+            eq(orgMemberships.id, actor.membershipId),
+            eq(orgMemberships.organizationId, actor.organizationId),
+            eq(orgMemberships.status, "active"),
+            eq(users.status, "active"),
+          ),
+        )
+        .limit(1);
+      if (!activeMembership) {
+        throw new ProjectTreeValidationError("当前组织成员状态不可加入项目。");
+      }
+      const [before] = await tx
+        .select()
+        .from(projectMembers)
+        .where(
+          and(
+            eq(projectMembers.projectId, projectId),
+            eq(projectMembers.membershipId, actor.membershipId),
+          ),
+        )
+        .for("update")
+        .limit(1);
+      if (before && !before.leftAt) return before;
+      const joinedAt = new Date();
+      const [member] = before
+        ? await tx
+            .update(projectMembers)
+            .set({
+              role: "member",
+              publicActivityVisible: true,
+              joinedAt,
+              leftAt: null,
+            })
+            .where(eq(projectMembers.id, before.id))
+            .returning()
+        : await tx
+            .insert(projectMembers)
+            .values({
+              projectId,
+              membershipId: actor.membershipId,
+              role: "member",
+              publicActivityVisible: true,
+              joinedAt,
+            })
+            .returning();
+      if (!member) throw new Error("Failed to join project");
+      await tx.insert(projectActivityLog).values({
+        projectId,
+        actorMembershipId: actor.membershipId,
+        activityType: "updated",
+        entityType: "project_member",
+        entityId: member.id,
+        details: { before, after: member, selfJoined: true },
+      });
+      await tx.insert(auditLogs).values({
+        organizationId: actor.organizationId,
+        actorMembershipId: actor.membershipId,
+        action: "project.member_self_joined",
         entityType: "project_member",
         entityId: member.id,
         before,
@@ -1204,94 +1324,84 @@ export class ProjectService {
     projectId: string,
     input: CreateEdgeInput,
   ) {
-    if (input.sourceNodeId === input.targetNodeId)
-      throw new ProjectTreeValidationError(
-        "关联的起点和终点不能是同一个节点。",
-      );
+    const [edge] = await this.createEdges(actor, projectId, [input]);
+    if (!edge) throw new Error("Failed to create project edge");
+    return edge;
+  }
+
+  async createEdges(
+    actor: ProjectActor,
+    projectId: string,
+    inputs: CreateEdgeInput[],
+  ) {
+    if (inputs.length < 1 || inputs.length > 32) {
+      throw new ProjectTreeValidationError("单次必须关联 1 至 32 个目标节点。");
+    }
+    if (inputs.some((input) => input.sourceNodeId === input.targetNodeId)) {
+      throw new ProjectTreeValidationError("关联的起点和终点不能是同一个节点。");
+    }
+    const candidateKeys = inputs.map((input) =>
+      input.type === "relates_to"
+        ? `${input.type}:${[input.sourceNodeId, input.targetNodeId].sort().join(":")}`
+        : `${input.type}:${input.sourceNodeId}:${input.targetNodeId}`,
+    );
+    if (new Set(candidateKeys).size !== candidateKeys.length) {
+      throw new ProjectTreeValidationError("同一批次中不能重复关联相同节点。");
+    }
     return this.db.transaction(async (tx) => {
-      const [source] = await tx
+      const nodeIds = [...new Set(inputs.flatMap((input) => [input.sourceNodeId, input.targetNodeId]))];
+      const nodes = await tx
         .select({ id: projectNodes.id })
         .from(projectNodes)
         .where(
           and(
-            eq(projectNodes.id, input.sourceNodeId),
+            inArray(projectNodes.id, nodeIds),
             eq(projectNodes.projectId, projectId),
             isNull(projectNodes.deletedAt),
           ),
-        )
-        .limit(1);
-      const [target] = await tx
-        .select({ id: projectNodes.id })
-        .from(projectNodes)
-        .where(
-          and(
-            eq(projectNodes.id, input.targetNodeId),
-            eq(projectNodes.projectId, projectId),
-            isNull(projectNodes.deletedAt),
-          ),
-        )
-        .limit(1);
-      if (!source || !target) throw new ProjectNotFoundError();
-      const [existing] = await tx
-        .select({ id: projectEdges.id })
+        );
+      if (nodes.length !== nodeIds.length) throw new ProjectNotFoundError();
+      const activeEdges = await tx
+        .select({
+          id: projectEdges.id,
+          sourceNodeId: projectEdges.sourceNodeId,
+          targetNodeId: projectEdges.targetNodeId,
+          type: projectEdges.type,
+        })
         .from(projectEdges)
         .where(
           and(
             eq(projectEdges.projectId, projectId),
-            eq(projectEdges.type, input.type),
-            input.type === "relates_to"
-              ? or(
-                  and(
-                    eq(projectEdges.sourceNodeId, input.sourceNodeId),
-                    eq(projectEdges.targetNodeId, input.targetNodeId),
-                  ),
-                  and(
-                    eq(projectEdges.sourceNodeId, input.targetNodeId),
-                    eq(projectEdges.targetNodeId, input.sourceNodeId),
-                  ),
-                )
-              : and(
-                  eq(projectEdges.sourceNodeId, input.sourceNodeId),
-                  eq(projectEdges.targetNodeId, input.targetNodeId),
-                ),
             isNull(projectEdges.deletedAt),
           ),
-        )
-        .limit(1);
-      if (existing)
+        );
+      const existingKeys = new Set(
+        activeEdges.map((edge) =>
+          edge.type === "relates_to"
+            ? `${edge.type}:${[edge.sourceNodeId, edge.targetNodeId].sort().join(":")}`
+            : `${edge.type}:${edge.sourceNodeId}:${edge.targetNodeId}`,
+        ),
+      );
+      if (candidateKeys.some((key) => existingKeys.has(key))) {
         throw new ProjectTreeValidationError("相同的节点关联已经存在。");
-
-      if (input.type === "depends_on" || input.type === "blocks") {
-        const activeEdges = await tx
-          .select({
-            sourceNodeId: projectEdges.sourceNodeId,
-            targetNodeId: projectEdges.targetNodeId,
-            type: projectEdges.type,
-          })
-          .from(projectEdges)
-          .where(
-            and(
-              eq(projectEdges.projectId, projectId),
-              isNull(projectEdges.deletedAt),
-            ),
-          );
-        const adjacency = new Map<string, string[]>();
-        const executionDirection = (edge: {
-          sourceNodeId: string;
-          targetNodeId: string;
-          type: string;
-        }): [string, string] =>
-          edge.type === "depends_on"
-            ? [edge.targetNodeId, edge.sourceNodeId]
-            : [edge.sourceNodeId, edge.targetNodeId];
-        activeEdges
-          .filter(
-            (edge) => edge.type === "depends_on" || edge.type === "blocks",
-          )
-          .forEach((edge) => {
-            const [from, to] = executionDirection(edge);
-            adjacency.set(from, [...(adjacency.get(from) ?? []), to]);
-          });
+      }
+      const adjacency = new Map<string, string[]>();
+      const executionDirection = (edge: {
+        sourceNodeId: string;
+        targetNodeId: string;
+        type: string;
+      }): [string, string] =>
+        edge.type === "depends_on"
+          ? [edge.targetNodeId, edge.sourceNodeId]
+          : [edge.sourceNodeId, edge.targetNodeId];
+      activeEdges
+        .filter((edge) => edge.type === "depends_on" || edge.type === "blocks")
+        .forEach((edge) => {
+          const [from, to] = executionDirection(edge);
+          adjacency.set(from, [...(adjacency.get(from) ?? []), to]);
+        });
+      for (const input of inputs) {
+        if (input.type !== "depends_on" && input.type !== "blocks") continue;
         const [newFrom, newTo] = executionDirection(input);
         const visited = new Set<string>();
         const reachesNewFrom = (nodeId: string): boolean => {
@@ -1304,24 +1414,24 @@ export class ProjectService {
           throw new ProjectTreeValidationError(
             "该执行关系会形成循环，请调整关联方向或使用“关联”关系。",
           );
+        adjacency.set(newFrom, [...(adjacency.get(newFrom) ?? []), newTo]);
       }
-
-      const [edge] = await tx
+      const edges = await tx
         .insert(projectEdges)
-        .values({
+        .values(inputs.map((input) => ({
           projectId,
           sourceNodeId: input.sourceNodeId,
           targetNodeId: input.targetNodeId,
           type: input.type,
           label: input.label?.trim() || null,
           createdBy: actor.membershipId,
-        })
+        })))
         .returning();
-      if (!edge) throw new Error("Failed to create project edge");
-      await tx.insert(projectActivityLog).values({
+      if (edges.length !== inputs.length) throw new Error("Failed to create project edges");
+      await tx.insert(projectActivityLog).values(edges.map((edge) => ({
         projectId,
         actorMembershipId: actor.membershipId,
-        activityType: "updated",
+        activityType: "updated" as const,
         entityType: "project_edge",
         entityId: edge.id,
         details: {
@@ -1329,16 +1439,16 @@ export class ProjectService {
           targetNodeId: edge.targetNodeId,
           type: edge.type,
         },
-      });
-      await tx.insert(auditLogs).values({
+      })));
+      await tx.insert(auditLogs).values(edges.map((edge) => ({
         organizationId: actor.organizationId,
         actorMembershipId: actor.membershipId,
         action: "project.edge_created",
         entityType: "project_edge",
         entityId: edge.id,
         after: edge,
-      });
-      return edge;
+      })));
+      return edges;
     });
   }
 

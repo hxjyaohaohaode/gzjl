@@ -31,6 +31,7 @@ import {
   Square,
   TimerReset,
   Users,
+  UserPlus,
 } from "lucide-react";
 import {
   Component,
@@ -3513,11 +3514,11 @@ function WorkRow({ item, action }: { item: WorkSession; action?: ReactNode }) {
   return (
     <div className="work-row flex flex-col gap-3 px-2 py-4 first:pt-0 last:pb-0 sm:flex-row sm:items-center" id={`work-session-${item.id}`}>
       <div className="min-w-0 flex-1">
-        <div className="flex flex-wrap items-center gap-2">
-          <p className="truncate font-semibold">{item.content}</p>
+        <div className="work-row-heading flex flex-wrap items-start gap-2">
+          <p className="work-row-title font-semibold">{item.content}</p>
           <Badge tone={statusTone}>{statusLabel}</Badge>
         </div>
-        <p className="mt-1 text-sm text-[var(--text-muted)]">
+        <p className="work-row-meta mt-1 text-sm text-[var(--text-muted)]">
           {formatDateTime(item.startAt)} – {formatDateTime(item.endAt)} ·{" "}
           {formatDuration(item.netSeconds)} ·{" "}
           {isPlan ? "未计入事实" : item.source === "timer" ? "计时" : "手工"}
@@ -3535,7 +3536,7 @@ function WorkRow({ item, action }: { item: WorkSession; action?: ReactNode }) {
           </div>
         ) : null}
         {projectLinks.length ? (
-          <div className="mt-2 flex flex-wrap gap-1.5">
+          <div className="work-row-project-links mt-2 flex flex-wrap gap-1.5">
             {projectLinks.map((link) => (
               <span
                 className="inline-flex max-w-full items-center gap-1 rounded-lg bg-[var(--surface-subtle)] px-2 py-1 text-xs text-[var(--text-muted)]"
@@ -3555,7 +3556,7 @@ function WorkRow({ item, action }: { item: WorkSession; action?: ReactNode }) {
           </div>
         ) : null}
       </div>
-      {action}
+      {action ? <div className="work-row-actions">{action}</div> : null}
     </div>
   );
 }
@@ -5100,7 +5101,10 @@ export function WorkPage() {
         method: "POST",
         body: { expectedVersion: item.version },
       }),
-    onSuccess: refresh,
+    onSuccess: async () => {
+      setSaveMessage("工作进度已提交审核；审核状态与记录版本已更新。");
+      await refresh();
+    },
   });
   const withdraw = useMutation({
     mutationFn: (item: WorkSession) =>
@@ -5382,8 +5386,8 @@ export function WorkPage() {
         <Card className="work-editor mb-5">
           <div className="work-editor-grid">
             <div className="work-editor-form">
-              <div className="mb-6 flex items-start justify-between gap-4">
-                <div>
+              <div className="work-editor-heading mb-6 flex items-start justify-between gap-4">
+                <div className="min-w-0">
                   <p className="app-section-label">工作记录编辑器</p>
                   <h2 className="mt-2 text-lg font-extrabold tracking-[-0.03em]">
                     {editingSession
@@ -6266,12 +6270,12 @@ export function WorkPage() {
                             ) : null}
                             <Button
                               className="work-submit-review-button"
-                              disabled={submit.isPending}
+                              disabled={submit.isPending && submit.variables?.id === item.id}
                               onClick={() => submit.mutate(item)}
                               size="compact"
                             >
                               <FileCheck2 size={16} />
-                              提交审核
+                              {submit.isPending && submit.variables?.id === item.id ? "正在提交…" : "提交审核"}
                             </Button>
                           </div>
                         ) : item.approvalStatus === "pending_review" ? (
@@ -6296,6 +6300,15 @@ export function WorkPage() {
                       }
                       item={item}
                     />
+                    {submit.error && submit.variables?.id === item.id ? (
+                      <div className="work-review-feedback" role="alert">
+                        <AlertCircle size={16} />
+                        <span>
+                          <strong>这条工作进度尚未提交成功</strong>
+                          <small>{submit.error.message} 请在下方核对证据可见范围与记录版本后重试。</small>
+                        </span>
+                      </div>
+                    ) : null}
                     {item.recordKind === "fact" ? (
                       <EvidencePanel sessionId={item.id} />
                     ) : null}
@@ -6324,7 +6337,7 @@ export function WorkPage() {
                 title="还没有工时记录"
               />
             )}
-            <ErrorMessage error={submit.error ?? withdraw.error ?? realizePlan.error} />
+            <ErrorMessage error={withdraw.error ?? realizePlan.error} />
           </CardContent>
         </Card>
       </div>
@@ -6340,6 +6353,9 @@ interface Project {
   status: string;
   version: number;
   updatedAt: string;
+  isMember?: boolean;
+  memberRole?: "lead" | "member" | "observer" | null;
+  canAccess?: boolean;
 }
 interface ProjectNode {
   id: string;
@@ -6383,8 +6399,8 @@ export function ProjectsPage({ me }: { me: Me }) {
     color: "#5b5ce2",
   });
   const projects = useQuery({
-    queryKey: ["projects"],
-    queryFn: () => api<{ items: Project[] }>("/api/projects"),
+    queryKey: ["project-catalog"],
+    queryFn: () => api<{ items: Project[] }>("/api/projects/catalog"),
   });
   const create = useMutation({
     mutationFn: () => api("/api/projects", { method: "POST", body: form }),
@@ -6392,6 +6408,17 @@ export function ProjectsPage({ me }: { me: Me }) {
       setShowForm(false);
       setForm({ ...form, key: "", name: "", description: "" });
       await queryClient.invalidateQueries({ queryKey: ["projects"] });
+      await queryClient.invalidateQueries({ queryKey: ["project-catalog"] });
+    },
+  });
+  const join = useMutation({
+    mutationFn: (projectId: string) =>
+      api(`/api/projects/${projectId}/members/self`, { method: "POST" }),
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["project-catalog"] }),
+        queryClient.invalidateQueries({ queryKey: ["projects"] }),
+      ]);
     },
   });
 
@@ -6399,7 +6426,7 @@ export function ProjectsPage({ me }: { me: Me }) {
     <>
       <PageHeader
         title="项目"
-        description="项目由可版本化的分支和树节点组成；移动、回滚和删除都会留下活动轨迹。"
+        description="查看已加入项目，也可以主动加入组织内的其他项目；工作记录可继续关联到具体节点。"
         actions={
           hasGrant(me, "project.create") ? (
             <Button onClick={() => setShowForm((value) => !value)}>
@@ -6481,9 +6508,10 @@ export function ProjectsPage({ me }: { me: Me }) {
         </Card>
       ) : projects.data?.items.length ? (
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-          {projects.data.items.map((project) => (
-            <Link key={project.id} to={`/projects/${project.id}`}>
-              <Card className="project-card">
+          {projects.data.items.map((project) => {
+            const canOpen = project.canAccess ?? project.isMember !== false;
+            const card = (
+              <Card className={`project-card ${canOpen ? "" : "project-card-available"}`}>
                 <CardContent>
                   <div className="flex items-start justify-between gap-3">
                     <div
@@ -6495,13 +6523,14 @@ export function ProjectsPage({ me }: { me: Me }) {
                     >
                       {project.key.slice(0, 2)}
                     </div>
-                    <Badge
-                      tone={
-                        project.status === "active" ? "positive" : "neutral"
-                      }
-                    >
-                      {projectStatusLabels[project.status] ?? project.status}
-                    </Badge>
+                    <div className="flex flex-wrap justify-end gap-1.5">
+                      <Badge tone={project.status === "active" ? "positive" : "neutral"}>
+                        {projectStatusLabels[project.status] ?? project.status}
+                      </Badge>
+                      <Badge tone={project.isMember ? "info" : "neutral"}>
+                        {project.isMember ? "已加入" : canOpen ? "可管理" : "可加入"}
+                      </Badge>
+                    </div>
                   </div>
                   <div className="mt-6">
                     <p className="app-section-label">项目总览</p>
@@ -6512,17 +6541,41 @@ export function ProjectsPage({ me }: { me: Me }) {
                       {project.description || "暂无项目说明"}
                     </p>
                   </div>
-                  <div className="mt-5 flex items-center justify-between border-t border-[var(--border)] pt-4 text-xs text-[var(--text-subtle)]">
+                  <div className="project-card-footer mt-5 flex items-center justify-between gap-3 border-t border-[var(--border)] pt-4 text-xs text-[var(--text-subtle)]">
                     <span>版本 {project.version}</span>
-                    <span className="inline-flex items-center gap-1">
-                      更新于 {formatDateTime(project.updatedAt)}
-                      <ArrowUpRight size={13} />
-                    </span>
+                    {canOpen ? (
+                      <span className="inline-flex items-center gap-1">
+                        更新于 {formatDateTime(project.updatedAt)}
+                        <ArrowUpRight size={13} />
+                      </span>
+                    ) : (
+                      <Button
+                        aria-label={`加入项目 ${project.name}`}
+                        disabled={join.isPending}
+                        onClick={() => join.mutate(project.id)}
+                        size="compact"
+                      >
+                        <UserPlus size={14} />
+                        {join.isPending && join.variables === project.id ? "正在加入…" : "加入项目"}
+                      </Button>
+                    )}
                   </div>
                 </CardContent>
               </Card>
-            </Link>
-          ))}
+            );
+            return canOpen ? (
+              <Link key={project.id} to={`/projects/${project.id}`}>
+                {card}
+              </Link>
+            ) : (
+              <div key={project.id}>{card}</div>
+            );
+          })}
+          {join.error ? (
+            <div className="md:col-span-2 xl:col-span-3">
+              <ErrorMessage error={join.error} />
+            </div>
+          ) : null}
         </div>
       ) : (
         <Card>
@@ -6534,7 +6587,7 @@ export function ProjectsPage({ me }: { me: Me }) {
                 </Button>
               ) : null
             }
-            description="有权限的成员创建项目后，项目树会显示在这里。"
+            description="当前组织还没有可加入的项目。"
             icon={<FolderKanban />}
             title="没有可访问的项目"
           />
@@ -8305,21 +8358,6 @@ export function PayrollPage({ me }: { me: Me }) {
     const preview = payroll.data?.livePreview;
     const timeline = preview?.salaryTimeline ?? [];
     const currency = preview?.currency ?? "CNY";
-    const lastActualIndex = timeline.findLastIndex((item) => !item.forecast);
-    const futureBandBase = timeline.map((item, index) =>
-      item.forecast || index === lastActualIndex
-        ? Number(item.projectedLowerCumulativeAmount)
-        : null,
-    );
-    const futureBandWidth = timeline.map((item, index) =>
-      item.forecast || index === lastActualIndex
-        ? Math.max(
-            0,
-            Number(item.projectedUpperCumulativeAmount) -
-              Number(item.projectedLowerCumulativeAmount),
-          )
-        : null,
-    );
     return {
       animationDuration: 180,
       animationDurationUpdate: 160,
@@ -8332,15 +8370,12 @@ export function PayrollPage({ me }: { me: Me }) {
           "已批准薪资",
           "待审核预估",
           "未来日薪预测",
-          "已发生累计",
-          "月末趋势预测",
-          "90%预测区间",
           "每日有效工时",
           "周奖励工时",
         ],
         textStyle: { color: chartPalette.textMuted },
       },
-      grid: { left: 18, right: 96, top: 58, bottom: 42, containLabel: true },
+      grid: { left: 16, right: 18, top: 52, bottom: 38, containLabel: true },
       tooltip: {
         trigger: "axis",
         confine: true,
@@ -8362,15 +8397,6 @@ export function PayrollPage({ me }: { me: Me }) {
             item.bonusSeconds + item.projectedBonusSeconds > 0
               ? `周奖励工时：${((item.bonusSeconds + item.projectedBonusSeconds) / 3_600).toFixed(2)} 小时`
               : null,
-            item.actualCumulativeAmount !== null
-              ? `已发生累计：${formatPayrollMoney(currency, item.actualCumulativeAmount)}`
-              : null,
-            item.forecast
-              ? `${item.forecastSource === "known_future" ? "已录入未来记录" : "月末趋势预测"}：${formatPayrollMoney(currency, item.projectedCumulativeAmount)}`
-              : null,
-            item.forecast
-              ? `90%预测区间：${formatPayrollMoney(currency, item.projectedLowerCumulativeAmount)} – ${formatPayrollMoney(currency, item.projectedUpperCumulativeAmount)}`
-              : null,
           ].filter(Boolean).join("<br/>");
         },
       },
@@ -8383,7 +8409,7 @@ export function PayrollPage({ me }: { me: Me }) {
       yAxis: [
         {
           type: "value",
-          name: "累计金额",
+          name: "日薪",
           min: 0,
           axisLabel: {
             formatter: (value: number) => formatPayrollAxis(currency, value),
@@ -8398,26 +8424,13 @@ export function PayrollPage({ me }: { me: Me }) {
           axisLabel: { formatter: "{value}h", color: chartPalette.textSubtle },
           splitLine: { show: false },
         },
-        {
-          type: "value",
-          name: "日薪",
-          min: 0,
-          position: "right",
-          offset: 52,
-          axisLabel: {
-            formatter: (value: number) => formatPayrollAxis(currency, value),
-            color: chartPalette.textSubtle,
-          },
-          axisLine: { show: true, lineStyle: { color: chartPalette.border } },
-          splitLine: { show: false },
-        },
       ],
       dataZoom: [{ type: "inside", filterMode: "none" }],
       series: [
         {
           type: "bar",
           name: "已批准薪资",
-          yAxisIndex: 2,
+          yAxisIndex: 0,
           stack: "daily-pay",
           data: timeline.map((item) => Number(item.approvedAmount)),
           itemStyle: { color: chartPalette.accent, borderRadius: [5, 5, 0, 0] },
@@ -8425,7 +8438,7 @@ export function PayrollPage({ me }: { me: Me }) {
         {
           type: "bar",
           name: "待审核预估",
-          yAxisIndex: 2,
+          yAxisIndex: 0,
           stack: "daily-pay",
           data: timeline.map((item) => Number(item.pendingAmount)),
           itemStyle: { color: hexWithAlpha(chartPalette.warning, 0.62), borderRadius: [5, 5, 0, 0] },
@@ -8433,7 +8446,7 @@ export function PayrollPage({ me }: { me: Me }) {
         {
           type: "bar",
           name: "未来日薪预测",
-          yAxisIndex: 2,
+          yAxisIndex: 0,
           stack: "daily-pay",
           data: timeline.map((item) =>
             item.forecast ? Number(item.projectedDailyAmount) : null,
@@ -8467,20 +8480,84 @@ export function PayrollPage({ me }: { me: Me }) {
           lineStyle: { color: chartPalette.warning, width: 2 },
           itemStyle: { color: chartPalette.warning },
         },
+      ],
+    };
+  }, [chartPalette, payroll.data?.livePreview]);
+  const liveForecastOption = useMemo<EChartsCoreOption>(() => {
+    const preview = payroll.data?.livePreview;
+    const timeline = preview?.salaryTimeline ?? [];
+    const currency = preview?.currency ?? "CNY";
+    const lastActualIndex = timeline.findLastIndex((item) => !item.forecast);
+    const bandBase = timeline.map((item, index) =>
+      item.forecast || index === lastActualIndex
+        ? Number(item.projectedLowerCumulativeAmount)
+        : null,
+    );
+    const bandWidth = timeline.map((item, index) =>
+      item.forecast || index === lastActualIndex
+        ? Math.max(0, Number(item.projectedUpperCumulativeAmount) - Number(item.projectedLowerCumulativeAmount))
+        : null,
+    );
+    return {
+      animationDuration: 180,
+      animationDurationUpdate: 160,
+      legend: {
+        top: 2,
+        left: 8,
+        right: 8,
+        data: ["已发生累计", "月末趋势预测", "90%预测区间"],
+        textStyle: { color: chartPalette.textMuted },
+      },
+      grid: { left: 16, right: 18, top: 52, bottom: 38, containLabel: true },
+      tooltip: {
+        trigger: "axis",
+        confine: true,
+        backgroundColor: chartPalette.surface,
+        borderColor: chartPalette.border,
+        textStyle: { color: chartPalette.text },
+        formatter: (items: Array<{ dataIndex?: number }>) => {
+          const item = timeline[Number(items[0]?.dataIndex ?? 0)];
+          if (!item) return "";
+          return [
+            item.date,
+            item.actualCumulativeAmount !== null
+              ? `已发生累计：${formatPayrollMoney(currency, item.actualCumulativeAmount)}`
+              : null,
+            item.forecast || item.date === timeline[lastActualIndex]?.date
+              ? `${item.forecastSource === "known_future" ? "已录入未来记录" : "月末趋势预测"}：${formatPayrollMoney(currency, item.projectedCumulativeAmount)}`
+              : null,
+            item.forecast
+              ? `90%预测区间：${formatPayrollMoney(currency, item.projectedLowerCumulativeAmount)} – ${formatPayrollMoney(currency, item.projectedUpperCumulativeAmount)}`
+              : null,
+          ].filter(Boolean).join("<br/>");
+        },
+      },
+      xAxis: {
+        type: "category",
+        data: timeline.map((item) => item.date.slice(5)),
+        axisLabel: { hideOverlap: true, color: chartPalette.textSubtle },
+        axisLine: { lineStyle: { color: chartPalette.border } },
+      },
+      yAxis: {
+        type: "value",
+        min: 0,
+        axisLabel: {
+          formatter: (value: number) => formatPayrollAxis(currency, value),
+          color: chartPalette.textSubtle,
+        },
+        splitLine: { lineStyle: { color: chartPalette.grid } },
+      },
+      dataZoom: [{ type: "inside", filterMode: "none" }],
+      series: [
         {
           type: "line",
           name: "已发生累计",
-          connectNulls: false,
-          smooth: 0.2,
+          smooth: 0.22,
           symbolSize: 5,
-          data: timeline.map((item) =>
-            item.actualCumulativeAmount === null
-              ? null
-              : Number(item.actualCumulativeAmount),
-          ),
+          data: timeline.map((item) => item.actualCumulativeAmount === null ? null : Number(item.actualCumulativeAmount)),
           lineStyle: { color: chartPalette.accent, width: 3 },
           itemStyle: { color: chartPalette.accent },
-          areaStyle: { color: hexWithAlpha(chartPalette.accent, 0.08) },
+          areaStyle: { color: hexWithAlpha(chartPalette.accent, 0.09) },
           z: 4,
         },
         {
@@ -8489,7 +8566,7 @@ export function PayrollPage({ me }: { me: Me }) {
           stack: "salary-confidence",
           symbol: "none",
           silent: true,
-          data: futureBandBase,
+          data: bandBase,
           lineStyle: { opacity: 0 },
           areaStyle: { opacity: 0 },
           tooltip: { show: false },
@@ -8501,7 +8578,7 @@ export function PayrollPage({ me }: { me: Me }) {
           stack: "salary-confidence",
           symbol: "none",
           silent: true,
-          data: futureBandWidth,
+          data: bandWidth,
           lineStyle: { opacity: 0 },
           areaStyle: { color: hexWithAlpha(chartPalette.warning, 0.2) },
           tooltip: { show: false },
@@ -8510,13 +8587,9 @@ export function PayrollPage({ me }: { me: Me }) {
         {
           type: "line",
           name: "月末趋势预测",
-          smooth: 0.2,
+          smooth: 0.22,
           showSymbol: false,
-          data: timeline.map((item, index) =>
-            item.forecast || index === lastActualIndex
-              ? Number(item.projectedCumulativeAmount)
-              : null,
-          ),
+          data: timeline.map((item, index) => item.forecast || index === lastActualIndex ? Number(item.projectedCumulativeAmount) : null),
           lineStyle: { color: chartPalette.warning, width: 2.5, type: "dashed" },
           itemStyle: { color: chartPalette.warning },
           z: 5,
@@ -8584,11 +8657,20 @@ export function PayrollPage({ me }: { me: Me }) {
       {!isPayrollManager && payroll.data?.livePreview?.salaryTimeline?.length ? (
         <section className="mb-4" aria-label="实时薪资与预测图表">
           <Card className="analytics-chart-card salary-forecast-unified-card">
-            <CardHeader><h2 className="font-bold">每日工时、薪资与月末预测</h2><Badge tone="warning">图例可点选显隐</Badge></CardHeader>
+            <CardHeader><div><p className="app-page-kicker">本月趋势</p><h2 className="mt-1 font-bold">每日工时、薪资与月末预测</h2></div><Badge tone="warning">事实与预测分开展示</Badge></CardHeader>
             <CardContent>
-              <AnalyticsChart ariaLabel="本月每日薪资、工时、累计金额与未来预测" option={liveDailyOption} />
+              <div className="salary-forecast-grid">
+                <section className="salary-forecast-panel" aria-label="每日薪资与工时图表">
+                  <div><strong>每日薪资与工时</strong><small>柱形看日薪，折线看有效与奖励工时</small></div>
+                  <AnalyticsChart ariaLabel="本月每日薪资、工时、累计金额与未来预测" option={liveDailyOption} />
+                </section>
+                <section className="salary-forecast-panel" aria-label="累计薪资与月末预测图表">
+                  <div><strong>累计薪资与月末预测</strong><small>实线为已发生事实，虚线与色带为未来范围</small></div>
+                  <AnalyticsChart ariaLabel="本月薪资累计与未来预测" option={liveForecastOption} />
+                </section>
+              </div>
               <p className="salary-forecast-note">
-                点击图例可分别显示或隐藏日薪、累计金额、工时和 90% 预测区间；悬停某一天会列出该日全部口径。模型自适应组合星期规律、工作日/周末、指数平滑和稳健趋势，并用最近 {livePreview?.projection.validationPoints ?? 0} 个历史日做滚动回测与区间校准；已录入的未来记录和周奖励单独精确计算。样本 {livePreview?.projection.sampleDays ?? 0} 天（有工时 {livePreview?.projection.nonZeroSampleDays ?? 0} 天），预测 {livePreview?.projection.horizonDays ?? 0} 天{livePreview?.projection.validationWape !== null && livePreview?.projection.validationWape !== undefined ? ` · 回测加权误差 ${(livePreview.projection.validationWape * 100).toFixed(1)}%` : ""}。
+                左图用于比较每天投入与对应日薪，右图专注累计事实、趋势预测与 90% 区间；点击图例可单独显隐，悬停可查看完整口径。模型自适应组合星期规律、工作日/周末、指数平滑和稳健趋势，并用最近 {livePreview?.projection.validationPoints ?? 0} 个历史日做滚动回测与区间校准；已录入的未来记录和周奖励单独精确计算。样本 {livePreview?.projection.sampleDays ?? 0} 天（有工时 {livePreview?.projection.nonZeroSampleDays ?? 0} 天），预测 {livePreview?.projection.horizonDays ?? 0} 天{livePreview?.projection.validationWape !== null && livePreview?.projection.validationWape !== undefined ? ` · 回测加权误差 ${(livePreview.projection.validationWape * 100).toFixed(1)}%` : ""}。
               </p>
             </CardContent>
           </Card>

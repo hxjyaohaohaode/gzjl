@@ -314,6 +314,73 @@ function projectMemberRoleLabel(role: ProjectMember["role"]): string {
   return role === "lead" ? "项目负责人" : role === "observer" ? "观察者" : "项目成员";
 }
 
+function RelationTargetPicker({
+  nodes,
+  sourceNodeId,
+  selectedNodeIds,
+  onChange,
+}: {
+  nodes: ProjectNode[];
+  sourceNodeId: string;
+  selectedNodeIds: string[];
+  onChange: (nodeIds: string[]) => void;
+}) {
+  const [search, setSearch] = useState("");
+  const keyword = search.trim().toLocaleLowerCase();
+  const candidates = nodes.filter(
+    (candidate) =>
+      candidate.id !== sourceNodeId &&
+      (!keyword ||
+        [candidate.title, nodeTypeLabel(candidate.type), nodeStatusLabel(candidate.status)]
+          .join(" ")
+          .toLocaleLowerCase()
+          .includes(keyword)),
+  );
+  return (
+    <div className="project-relation-target-picker">
+      <div className="project-relation-target-head">
+        <input
+          aria-label="搜索关联目标节点"
+          className={fieldClass}
+          onChange={(event) => setSearch(event.target.value)}
+          placeholder="搜索节点名称、类型或状态"
+          type="search"
+          value={search}
+        />
+        <span>{selectedNodeIds.length} / 32</span>
+      </div>
+      <div className="project-relation-target-list">
+        {candidates.length ? candidates.map((candidate) => {
+          const checked = selectedNodeIds.includes(candidate.id);
+          return (
+            <label key={candidate.id}>
+              <input
+                aria-label={`关联目标 ${candidate.title}`}
+                checked={checked}
+                disabled={!checked && selectedNodeIds.length >= 32}
+                onChange={(event) =>
+                  onChange(
+                    event.target.checked
+                      ? [...selectedNodeIds, candidate.id]
+                      : selectedNodeIds.filter((id) => id !== candidate.id),
+                  )
+                }
+                type="checkbox"
+              />
+              <span>
+                <strong>{candidate.title}</strong>
+                <small>{nodeTypeLabel(candidate.type)} · {nodeStatusLabel(candidate.status)}</small>
+              </span>
+            </label>
+          );
+        }) : (
+          <p>{keyword ? "没有匹配的可关联节点。" : "当前没有其他可关联节点。"}</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function initials(displayName: string): string {
   return displayName.trim().slice(0, 2).toLocaleUpperCase() || "成员";
 }
@@ -1236,10 +1303,10 @@ function NodeInspectorContent({
     sortOrder: String(node.sortOrder),
   });
   const [relation, setRelation] = useState<{
-    targetNodeId: string;
+    targetNodeIds: string[];
     type: ProjectEdgeType;
     label: string;
-  }>({ targetNodeId: "", type: "relates_to", label: "" });
+  }>({ targetNodeIds: [], type: "relates_to", label: "" });
   const history = useQuery({
     queryKey: ["project-node-versions", projectId, node.id],
     queryFn: () =>
@@ -1363,17 +1430,17 @@ function NodeInspectorContent({
   });
   const createRelation = useMutation({
     mutationFn: () =>
-      api(`/api/projects/${projectId}/edges`, {
+      api(`/api/projects/${projectId}/edges/batch`, {
         method: "POST",
         body: {
           sourceNodeId: node.id,
-          targetNodeId: relation.targetNodeId,
+          targetNodeIds: relation.targetNodeIds,
           type: relation.type,
           label: relation.label.trim() || undefined,
         },
       }),
     onSuccess: async () => {
-      setRelation((current) => ({ ...current, targetNodeId: "", label: "" }));
+      setRelation((current) => ({ ...current, targetNodeIds: [], label: "" }));
       await refresh();
     },
   });
@@ -1838,26 +1905,13 @@ function NodeInspectorContent({
                     ))}
                   </select>
                 </Field>
-                <Field label="关联到节点">
-                  <select
-                    className={fieldClass}
-                    onChange={(event) =>
-                      setRelation({
-                        ...relation,
-                        targetNodeId: event.target.value,
-                      })
-                    }
-                    value={relation.targetNodeId}
-                  >
-                    <option value="">选择目标节点</option>
-                    {nodes
-                      .filter((candidate) => candidate.id !== node.id)
-                      .map((candidate) => (
-                        <option key={candidate.id} value={candidate.id}>
-                          {candidate.title}
-                        </option>
-                      ))}
-                  </select>
+                <Field hint="可搜索并一次勾选多个目标，单次最多 32 个。" label="关联到节点">
+                  <RelationTargetPicker
+                    nodes={nodes}
+                    onChange={(targetNodeIds) => setRelation({ ...relation, targetNodeIds })}
+                    selectedNodeIds={relation.targetNodeIds}
+                    sourceNodeId={node.id}
+                  />
                 </Field>
                 <Field hint="可选，最多 160 字。" label="关系说明">
                   <input
@@ -1871,13 +1925,17 @@ function NodeInspectorContent({
                   />
                 </Field>
                 <Button
-                  disabled={createRelation.isPending || !relation.targetNodeId}
+                  disabled={createRelation.isPending || !relation.targetNodeIds.length}
                   onClick={() => createRelation.mutate()}
                   size="compact"
                   variant="secondary"
                 >
                   <Link2 size={15} />
-                  创建节点关联
+                  {createRelation.isPending
+                    ? "正在创建…"
+                    : relation.targetNodeIds.length
+                      ? `创建 ${relation.targetNodeIds.length} 条节点关联`
+                      : "创建节点关联"}
                 </Button>
               </div>
               {relatedEdges.length ? (
@@ -2114,10 +2172,10 @@ export function ProjectDetailPage({ me }: { me: Me }) {
   const [showRecycle, setShowRecycle] = useState(false);
   const [relationSourceNodeId, setRelationSourceNodeId] = useState<string | null>(null);
   const [quickRelation, setQuickRelation] = useState<{
-    targetNodeId: string;
+    targetNodeIds: string[];
     type: ProjectEdgeType;
     label: string;
-  }>({ targetNodeId: "", type: "depends_on", label: "" });
+  }>({ targetNodeIds: [], type: "depends_on", label: "" });
   const [nodeForm, setNodeForm] = useState({
     parentId: "",
     branchId: "",
@@ -2237,11 +2295,11 @@ export function ProjectDetailPage({ me }: { me: Me }) {
   const createQuickRelation = useMutation({
     mutationFn: () => {
       if (!relationSourceNodeId) throw new Error("请先选择关系起点。");
-      return api(`/api/projects/${projectId}/edges`, {
+      return api(`/api/projects/${projectId}/edges/batch`, {
         method: "POST",
         body: {
           sourceNodeId: relationSourceNodeId,
-          targetNodeId: quickRelation.targetNodeId,
+          targetNodeIds: quickRelation.targetNodeIds,
           type: quickRelation.type,
           label: quickRelation.label.trim() || undefined,
         },
@@ -2250,7 +2308,7 @@ export function ProjectDetailPage({ me }: { me: Me }) {
     onSuccess: async () => {
       const sourceId = relationSourceNodeId;
       setRelationSourceNodeId(null);
-      setQuickRelation({ targetNodeId: "", type: "depends_on", label: "" });
+      setQuickRelation({ targetNodeIds: [], type: "depends_on", label: "" });
       await refresh();
       setSelectedNodeId(sourceId);
     },
@@ -2939,22 +2997,13 @@ export function ProjectDetailPage({ me }: { me: Me }) {
                         <option value="merges_into">当前节点合并到目标节点</option>
                       </select>
                     </Field>
-                    <Field label="目标节点">
-                      <select
-                        aria-label="目标节点"
-                        autoFocus
-                        className={fieldClass}
-                        onChange={(event) => setQuickRelation({ ...quickRelation, targetNodeId: event.target.value })}
-                        required
-                        value={quickRelation.targetNodeId}
-                      >
-                        <option value="">选择目标节点</option>
-                        {allNodes
-                          .filter((node) => node.id !== relationSource.id)
-                          .map((node) => (
-                            <option key={node.id} value={node.id}>{node.title}</option>
-                          ))}
-                      </select>
+                    <Field hint="可一次勾选多个节点，关系说明会应用到本批全部关联。" label="目标节点">
+                      <RelationTargetPicker
+                        nodes={allNodes}
+                        onChange={(targetNodeIds) => setQuickRelation({ ...quickRelation, targetNodeIds })}
+                        selectedNodeIds={quickRelation.targetNodeIds}
+                        sourceNodeId={relationSource.id}
+                      />
                     </Field>
                     <Field hint="可选" label="说明">
                       <input
@@ -2965,9 +3014,13 @@ export function ProjectDetailPage({ me }: { me: Me }) {
                         value={quickRelation.label}
                       />
                     </Field>
-                    <Button disabled={createQuickRelation.isPending || !quickRelation.targetNodeId} type="submit">
+                    <Button disabled={createQuickRelation.isPending || !quickRelation.targetNodeIds.length} type="submit">
                       <Link2 size={15} />
-                      {createQuickRelation.isPending ? "正在连接…" : "创建关联"}
+                      {createQuickRelation.isPending
+                        ? "正在连接…"
+                        : quickRelation.targetNodeIds.length
+                          ? `创建 ${quickRelation.targetNodeIds.length} 条关联`
+                          : "创建节点关联"}
                     </Button>
                   </form>
                   <ErrorMessage error={createQuickRelation.error} />

@@ -9,6 +9,7 @@ import {
   organizations,
   orgMemberships,
   projectActivityLog,
+  projectEdges,
   projectNodeVersions,
   users,
 } from "@workbench/db/schema";
@@ -226,5 +227,83 @@ describe("project node derived work-line transaction", () => {
         type: "relates_to",
       }),
     ).rejects.toThrowError("相同的节点关联已经存在");
+  });
+
+  it("creates multiple relationships atomically and records every edge", async () => {
+    const { db, actor, service, project, branch, root } = await createFixture();
+    const [first, second] = await Promise.all([
+      service.createNode(actor, project.id, {
+        branchId: branch.id,
+        parentId: root.id,
+        type: "task",
+        title: "批量目标一",
+        progress: 0,
+        sortOrder: 1,
+      }),
+      service.createNode(actor, project.id, {
+        branchId: branch.id,
+        parentId: root.id,
+        type: "task",
+        title: "批量目标二",
+        progress: 0,
+        sortOrder: 2,
+      }),
+    ]);
+
+    const edges = await service.createEdges(actor, project.id, [
+      { sourceNodeId: root.id, targetNodeId: first.id, type: "relates_to", label: "共同交付" },
+      { sourceNodeId: root.id, targetNodeId: second.id, type: "relates_to", label: "共同交付" },
+    ]);
+
+    expect(edges).toHaveLength(2);
+    expect(await db.select().from(projectEdges)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ targetNodeId: first.id, label: "共同交付" }),
+        expect.objectContaining({ targetNodeId: second.id, label: "共同交付" }),
+      ]),
+    );
+
+    await expect(
+      service.createEdges(actor, project.id, [
+        { sourceNodeId: first.id, targetNodeId: second.id, type: "blocks" },
+        { sourceNodeId: second.id, targetNodeId: first.id, type: "blocks" },
+      ]),
+    ).rejects.toThrowError("形成循环");
+    const afterRejectedBatch = await db.select().from(projectEdges);
+    expect(afterRejectedBatch.filter((edge) => edge.type === "blocks")).toHaveLength(0);
+  });
+
+  it("lets an active organization member discover and join a project", async () => {
+    const { db, actor, service, project } = await createFixture();
+    const [employee] = await db.insert(users).values({ displayName: "主动加入员工" }).returning();
+    const [membership] = await db.insert(orgMemberships).values({
+      organizationId: actor.organizationId,
+      userId: employee!.id,
+      status: "active",
+      joinedAt: new Date("2026-09-02T00:00:00.000Z"),
+    }).returning();
+    const employeeActor = {
+      organizationId: actor.organizationId,
+      membershipId: membership!.id,
+    };
+
+    expect(await service.list(employeeActor, false)).toHaveLength(0);
+    expect(await service.catalog(employeeActor, false)).toEqual([
+      expect.objectContaining({ id: project.id, isMember: false, canAccess: false }),
+    ]);
+
+    const joined = await service.joinProject(employeeActor, project.id);
+    expect(joined).toMatchObject({
+      projectId: project.id,
+      membershipId: membership!.id,
+      role: "member",
+      leftAt: null,
+    });
+    expect(await service.list(employeeActor, false)).toEqual([
+      expect.objectContaining({ id: project.id }),
+    ]);
+    expect(await service.catalog(employeeActor, false)).toEqual([
+      expect.objectContaining({ id: project.id, isMember: true, canAccess: true }),
+    ]);
   });
 });

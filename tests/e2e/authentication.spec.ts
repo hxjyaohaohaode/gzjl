@@ -117,6 +117,9 @@ async function mockAuthenticatedWorkspace(
   await page.route("**/api/projects", (route) =>
     route.fulfill({ json: { items: [] } }),
   );
+  await page.route("**/api/projects/catalog", (route) =>
+    route.fulfill({ json: { items: [] } }),
+  );
   await page.route("**/api/timer", (route) =>
     route.fulfill({ json: { timer: null } }),
   );
@@ -1104,7 +1107,11 @@ test("personal payroll renders reconciled totals, daily pay, period trend, and c
   ).toBeVisible();
   await expect(
     page.getByRole("img", { name: "本月薪资累计与未来预测" }),
-  ).toHaveCount(0);
+  ).toBeVisible();
+  const salaryPanels = page.locator(".salary-forecast-panel");
+  await expect(salaryPanels).toHaveCount(2);
+  const firstPanelBox = await salaryPanels.first().boundingBox();
+  expect(firstPanelBox?.width).toBeGreaterThan(240);
   await expect(page.getByText("当前应结")).toBeVisible();
   await expect(page.getByText("¥900.00", { exact: true }).first()).toBeVisible();
   await expect(page.getByRole("img", { name: "2026 年 9 月每日薪资" })).toBeVisible();
@@ -1564,6 +1571,71 @@ test("manual work recording persists primary and auxiliary project-node associat
     page.getByRole("button", { name: "保存真实工时草稿" }),
   ).toBeEnabled();
   await page.getByRole("button", { name: "保存真实工时草稿" }).click();
+});
+
+test("work progress review submission keeps failures actionable and mobile-safe", async ({
+  page,
+}) => {
+  await mockAuthenticatedWorkspace(page);
+  const sessionId = "00000000-0000-4000-8000-000000000071";
+  let submitted = false;
+  let attempts = 0;
+  const workItem = () => ({
+    id: sessionId,
+    startAt: "2026-09-06T01:00:00.000Z",
+    endAt: "2026-09-06T02:00:00.000Z",
+    timezone: "Asia/Shanghai",
+    netSeconds: 3600,
+    content: "这是一个用于验证移动端不会因为非常非常长的工作进度标题与项目节点名称而横向溢出的提交审核记录",
+    result: "完成响应式修复",
+    blockers: "",
+    nextStep: "等待审核",
+    parallelWork: false,
+    primaryProjectNodeId: null,
+    projectLinks: [{
+      projectId: "00000000-0000-4000-8000-000000000004",
+      projectNodeId: "00000000-0000-4000-8000-000000000072",
+      projectNodeTitle: "一个同样很长很长的项目功能节点名称用于验证标签换行与容器宽度约束",
+      isPrimary: true,
+      allocationBasisPoints: 10000,
+    }],
+    source: "manual",
+    recordKind: "fact",
+    submissionStatus: submitted ? "submitted" : "draft",
+    approvalStatus: submitted ? "pending_review" : "not_requested",
+    version: submitted ? 2 : 1,
+    visibility: "management_only",
+    breaks: [],
+  });
+  await page.route("**/api/work-sessions?**", (route) =>
+    route.fulfill({ json: { items: [workItem()], nextCursor: null } }),
+  );
+  await page.route(`**/api/work-sessions/${sessionId}/submit`, async (route) => {
+    attempts += 1;
+    expect(route.request().postDataJSON()).toEqual({ expectedVersion: 1 });
+    if (attempts === 1) {
+      await route.fulfill({
+        status: 422,
+        json: { error: "evidence_required", message: "提交审核前需要一项审核人可见的证据。" },
+      });
+      return;
+    }
+    submitted = true;
+    await route.fulfill({ json: { session: workItem() } });
+  });
+
+  await page.goto("/login");
+  await page.getByLabel("邮箱或手机号").fill("owner@example.test");
+  await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+  await page.goto("/work");
+  await page.getByRole("button", { name: "提交审核" }).click();
+  await expect(page.getByText("这条工作进度尚未提交成功")).toBeVisible();
+  await expect(page.getByText(/审核人可见的证据/)).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true);
+  await page.getByRole("button", { name: "提交审核" }).click();
+  await expect(page.getByText("待审核", { exact: true })).toBeVisible();
+  await expect(page.getByText(/工作进度已提交审核/)).toBeVisible();
 });
 
 test("one manual submission persists multiple completed work segments atomically", async ({
@@ -3082,11 +3154,11 @@ test("project canvas card actions create children and relations without reopenin
       },
     });
   });
-  await page.route(`**/api/projects/${projectId}/edges`, async (route) => {
+  await page.route(`**/api/projects/${projectId}/edges/batch`, async (route) => {
     expect(route.request().method()).toBe("POST");
     expect(route.request().postDataJSON()).toEqual({
       sourceNodeId: rootNodeId,
-      targetNodeId: childNodeId,
+      targetNodeIds: [childNodeId],
       type: "depends_on",
     });
     relationCreated = true;
@@ -3122,8 +3194,8 @@ test("project canvas card actions create children and relations without reopenin
     .click();
   const relationDialog = page.getByRole("dialog");
   await expect(relationDialog.getByText("快捷关联", { exact: true })).toBeVisible();
-  await relationDialog.getByLabel("目标节点", { exact: true }).selectOption(childNodeId);
-  await relationDialog.getByRole("button", { name: "创建关联" }).click();
+  await relationDialog.getByLabel("关联目标 实现项目画布").check();
+  await relationDialog.getByRole("button", { name: "创建 1 条关联" }).click();
   await expect.poll(() => relationCreated).toBe(true);
 });
 
@@ -3170,7 +3242,7 @@ test("project color chips keep readable text for light server colors", async ({
   page,
 }) => {
   await mockAuthenticatedWorkspace(page);
-  await page.route("**/api/projects", (route) =>
+  await page.route("**/api/projects/catalog", (route) =>
     route.fulfill({
       json: {
         items: [
@@ -3183,6 +3255,8 @@ test("project color chips keep readable text for light server colors", async ({
             status: "active",
             version: 1,
             updatedAt: "2026-09-02T01:00:00.000Z",
+            isMember: true,
+            canAccess: true,
           },
         ],
       },
@@ -3200,6 +3274,47 @@ test("project color chips keep readable text for light server colors", async ({
       colorChip.evaluate((element) => getComputedStyle(element).color),
     )
     .toBe("rgb(23, 32, 54)");
+});
+
+test("an employee can discover and actively join an organization project", async ({
+  page,
+}) => {
+  await mockAuthenticatedWorkspace(page);
+  const projectId = "00000000-0000-4000-8000-000000000073";
+  let joined = false;
+  await page.route("**/api/projects/catalog", (route) =>
+    route.fulfill({
+      json: {
+        items: [{
+          id: projectId,
+          key: "JOIN",
+          name: "员工自主加入项目",
+          description: "加入后即可关联项目节点与工作记录",
+          color: "#3468f5",
+          status: "active",
+          version: 1,
+          updatedAt: "2026-09-06T01:00:00.000Z",
+          isMember: joined,
+          memberRole: joined ? "member" : null,
+          canAccess: joined,
+        }],
+      },
+    }),
+  );
+  await page.route(`**/api/projects/${projectId}/members/self`, async (route) => {
+    expect(route.request().method()).toBe("POST");
+    joined = true;
+    await route.fulfill({ json: { member: { projectId, role: "member" } } });
+  });
+  await page.goto("/login");
+  await page.getByLabel("邮箱或手机号").fill("owner@example.test");
+  await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+  await page.goto("/projects");
+  await page.getByRole("button", { name: "加入项目 员工自主加入项目" }).click();
+  await expect.poll(() => joined).toBe(true);
+  await expect(page.getByText("已加入", { exact: true })).toBeVisible();
+  await expect(page.getByRole("link").filter({ hasText: "员工自主加入项目" })).toBeVisible();
 });
 
 test("a custom accent is rendered exactly while its foreground remains readable", async ({
@@ -4529,6 +4644,13 @@ test("project workbench exposes versioned node editing instead of a visual-only 
   await page.goto("/projects/00000000-0000-4000-8000-000000000004");
   await page.getByText("实现项目画布", { exact: true }).first().click();
   await expect(page.getByText("节点详情", { exact: true })).toBeVisible();
+  const inspector = page.getByRole("complementary", { name: "实现项目画布 节点详情" });
+  const inspectorBox = await inspector.boundingBox();
+  const viewport = page.viewportSize();
+  expect(inspectorBox).not.toBeNull();
+  expect(viewport).not.toBeNull();
+  expect(inspectorBox!.y + inspectorBox!.height).toBeLessThanOrEqual(viewport!.height + 1);
+  await expect(inspector.locator(".project-node-inspector-scroll")).toHaveCSS("overflow-y", "auto");
   await expect(page.getByLabel("变更说明")).toHaveValue("更新项目节点");
   await expect(
     page.getByRole("button", { name: "保存节点版本" }),
@@ -4584,11 +4706,11 @@ test("project relation, version history, and recycle recovery use real mutation 
   const projectId = "00000000-0000-4000-8000-000000000004";
   const rootNodeId = "00000000-0000-4000-8000-000000000006";
   const childNodeId = "00000000-0000-4000-8000-000000000007";
-  await page.route(`**/api/projects/${projectId}/edges`, async (route) => {
+  await page.route(`**/api/projects/${projectId}/edges/batch`, async (route) => {
     expect(route.request().method()).toBe("POST");
     expect(route.request().postDataJSON()).toMatchObject({
       sourceNodeId: rootNodeId,
-      targetNodeId: childNodeId,
+      targetNodeIds: [childNodeId],
       type: "relates_to",
     });
     await route.fulfill({
@@ -4658,8 +4780,8 @@ test("project relation, version history, and recycle recovery use real mutation 
   await expect(page.getByText(/v2 · 工作台正式版/)).toBeVisible();
   await expect(page.getByText(/更新阶段进度.*1 位协作者/)).toBeVisible();
   await page.getByLabel("关系类型").selectOption("relates_to");
-  await page.getByLabel("关联到节点").selectOption(childNodeId);
-  await page.getByRole("button", { name: "创建节点关联" }).click();
+  await page.getByLabel("关联目标 实现项目画布").check();
+  await page.getByRole("button", { name: "创建 1 条节点关联" }).click();
   await page.getByRole("button", { name: "打开项目回收站" }).click();
   await expect(page.getByText("已删除节点", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "恢复" }).click();

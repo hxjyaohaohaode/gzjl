@@ -109,6 +109,24 @@ const createEdgeSchema = z.object({
   ]),
   label: z.string().trim().min(1).max(160).optional(),
 });
+const createEdgesSchema = z.object({
+  sourceNodeId: z.uuid(),
+  targetNodeIds: z
+    .array(z.uuid())
+    .min(1, "至少选择一个目标节点。")
+    .max(32, "单次最多关联 32 个目标节点。")
+    .refine((values) => new Set(values).size === values.length, {
+      message: "目标节点不能重复。",
+    }),
+  type: z.enum([
+    "depends_on",
+    "blocks",
+    "relates_to",
+    "replaces",
+    "merges_into",
+  ]),
+  label: z.string().trim().min(1).max(160).optional(),
+});
 const updateNodeSchema = z
   .object({
     expectedVersion: z.number().int().positive(),
@@ -215,6 +233,14 @@ export async function registerProjectRoutes(
   app.get("/api/projects", { preHandler: authenticate }, async (request) => ({
     items: await service.list(request.auth!, canViewAll(request)),
   }));
+
+  app.get(
+    "/api/projects/catalog",
+    { preHandler: authenticate },
+    async (request) => ({
+      items: await service.catalog(request.auth!, canViewAll(request)),
+    }),
+  );
 
   app.get(
     "/api/projects/calendar-milestones",
@@ -401,6 +427,21 @@ export async function registerProjectRoutes(
     },
   );
 
+  app.post(
+    "/api/projects/:projectId/members/self",
+    { preHandler: [app.csrfProtection, authenticate] },
+    async (request, reply) => {
+      const { projectId } = projectIdParams.parse(request.params);
+      try {
+        return {
+          member: await service.joinProject(request.auth!, projectId),
+        };
+      } catch (error) {
+        return mapProjectError(error, reply);
+      }
+    },
+  );
+
   app.delete(
     "/api/projects/:projectId/members/:membershipId",
     { preHandler: mutationHooks },
@@ -429,6 +470,30 @@ export async function registerProjectRoutes(
           createEdgeSchema.parse(request.body),
         );
         return reply.code(201).send({ edge });
+      } catch (error) {
+        return mapProjectError(error, reply);
+      }
+    },
+  );
+
+  app.post(
+    "/api/projects/:projectId/edges/batch",
+    { preHandler: mutationHooks },
+    async (request, reply) => {
+      const { projectId } = projectIdParams.parse(request.params);
+      const input = createEdgesSchema.parse(request.body);
+      try {
+        const edges = await service.createEdges(
+          request.auth!,
+          projectId,
+          input.targetNodeIds.map((targetNodeId) => ({
+            sourceNodeId: input.sourceNodeId,
+            targetNodeId,
+            type: input.type,
+            ...(input.label ? { label: input.label } : {}),
+          })),
+        );
+        return reply.code(201).send({ edges });
       } catch (error) {
         return mapProjectError(error, reply);
       }

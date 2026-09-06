@@ -2511,6 +2511,372 @@ input[type="file"]::file-selector-button {
   }
 }
 
+/* Project structure usability: keep the inspector within the usable viewport,
+ * expose batch relationship selection, and retain legibility on large maps. */
+.project-node-inspector {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+}
+
+.project-node-inspector-head {
+  flex: none;
+}
+
+.project-node-inspector-scroll {
+  min-height: 0;
+  flex: 1 1 auto;
+  max-height: none;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+@media (min-width: 1171px) {
+  .project-workbench.has-inspector {
+    align-items: start;
+  }
+
+  .project-node-inspector {
+    position: sticky;
+    top: 5rem;
+    height: min(52rem, calc(100dvh - 6rem));
+    align-self: start;
+  }
+}
+
+@media (max-width: 1170px) {
+  .project-workbench.has-inspector .project-node-inspector {
+    display: flex;
+    height: auto;
+    max-height: calc(100dvh - 6rem);
+  }
+}
+
+@media (max-width: 840px) {
+  .project-workbench.has-inspector .project-node-inspector {
+    max-height: min(88dvh, 48rem);
+    padding-bottom: calc(1rem + env(safe-area-inset-bottom));
+  }
+
+  .project-node-inspector-head {
+    gap: 0.55rem;
+  }
+
+  .project-node-inspector-head > div:last-child {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+}
+
+.project-relation-target-picker {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 0.85rem;
+  background: var(--surface-subtle);
+}
+
+.project-relation-target-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.5rem;
+  align-items: center;
+  border-bottom: 1px solid var(--border);
+  padding: 0.45rem;
+}
+
+.project-relation-target-head > span {
+  min-width: 3.2rem;
+  color: var(--text-subtle);
+  font-size: 0.64rem;
+  font-weight: 760;
+  text-align: center;
+}
+
+.project-relation-target-list {
+  display: grid;
+  max-height: 14rem;
+  overflow-y: auto;
+  padding: 0.35rem;
+  overscroll-behavior: contain;
+}
+
+.project-relation-target-list > label {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 0.5rem;
+  align-items: center;
+  border-radius: 0.55rem;
+  padding: 0.45rem 0.5rem;
+  cursor: pointer;
+}
+
+.project-relation-target-list > label:hover {
+  background: var(--surface);
+}
+
+.project-relation-target-list input[type="checkbox"] {
+  width: 1rem;
+  height: 1rem;
+  accent-color: var(--accent);
+}
+
+.project-relation-target-list strong,
+.project-relation-target-list small {
+  display: block;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.project-relation-target-list strong {
+  color: var(--text);
+  font-size: 0.68rem;
+}
+
+.project-relation-target-list small,
+.project-relation-target-list > p {
+  color: var(--text-subtle);
+  font-size: 0.58rem;
+  line-height: 1.45;
+}
+
+.project-relation-target-list > p {
+  padding: 0.7rem;
+}
+
+.project-flow-tools {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  border: 1px solid color-mix(in srgb, var(--border) 78%, transparent);
+  border-radius: 0.7rem;
+  background: color-mix(in srgb, var(--surface) 92%, transparent);
+  padding: 0.35rem;
+  box-shadow: 0 0.4rem 1rem rgb(22 35 62 / 0.08);
+  backdrop-filter: blur(0.6rem);
+}
+
+.project-flow-tools button {
+  border: 0;
+  border-radius: 0.48rem;
+  background: var(--surface-subtle);
+  padding: 0.38rem 0.52rem;
+  color: var(--text-muted);
+  font-size: 0.61rem;
+  font-weight: 750;
+}
+
+.project-flow-tools button[aria-pressed="true"] {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.project-flow-tools button:disabled {
+  opacity: 0.45;
+}
+
+.project-flow-tools > span {
+  color: var(--text-subtle);
+  font-size: 0.56rem;
+  font-weight: 700;
+}
+
+.project-flow-node.is-dense {
+  min-width: 14.5rem;
+  padding-block: 0.65rem 0.8rem;
+}
+
+.project-flow-node.is-very-dense {
+  min-width: 13.1rem;
+}
+
+.project-flow-node.is-dense .project-flow-node-actions {
+  bottom: -0.92rem;
+  transform: translateX(-50%) scale(0.9);
+}
+
+.project-card-available {
+  border-style: dashed !important;
+  background: color-mix(in srgb, var(--surface-raised) 82%, var(--accent-soft)) !important;
+}
+
+.project-card-footer > span:last-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  text-align: right;
+}
+
+/* Work submission: errors stay beside the affected record and narrow screens
+ * wrap content/actions instead of widening the document. */
+.work-row-heading,
+.work-row-title,
+.work-row-meta,
+.work-row-project-links,
+.work-row-actions,
+.work-editor-heading,
+.work-editor-heading > div {
+  min-width: 0;
+}
+
+.work-row-title {
+  max-width: 100%;
+  flex: 1 1 16rem;
+  overflow-wrap: anywhere;
+  line-height: 1.45;
+}
+
+.work-row-meta {
+  overflow-wrap: anywhere;
+  line-height: 1.55;
+}
+
+.work-row-project-links > span {
+  min-width: 0;
+}
+
+.work-row-actions {
+  flex: none;
+}
+
+.work-review-feedback {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 0.55rem;
+  align-items: start;
+  margin: 0 0.5rem 0.75rem;
+  border-radius: 0.75rem;
+  background: var(--danger-soft);
+  padding: 0.65rem 0.75rem;
+  color: var(--danger);
+}
+
+.work-review-feedback svg {
+  margin-top: 0.12rem;
+}
+
+.work-review-feedback strong,
+.work-review-feedback small {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.work-review-feedback strong {
+  font-size: 0.72rem;
+}
+
+.work-review-feedback small {
+  margin-top: 0.16rem;
+  font-size: 0.65rem;
+  line-height: 1.5;
+}
+
+@media (max-width: 639px) {
+  .work-editor-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .work-editor-heading > [data-ui="badge"] {
+    align-self: flex-start;
+  }
+
+  .work-row-actions,
+  .work-row-actions > div,
+  .work-row-actions [data-ui="button"] {
+    width: 100%;
+  }
+
+  .work-row-actions > div {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .work-row-actions > div > :only-child {
+    grid-column: 1 / -1;
+  }
+
+  .work-row-project-links > span {
+    width: 100%;
+  }
+
+  .work-row-project-links > span > span:last-child {
+    min-width: 0;
+    flex: 1;
+  }
+}
+
+/* Salary projection: separate daily scale from cumulative scale and size each
+ * panel from its own responsive column rather than the viewport width. */
+.salary-forecast-grid {
+  display: grid;
+  min-width: 0;
+  gap: 1rem;
+}
+
+.salary-forecast-panel {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 0.95rem;
+  background: color-mix(in srgb, var(--surface-raised) 84%, var(--surface));
+  padding: 0.75rem;
+}
+
+.salary-forecast-panel > div:first-child {
+  min-width: 0;
+  padding: 0.1rem 0.2rem 0.55rem;
+}
+
+.salary-forecast-panel > div:first-child > strong,
+.salary-forecast-panel > div:first-child > small {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.salary-forecast-panel > div:first-child > strong {
+  color: var(--text);
+  font-size: 0.78rem;
+}
+
+.salary-forecast-panel > div:first-child > small {
+  margin-top: 0.18rem;
+  color: var(--text-subtle);
+  font-size: 0.64rem;
+  line-height: 1.45;
+}
+
+.salary-forecast-unified-card .salary-forecast-panel .analytics-chart-canvas {
+  height: 21rem;
+}
+
+@media (min-width: 1180px) {
+  .salary-forecast-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 639px) {
+  .salary-forecast-unified-card [data-ui="card-content"] {
+    padding-inline: 0.65rem;
+  }
+
+  .salary-forecast-panel {
+    padding: 0.4rem;
+  }
+
+  .salary-forecast-unified-card .salary-forecast-panel [role="img"] {
+    height: 17.5rem !important;
+  }
+}
+
+.salary-forecast-panel .analytics-chart-frame:fullscreen [role="img"] {
+  width: min(96vw, 112rem);
+  height: calc(100dvh - 4rem) !important;
+  max-height: 64rem;
+}
+
 /* Dense, borderless data-entry and mobile work surfaces. */
 .work-save-status,
 .work-plan-evidence-note {
@@ -7826,5 +8192,46 @@ body,
   .project-quick-relation-form > :nth-child(3),
   .project-quick-relation-form > [data-ui="button"] {
     grid-column: 1;
+  }
+}
+
+/* Keep this viewport-sizing override last: older project revisions above use
+ * hard-coded scroll heights that otherwise clip the inspector body. */
+.project-node-inspector {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+}
+
+.project-node-inspector-scroll {
+  min-height: 0;
+  flex: 1 1 auto;
+  max-height: none;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+@media (min-width: 1171px) {
+  .project-node-inspector {
+    position: sticky;
+    top: 5rem;
+    height: min(52rem, calc(100dvh - 6rem));
+    align-self: start;
+  }
+}
+
+@media (max-width: 1170px) {
+  .project-workbench.has-inspector .project-node-inspector {
+    display: flex;
+    height: auto;
+    max-height: calc(100dvh - 6rem);
+  }
+}
+
+@media (max-width: 840px) {
+  .project-workbench.has-inspector .project-node-inspector {
+    max-height: min(88dvh, 48rem);
+    padding-bottom: calc(1rem + env(safe-area-inset-bottom));
   }
 }
