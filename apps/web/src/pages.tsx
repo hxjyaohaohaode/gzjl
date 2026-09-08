@@ -1,3 +1,4 @@
+import { ReimbursementPanel } from "./reimbursement-panel.js";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { EChartsCoreOption } from "echarts/core";
 import {
@@ -279,6 +280,8 @@ export function LoadingBlock() {
 }
 
 function formatDateTime(value: string | Date): string {
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return "时间待确认";
   return new Intl.DateTimeFormat("zh-CN", {
     timeZone: getOrganizationTimezone(),
     month: "2-digit",
@@ -286,7 +289,7 @@ function formatDateTime(value: string | Date): string {
     hour: "2-digit",
     minute: "2-digit",
     second: "2-digit",
-  }).format(new Date(value));
+  }).format(date);
 }
 function addDateKey(value: string, days: number): string {
   const date = new Date(`${value}T12:00:00.000Z`);
@@ -1578,6 +1581,7 @@ const notificationCategories = [
     description: "薪资截止日存在待处理事项时提醒。",
   },
   { category: "identity_request_result", title: "身份申请结果", description: "专业身份申请处理完成时提醒。" },
+  { category: "reimbursement_result", title: "报销审批结果", description: "报销申请批准或驳回后提醒。" },
   { category: "export_ready", title: "导出完成", description: "后台导出文件准备完成时提醒。" },
   { category: "export_failed", title: "导出失败", description: "后台导出未完成时提醒并允许重试。" },
   {
@@ -2969,6 +2973,7 @@ interface EvidenceAttachment {
   externalUrl: string | null;
   textContent?: string | null;
   mimeType: string | null;
+  previewMimeType?: string | null;
   sizeBytes: number | null;
   visibility: string;
   note: string | null;
@@ -3717,6 +3722,7 @@ function WorkDayTimeline({
 
 function evidenceCanPreview(item: EvidenceAttachment): boolean {
   if (item.kind !== "file" || item.status !== "available") return false;
+  if (item.previewMimeType !== undefined) return item.previewMimeType !== null;
   const mime = (item.mimeType ?? "").toLowerCase();
   if (["application/pdf", "application/json", "text/plain", "text/markdown", "text/csv"].includes(mime)) return true;
   if ((mime.startsWith("image/") && mime !== "image/svg+xml") || mime.startsWith("audio/") || mime.startsWith("video/")) return true;
@@ -3752,9 +3758,14 @@ function evidencePreviewKind(
 }
 
 function EvidenceInlinePreview({ item }: { item: EvidenceAttachment }) {
+  const [failed, setFailed] = useState(false);
+  const [attempt, setAttempt] = useState(0);
   if (!evidenceCanPreview(item)) return null;
-  const previewUrl = evidenceAccessHref(item, "preview");
-  const kind = evidencePreviewKind(item.mimeType, item.originalName);
+  const previewUrl = `${evidenceAccessHref(item, "preview")}&v=${item.version}&attempt=${attempt}`;
+  const kind = evidencePreviewKind(item.previewMimeType ?? item.mimeType, item.originalName);
+  if (failed) return <div className="evidence-preview-error" role="alert">预览加载失败，请重试或下载原文件查看。
+    <button type="button" onClick={() => { setFailed(false); setAttempt(attempt + 1); }}>重新加载</button></div>;
+  if (kind === "text") return <EvidenceTextPreview item={item} />;
   if (kind === "image") {
     return (
       <a className="evidence-inline-image-link" href={previewUrl} rel="noopener noreferrer" target="_blank">
@@ -3762,29 +3773,43 @@ function EvidenceInlinePreview({ item }: { item: EvidenceAttachment }) {
           alt={item.originalName ? `证据图片：${item.originalName}` : "证据图片"}
           className="evidence-inline-image"
           loading="lazy"
+          onError={() => setFailed(true)}
           src={previewUrl}
         />
       </a>
     );
   }
   if (kind === "video") {
-    return <video className="evidence-inline-media" controls preload="metadata" src={previewUrl} />;
+    return <video className="evidence-inline-media" controls preload="metadata" src={previewUrl} onError={() => setFailed(true)} />;
   }
   if (kind === "audio") {
-    return <audio className="evidence-inline-audio" controls preload="metadata" src={previewUrl} />;
+    return <audio className="evidence-inline-audio" controls preload="metadata" src={previewUrl} onError={() => setFailed(true)} />;
   }
-  if (kind === "document" || kind === "text") {
+  if (kind === "document") {
     return (
+      <div>
       <iframe
         className="evidence-inline-document"
         loading="lazy"
-        sandbox=""
+        referrerPolicy="no-referrer"
         src={previewUrl}
         title={`附件内容：${item.originalName || "文件证据"}`}
       />
+      <p className="text-xs text-[var(--text-muted)]">若当前浏览器无法内嵌显示 PDF，可点击上方“预览”在新页面查看，或下载原文件。</p>
+      </div>
     );
   }
   return null;
+}
+
+function EvidenceTextPreview({ item }: { item: EvidenceAttachment }) {
+  const content = useQuery({ queryKey: ["evidence-content", item.id, item.version],
+    queryFn: () => api<{ text: string; truncated: boolean }>(`/api/attachments/${item.id}/content`) });
+  if (content.isPending) return <p role="status">正在读取文件内容…</p>;
+  if (content.error) return <div className="evidence-preview-error" role="alert">{content.error.message}
+    <button type="button" onClick={() => void content.refetch()}>重试预览</button>，也可通过上方下载入口查看原文件。</div>;
+  return <div><pre className="evidence-text-content">{content.data?.text}</pre>
+    {content.data?.truncated && <p>仅预览前 128 KiB，完整内容请下载原文件。</p>}</div>;
 }
 
 function LocalEvidenceFilePreview({
@@ -3859,11 +3884,13 @@ function EvidenceFileActions({ item }: { item: EvidenceAttachment }) {
   );
 }
 
-function EvidencePanel({
+export function EvidencePanel({
   sessionId,
+  resource = "work-sessions",
   defaultOpen = false,
 }: {
   sessionId: string;
+  resource?: "work-sessions" | "reimbursements";
   defaultOpen?: boolean;
 }) {
   const queryClient = useQueryClient();
@@ -3889,7 +3916,7 @@ function EvidencePanel({
     queryKey: ["evidence", sessionId],
     queryFn: () =>
       api<{ items: EvidenceAttachment[] }>(
-        `/api/work-sessions/${sessionId}/attachments`,
+        `/api/${resource}/${sessionId}/attachments`,
       ),
     enabled: open,
   });
@@ -3956,7 +3983,7 @@ function EvidencePanel({
       intent = await api<EvidenceUploadIntent>(
         replacementFor
           ? `/api/attachments/${replacementFor}/replacement-intent`
-          : `/api/work-sessions/${sessionId}/attachments/upload-intent`,
+          : `/api/${resource}/${sessionId}/attachments/upload-intent`,
         {
           method: "POST",
           body: replacementFor
@@ -4038,7 +4065,7 @@ function EvidencePanel({
   });
   const addUrl = useMutation({
     mutationFn: () =>
-      api(`/api/work-sessions/${sessionId}/attachments/reference`, {
+      api(`/api/${resource}/${sessionId}/attachments/reference`, {
         method: "POST",
         body: {
           kind: "url",
@@ -4054,7 +4081,7 @@ function EvidencePanel({
   });
   const addText = useMutation({
     mutationFn: () =>
-      api(`/api/work-sessions/${sessionId}/attachments/reference`, {
+      api(`/api/${resource}/${sessionId}/attachments/reference`, {
         method: "POST",
         body: {
           kind: "text",
@@ -4574,12 +4601,12 @@ function EvidencePanel({
   );
 }
 
-function ReadOnlyEvidenceList({ sessionId }: { sessionId: string }) {
+export function ReadOnlyEvidenceList({ sessionId, resource = "work-sessions" }: { sessionId: string; resource?: "work-sessions" | "reimbursements" }) {
   const evidence = useQuery({
     queryKey: ["evidence", sessionId],
     queryFn: () =>
       api<{ items: EvidenceAttachment[] }>(
-        `/api/work-sessions/${sessionId}/attachments`,
+        `/api/${resource}/${sessionId}/attachments`,
       ),
   });
   if (evidence.isPending) {
@@ -5007,7 +5034,7 @@ export function WorkPage() {
           .includes(normalizedNodeSearch),
       )
     : activeNodeOptions;
-  const primaryChoices = [...linkedProjectNodes, ...activeNodeOptions].filter(
+  const primaryChoices = [...activeNodeOptions, ...linkedProjectNodes].filter(
     (node, index, items) =>
       items.findIndex((candidate) => candidate.id === node.id) === index,
   );
@@ -5020,7 +5047,10 @@ export function WorkPage() {
         ? current
         : [...current, node],
     );
-    if (primary || !primaryProjectNodeId) setPrimaryProjectNodeId(node.id);
+    if (primary || !primaryProjectNodeId) {
+      if (node.id !== primaryProjectNodeId) setReportedProgress("");
+      setPrimaryProjectNodeId(node.id);
+    }
   };
   const removeLinkedNode = (nodeId: string) => {
     const remaining = linkedProjectNodes.filter((node) => node.id !== nodeId);
@@ -5101,6 +5131,9 @@ export function WorkPage() {
   };
   const create = useMutation({
     mutationFn: async (recordKind: "fact" | "plan") => {
+      if (linkedProjectId && !primaryProjectNodeId) {
+        throw new Error("已选择项目，请再选择一个主项目节点，工时才能归集到项目；也可清空关联项目后保存。");
+      }
       if (!editingSession && !correctionSession) {
         const evidenceMissingFor: string[] = [];
         const primaryIsFact =
@@ -5150,7 +5183,7 @@ export function WorkPage() {
         primaryProjectNodeId: primaryProjectNodeId || null,
         projectNodeIds: linkedProjectNodes.map((node) => node.id),
         reportedProgress:
-          recordKind === "fact" && reportedProgress !== ""
+          recordKind === "fact" && reportedProgress !== "" && (!selectedPrimaryNode?.progressMode || selectedPrimaryNode.progressMode === "manual")
             ? Number(reportedProgress)
             : null,
         visibility:
@@ -5893,6 +5926,9 @@ export function WorkPage() {
                     />
                   </div>
                 ) : null}
+                <details className="work-optional-fields md:col-span-2" key={editingSession?.id ?? correctionSession?.id ?? "new"} open={editingSession || correctionSession ? true : undefined}>
+                  <summary>补充阻碍与下一步（可选）{manual.blockers || manual.nextStep ? " · 已填写" : ""}</summary>
+                  <div className="grid gap-4 md:grid-cols-2">
                 <Field
                   hint="如依赖、风险或等待项；它会进入可追溯记录。"
                   label="阻塞与风险（可选）"
@@ -5921,6 +5957,8 @@ export function WorkPage() {
                     value={manual.nextStep}
                   />
                 </Field>
+                  </div>
+                </details>
                 {correctionSession ? (
                   <div className="md:col-span-2">
                     <Field
@@ -7404,6 +7442,7 @@ export function ApprovalsPage() {
         title="审批"
         description="仅显示当前角色和授权范围内的待审事实；批准、退回与更正均保留前后快照。"
       />
+      <ReimbursementPanel reviewOnly />
       {approvals.isPending ? (
         <Card>
           <LoadingBlock />
@@ -7742,8 +7781,9 @@ interface PayrollOwnResponse {
     currency: string;
     planType: CompensationPlanType;
     baseAmount: string;
-    subsidies?: Array<{ name: string; amount: string }>;
+    subsidies?: Array<{ name: string; amount: string; distribution?: "daily" | "period_end" }>;
     subsidyTotal?: string;
+    approvedReimbursementAmount?: string;
     approvedSeconds: number;
     pendingSeconds: number;
     weeklyBonusSeconds: number;
@@ -7756,7 +7796,7 @@ interface PayrollOwnResponse {
     estimatedAmount: string;
     projectedPeriodAmount: string;
     projection: {
-      method: "adaptive_weekday_backtest_v3";
+      method: "adaptive_weekday_backtest_v4";
       historyWindowDays: number;
       trainedThrough: string | null;
       sampleDays: number;
@@ -7855,7 +7895,7 @@ interface PayrollManagementOverview {
         effectiveTo: string | null;
         config: {
           fixedAmount?: string;
-          subsidies?: Array<{ name: string; amount: string }>;
+          subsidies?: Array<{ name: string; amount: string; distribution?: "daily" | "period_end" }>;
         };
       };
       rules: Array<{
@@ -7992,7 +8032,7 @@ function PayrollManagementPanel() {
     currency: "CNY",
     baseAmount: "",
     fixedAmount: "",
-    subsidies: [] as Array<{ id: string; name: string; amount: string }>,
+    subsidies: [] as Array<{ id: string; name: string; amount: string; distribution?: "daily" | "period_end" }>,
     effectiveFrom: localInput(new Date(Date.now() + 60_000)),
     pendingReviewCountsInEstimate: true,
     weekdayEnabled: false,
@@ -8203,9 +8243,10 @@ function PayrollManagementPanel() {
           currency: planForm.currency,
           baseAmount: planForm.baseAmount,
           ...(planForm.type === "hybrid" ? { fixedAmount: planForm.fixedAmount } : {}),
-          subsidies: planForm.subsidies.map(({ name, amount }) => ({
+          subsidies: planForm.subsidies.map(({ name, amount, distribution }) => ({
             name: name.trim(),
             amount,
+            distribution: distribution ?? "daily",
           })),
           effectiveFrom: zonedInputToDate(planForm.effectiveFrom).toISOString(),
           pendingReviewCountsInEstimate: planForm.pendingReviewCountsInEstimate,
@@ -8401,7 +8442,7 @@ function PayrollManagementPanel() {
                     ...current,
                     subsidies: [
                       ...current.subsidies,
-                      { id: crypto.randomUUID(), name: "", amount: "" },
+                      { id: crypto.randomUUID(), name: "", amount: "", distribution: "daily" },
                     ],
                   }))}
                   size="compact"
@@ -8455,6 +8496,18 @@ function PayrollManagementPanel() {
                           type="number"
                           value={subsidy.amount}
                         />
+                      </label>
+                      <label>
+                        <span>计入方式</span>
+                        <select aria-label={`第 ${index + 1} 项补贴计入方式`} className={fieldClass}
+                          value={subsidy.distribution ?? "daily"}
+                          onChange={(event) => setPlanForm((current) => ({ ...current,
+                            subsidies: current.subsidies.map((item) => item.id === subsidy.id
+                              ? { ...item, distribution: event.target.value as "daily" | "period_end" } : item),
+                          }))}>
+                          <option value="daily">按天摊分（随生效区间折算）</option>
+                          <option value="period_end">期末一次计入（不摊分）</option>
+                        </select>
                       </label>
                       <Button
                         aria-label={`删除第 ${index + 1} 项补贴`}
@@ -9109,13 +9162,9 @@ export function PayrollPage({ me }: { me: Me }) {
   const forecastDays = livePreview?.salaryTimeline.filter(
     (day) => day.forecast,
   ) ?? [];
-  const forecastConfidence = forecastDays.some(
-    (day) => day.forecastConfidence === "high",
-  )
-    ? "较高"
-    : forecastDays.some((day) => day.forecastConfidence === "medium")
-      ? "中等"
-      : "谨慎";
+  const forecastConfidence = !forecastDays.length || forecastDays.some((day) => !day.forecastConfidence || day.forecastConfidence === "low")
+    ? "谨慎"
+    : forecastDays.some((day) => day.forecastConfidence === "medium") ? "中等" : "较高";
   const projectedIncrement = livePreview
     ? Math.max(
         0,
@@ -9129,6 +9178,11 @@ export function PayrollPage({ me }: { me: Me }) {
         title={isPayrollManager ? "薪资管理" : "我的薪资"}
       />
       {isPayrollManager ? <PayrollManagementPanel /> : null}
+      <ReimbursementPanel />
+      {livePreview && Number(livePreview.approvedReimbursementAmount ?? 0) > 0 && <Card className="mb-4"><CardContent>
+        <StatusLine label="已批准报销 · 已计入本月预估" value={money(livePreview.currency, livePreview.approvedReimbursementAmount!)} />
+        <p className="mt-2 text-xs text-[var(--text-muted)]">按选定周期期末计入，不增加工时，也不作为未来工资增长的预测依据。</p>
+      </CardContent></Card>}
       {!isPayrollManager && livePreview ? (
         <section className="mb-4 grid gap-2.5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4" aria-label="本月实时薪资">
           <Card><CardContent><StatusLine label={livePreview.planType === "hourly" || livePreview.planType === "hybrid" ? "基础时薪" : compensationTypeLabels[livePreview.planType]} value={`${money(livePreview.currency, livePreview.baseAmount)}${livePreview.planType === "hourly" || livePreview.planType === "hybrid" ? " / 小时" : ""}`} /></CardContent></Card>
@@ -9157,7 +9211,7 @@ export function PayrollPage({ me }: { me: Me }) {
             </p>
             {salarySubsidies.length ? (
               <p className="mt-2 text-xs leading-5 text-[var(--text-muted)]">
-                上述已批准工作计薪中包含固定补贴 {money(livePreview.currency, salarySubsidyTotal)}：{salarySubsidies.map((item) => `${item.name} ${money(livePreview.currency, item.amount)}`).join("、")}。补贴随方案版本留痕，正式结算时按版本生效区间折算。
+                上述已批准工作计薪中包含固定补贴 {money(livePreview.currency, salarySubsidyTotal)}：{salarySubsidies.map((item) => `${item.name} ${money(livePreview.currency, item.amount)}`).join("、")}。补贴随方案版本留痕；按天摊分项按生效区间折算，不摊分项按期末生效版本一次计入。
               </p>
             ) : null}
             {(livePreview.planType === "hourly" || livePreview.planType === "hybrid") ? (
@@ -10128,7 +10182,7 @@ interface AnalyticsSummary {
       confidence: "low" | "medium" | "high";
     }>;
     model: {
-      method: "adaptive_weekday_backtest_v3";
+      method: "adaptive_weekday_backtest_v4";
       sampleDays: number;
       nonZeroSampleDays: number;
       horizonDays: number;

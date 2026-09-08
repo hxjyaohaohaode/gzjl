@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import { and, asc, desc, eq, gt, inArray, isNull, lt, ne, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNull, lt, lte, ne, or, sql } from "drizzle-orm";
 import type { Database } from "@workbench/db";
 import {
   auditLogs,
@@ -56,7 +56,7 @@ export interface ConfigureCompensationPlanInput {
   effectiveFrom: Date;
   pendingReviewCountsInEstimate: boolean;
   fixedAmount?: string | undefined;
-  subsidies?: Array<{ name: string; amount: string }> | undefined;
+  subsidies?: Array<{ name: string; amount: string; distribution?: "daily" | "period_end" }> | undefined;
   rules: Array<
     | {
         type: "weekly_bonus";
@@ -131,15 +131,15 @@ function splitMicros(value: bigint, count: number): bigint[] {
   });
 }
 
-function planSubsidies(config: unknown): Array<{ name: string; amount: string }> {
+function planSubsidies(config: unknown): Array<{ name: string; amount: string; distribution?: "daily" | "period_end" }> {
   if (!config || typeof config !== "object") return [];
   const subsidies = (config as Record<string, unknown>).subsidies;
   if (!Array.isArray(subsidies)) return [];
   return subsidies.flatMap((item) => {
     if (!item || typeof item !== "object") return [];
-    const { name, amount } = item as Record<string, unknown>;
+    const { name, amount, distribution } = item as Record<string, unknown>;
     return typeof name === "string" && typeof amount === "string"
-      ? [{ name, amount }]
+      ? [{ name, amount, distribution: distribution === "period_end" ? "period_end" as const : "daily" as const }]
       : [];
   });
 }
@@ -658,7 +658,9 @@ export class PayrollService {
     const subsidyTotal = addDecimalAmounts(...subsidies.map((item) => item.amount));
     for (const subsidy of subsidies) {
       estimatedAmount = addDecimalAmounts(estimatedAmount, subsidy.amount);
-      const allocations = splitMicros(decimalMicros(subsidy.amount), monthDates.length);
+      const allocations = subsidy.distribution === "period_end"
+        ? monthDates.map((_, index) => index === monthDates.length - 1 ? decimalMicros(subsidy.amount) : 0n)
+        : splitMicros(decimalMicros(subsidy.amount), monthDates.length);
       monthDates.forEach((date, index) =>
         liveComponents.push({
           date,
@@ -748,6 +750,23 @@ export class PayrollService {
         estimatedBonusAmount: 0n,
       },
     );
+    const approvedExpenses = await this.db.select({ amount: payrollAdjustments.amount, endsAt: payPeriods.endsAt })
+      .from(payrollAdjustments).innerJoin(payPeriods, eq(payPeriods.id, payrollAdjustments.payPeriodId))
+      .where(and(eq(payrollAdjustments.organizationId, actor.organizationId),
+        eq(payrollAdjustments.membershipId, actor.membershipId), eq(payrollAdjustments.sourceEntityType, "reimbursement"),
+        eq(payrollAdjustments.currency, currentPlan.plan.currency), sql`${payrollAdjustments.approvedAt} is not null`,
+        gt(payPeriods.endsAt, startsAt), lte(payPeriods.endsAt, endsAt)));
+    const approvedReimbursementAmount = addDecimalAmounts(...approvedExpenses.map((expense) => expense.amount));
+    estimatedAmount = addDecimalAmounts(estimatedAmount, approvedReimbursementAmount);
+    for (const expense of approvedExpenses) {
+      const date = localDateKey(new Date(expense.endsAt.getTime() - 1), organization.timezone);
+      const day = daily.get(date);
+      if (day) {
+        day.approvedAmount += decimalMicros(expense.amount);
+        // Known one-off payments must never become training observations.
+        day.recurringAmount += decimalMicros(expense.amount);
+      }
+    }
     const futureDates = monthDates.filter((date) => date > today);
     const toSafeMicros = (value: number) =>
       BigInt(
@@ -983,6 +1002,7 @@ export class PayrollService {
       baseAmount: version.baseAmount,
       subsidies,
       subsidyTotal,
+      approvedReimbursementAmount,
       approvedSeconds,
       pendingSeconds,
       weeklyBonusSeconds,
@@ -1635,6 +1655,9 @@ export class PayrollService {
       }
       planByMember.set(plan.membershipId, plan.id);
     }
+    if (adjustments.some((adjustment) => adjustment.approvedAt && !planByMember.has(adjustment.membershipId))) {
+      throw new PayrollConflictError("已有获批调整或报销的成员缺少周期内生效方案，请补齐方案后计算，避免漏款。");
+    }
 
     const calculatedItems = [...groupedPlans.values()].map(({ plan, versions }) => {
       const memberSessions = contextSessions.filter(
@@ -1849,11 +1872,9 @@ export class PayrollService {
           (segmentEnd.getTime() - segmentStart.getTime()) / 1_000,
         );
         for (const subsidy of planSubsidies(version.config)) {
-          const amount = prorateDecimalAmount(
-            subsidy.amount,
-            segmentSeconds,
-            periodSeconds,
-          );
+          const amount = subsidy.distribution === "period_end"
+            ? (segmentEnd.getTime() === period.endsAt.getTime() ? subsidy.amount : "0.000000")
+            : prorateDecimalAmount(subsidy.amount, segmentSeconds, periodSeconds);
           grossAmount = addDecimalAmounts(grossAmount, amount);
           components.push({
             type: "allowance",
@@ -1867,6 +1888,7 @@ export class PayrollService {
             trace: {
               kind: "configured_subsidy",
               configuredAmount: subsidy.amount,
+              distribution: subsidy.distribution ?? "daily",
               effectiveFrom: segmentStart,
               effectiveTo: segmentEnd,
             },
@@ -1878,6 +1900,9 @@ export class PayrollService {
         (adjustment) =>
           adjustment.membershipId === plan.membershipId && adjustment.approvedAt !== null,
       );
+      if (memberAdjustments.some((adjustment) => adjustment.currency !== plan.currency)) {
+        throw new PayrollConflictError("已批准调整或报销与薪资方案币种不一致，请核对方案；系统不会将不同币种直接相加。");
+      }
       const adjustmentAmount = addDecimalAmounts(
         ...memberAdjustments.map((adjustment) => adjustment.amount),
       );
@@ -1898,7 +1923,7 @@ export class PayrollService {
     });
 
     const snapshotPayload = {
-      calculationVersion: "payroll-engine-v5-live-month-week-bonus",
+      calculationVersion: "payroll-engine-v6-subsidy-distribution-reimbursement",
       // Only immutable calculation inputs belong in the idempotency hash.
       // Runtime fields such as status/updatedAt change when a calculation is
       // cancelled, and must not turn an exact retry into a duplicate batch.
@@ -1969,6 +1994,13 @@ export class PayrollService {
     }
 
     return this.db.transaction(async (tx) => {
+      const [currentPeriod] = await tx.select().from(payPeriods).where(eq(payPeriods.id, period.id)).for("update");
+      if (!currentPeriod || ["locked", "settled"].includes(currentPeriod.status)) throw new PayrollConflictError("周期已经结算，请刷新。");
+      const currentAdjustments = await tx.select().from(payrollAdjustments).where(and(
+        eq(payrollAdjustments.organizationId, actor.organizationId), eq(payrollAdjustments.payPeriodId, period.id)));
+      const adjustmentSignature = (rows: typeof adjustments) => sha256([...rows].sort((a, b) => a.id.localeCompare(b.id)));
+      if (adjustmentSignature(currentAdjustments) !== adjustmentSignature(adjustments))
+        throw new PayrollConflictError("计算期间有报销或调整获批，请重新计算以纳入最新金额。");
       const [lastRun] = await tx
         .select({ runNumber: payrollRuns.runNumber })
         .from(payrollRuns)
@@ -1983,7 +2015,7 @@ export class PayrollService {
           status: calculatedItems.some((item) => item.needsReview)
             ? "review_required"
             : "ready",
-          calculationVersion: "payroll-engine-v5-live-month-week-bonus",
+          calculationVersion: "payroll-engine-v6-subsidy-distribution-reimbursement",
           requestedBy: actor.membershipId,
           inputHash,
           startedAt: new Date(),
@@ -2147,6 +2179,8 @@ export class PayrollService {
       throw new PayrollConflictError("只有已就绪且无待复核项的批次可以结算。")
     }
     return this.db.transaction(async (tx) => {
+      const [currentPeriod] = await tx.select().from(payPeriods).where(eq(payPeriods.id, record.period.id)).for("update");
+      if (!currentPeriod || ["locked", "settled"].includes(currentPeriod.status)) throw new PayrollConflictError("周期已经结算。");
       const settledAt = new Date();
       const [run] = await tx
         .update(payrollRuns)

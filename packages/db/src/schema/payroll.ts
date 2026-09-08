@@ -316,3 +316,27 @@ export const payslips = pgTable(
   },
   (table) => [uniqueIndex("payslips_item_uidx").on(table.payrollItemId)],
 );
+
+export const reimbursementRequests = pgTable("reimbursement_requests", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  organizationId: uuid("organization_id").notNull().references(() => organizations.id),
+  membershipId: uuid("membership_id").notNull().references(() => orgMemberships.id),
+  title: text("title").notNull(),
+  description: text("description").notNull(),
+  expenseDate: text("expense_date").notNull(),
+  amount: numeric("amount", { precision: 20, scale: 6 }).notNull(),
+  currency: text("currency").notNull().default("CNY"),
+  status: text("status").$type<"draft" | "pending" | "approved" | "rejected" | "cancelled">().notNull().default("draft"),
+  version: integer("version").notNull().default(1),
+  payPeriodId: uuid("pay_period_id").references(() => payPeriods.id),
+  reviewedBy: uuid("reviewed_by").references(() => orgMemberships.id),
+  reviewNote: text("review_note"),
+  submittedAt: timestamp("submitted_at", { withTimezone: true }),
+  reviewedAt: timestamp("reviewed_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  index("reimbursement_org_member_status_idx").on(table.organizationId, table.membershipId, table.status),
+  check("reimbursement_positive_amount", sql`${table.amount} > 0`),
+  check("reimbursement_valid_status", sql`${table.status} in ('draft', 'pending', 'approved', 'rejected', 'cancelled')`),
+]);

@@ -8441,3 +8441,81 @@ body,
     padding-bottom: calc(1rem + env(safe-area-inset-bottom));
   }
 }
+
+/* Intrinsic layout: long content wraps inside each surface, including narrow
+   split panes. Timelines and tables retain their own horizontal scrolling. */
+.app-main { container-type: inline-size; }
+.work-editor-grid, .work-editor-form, .work-editor-preview,
+.work-direct-evidence-grid > *, .work-project-recommender,
+.work-progress-reporter, .work-progress-reporter-head > div,
+.evidence-readonly-item, .evidence-readonly-head > *,
+.salary-subsidy-row > *, .reimbursement-panel { min-width: 0; max-width: 100%; }
+.work-editor-form :is(input:not([type=checkbox]):not([type=radio]), select, textarea),
+.reimbursement-input { box-sizing: border-box; min-width: 0; width: 100%; max-width: 100%; }
+.work-editor-form :is(label, p, strong, small),
+.evidence-readonly-item :is(strong, p, dd), .reimbursement-panel :is(p, strong, small, b) { overflow-wrap: anywhere; }
+.work-editor-form select { text-overflow: ellipsis; }
+.work-editor-form input[type=range] { min-height: 44px; touch-action: pan-y; }
+.analytics-chart-frame { container-type: inline-size; padding-top: 2.25rem; }
+.analytics-chart-canvas { height: clamp(17rem, 58cqw, 24rem); }
+.analytics-chart-tools { top: 0; }
+.analytics-chart-tool { min-width: 36px; min-height: 36px; }
+.salary-subsidy-row { grid-template-columns: minmax(0, 1fr) minmax(7rem, .7fr) minmax(0, 1.4fr) auto; }
+.evidence-inline-image { width: 100%; max-height: 65dvh; object-fit: contain; }
+.evidence-inline-document { width: 100%; height: clamp(15rem, 55dvh, 38rem); }
+.evidence-preview-error { padding: .8rem; color: var(--danger); background: var(--surface-subtle); border-radius: .7rem; overflow-wrap: anywhere; }
+.reimbursement-panel { margin-block: 1rem; }
+.reimbursement-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
+.reimbursement-heading h2 { font-weight: 750; font-size: 1rem; }
+.reimbursement-heading p, .reimbursement-empty { color: var(--text-muted); font-size: .85rem; margin-block: .4rem .8rem; }
+.reimbursement-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .8rem; margin-block: 1rem; }
+.reimbursement-form label { display: grid; gap: .4rem; min-width: 0; font-size: .85rem; }
+.reimbursement-input { border: 1px solid var(--border); background: var(--surface); color: var(--text); border-radius: .65rem; padding: .65rem; min-height: 44px; }
+.reimbursement-wide { grid-column: 1 / -1; }
+.reimbursement-list { display: grid; gap: .65rem; }
+.reimbursement-list > article { border: 1px solid var(--border); border-radius: .9rem; min-width: 0; }
+.reimbursement-summary { display: flex; width: 100%; justify-content: space-between; text-align: left; gap: .8rem; padding: .9rem; }
+.reimbursement-summary > span { min-width: 0; }
+.reimbursement-summary strong, .reimbursement-summary small { display: block; }
+.reimbursement-summary small { margin-top: .4rem; color: var(--text-muted); }
+.reimbursement-summary b { font-variant-numeric: tabular-nums; color: var(--accent-strong); }
+.reimbursement-detail { padding: 0 .9rem .9rem; }
+.reimbursement-detail > p { white-space: pre-wrap; margin-bottom: .75rem; }
+.reimbursement-actions { display: flex; flex-wrap: wrap; gap: .6rem; margin-top: .75rem; }
+.reimbursement-error { color: var(--danger); margin-block: .8rem; }
+@container (max-width: 760px) {
+  .work-editor-grid { grid-template-columns: minmax(0, 1fr); min-height: 0; }
+  .work-editor-preview { border-left: 0; border-top: 1px solid var(--border); }
+  .work-editor-form, .work-editor-preview { padding: 1rem; }
+  .salary-subsidy-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .salary-subsidy-row > label:nth-child(3) { grid-column: 1 / -1; }
+}
+@media (max-width: 640px) {
+  .app-main :is(input:not([type=checkbox]):not([type=radio]), select, textarea) { font-size: 16px; }
+  .work-editor-form, .work-editor-preview { padding: .8rem; }
+  .work-direct-evidence-grid, .reimbursement-form { grid-template-columns: minmax(0, 1fr); }
+  .work-day-timeline { min-height: 0; }
+  .work-timeline-frame { min-height: clamp(16rem, 50dvh, 24rem); }
+  .work-progress-reporter-head, .evidence-readonly-head { flex-wrap: wrap; }
+  .analytics-chart-tool { min-width: 44px; min-height: 44px; }
+  .analytics-chart-frame { padding-top: 2.8rem; }
+  .analytics-chart-canvas { height: clamp(17rem, 65vw, 22rem); }
+  .reimbursement-summary { flex-wrap: wrap; }
+  .reimbursement-actions > button { flex: 1 1 8rem; min-height: 44px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .analytics-chart-frame *, .reimbursement-panel * { scroll-behavior: auto; }
+}
+
+.evidence-text-content { max-height: 50dvh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; border: 1px solid var(--border); border-radius: .7rem; padding: .8rem; background: var(--surface-subtle); font-size: .8rem; }
+
+@media (max-width: 639px) { .analytics-chart-frame:not(:fullscreen) { padding-top: 3rem; } }
+
+@container (max-width: 520px) {
+  .work-editor-form form, .work-segment-fields { grid-template-columns: minmax(0, 1fr); }
+  .work-editor-form .md\:col-span-2 { grid-column: 1 / -1; }
+}
+
+.work-optional-fields { border: 1px solid var(--border); border-radius: .8rem; padding: .7rem; min-width: 0; }
+.work-optional-fields summary { cursor: pointer; min-height: 32px; padding-block: .3rem; color: var(--text-muted); font-size: .85rem; }
+.work-optional-fields[open] summary { margin-bottom: .65rem; }

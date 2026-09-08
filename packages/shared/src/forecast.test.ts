@@ -3,6 +3,28 @@ import { describe, expect, it } from "vitest";
 import { forecastCalendarSeries } from "./forecast.js";
 
 describe("forecastCalendarSeries", () => {
+  it("ignores invalid calendar dates and never treats missing observations as recorded zero days", () => {
+    const sparse = Array.from({ length: 15 }, (_, index) => ({
+      date: new Date(Date.UTC(2026, 6, 1 + index * 4, 12)).toISOString().slice(0, 10), value: 100,
+    }));
+    const result = forecastCalendarSeries([...sparse, { date: "2026-02-30", value: 9999 }, { date: "2026-99-01", value: 5 }], 40);
+    expect(result.sampleDays).toBe(15);
+    expect(result.observationCoverage).toBeLessThan(0.3);
+    expect(result.points.every((point) => point.confidence === "low")).toBe(true);
+    expect(forecastCalendarSeries(sparse, NaN).points).toEqual([]);
+    expect(forecastCalendarSeries(sparse, Infinity).points).toEqual([]);
+  });
+
+  it("downgrades distant forecasts even for a stable densely observed history", () => {
+    const observed = Array.from({ length: 56 }, (_, index) => ({
+      date: new Date(Date.UTC(2026, 6, index + 1, 12)).toISOString().slice(0, 10), value: 100,
+    }));
+    const result = forecastCalendarSeries(observed, 40);
+    expect(result.observationCoverage).toBe(1);
+    expect(result.points[0]?.confidence).toBe("high");
+    expect(result.points.at(-1)?.confidence).toBe("low");
+    expect(result.points.at(-1)!.upperValue - result.points.at(-1)!.lowerValue).toBeGreaterThan(result.points[0]!.upperValue - result.points[0]!.lowerValue);
+  });
   it("preserves weekday patterns instead of spreading work over every day equally", () => {
     const observed = Array.from({ length: 21 }, (_, index) => {
       const date = new Date(Date.UTC(2026, 7, 3 + index, 12));
@@ -15,7 +37,7 @@ describe("forecastCalendarSeries", () => {
 
     const result = forecastCalendarSeries(observed, 7);
 
-    expect(result.method).toBe("adaptive_weekday_backtest_v3");
+    expect(result.method).toBe("adaptive_weekday_backtest_v4");
     expect(result.points).toHaveLength(7);
     expect(result.validationPoints).toBeGreaterThanOrEqual(14);
     expect(result.validationWape).not.toBeNull();

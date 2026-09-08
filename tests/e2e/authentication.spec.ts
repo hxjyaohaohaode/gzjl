@@ -1,5 +1,77 @@
 import { expect, test, type Page } from "@playwright/test";
 
+test("reimbursements save evidence and submit without creating fictitious work", async ({ page }, testInfo) => {
+  await mockAuthenticatedWorkspace(page, { isOwner: false, canConfigurePayroll: false });
+  await page.route("**/api/payroll/me", (route) => route.fulfill({ json: { items: [], currentPlan: null, livePreview: null } }));
+  const memberId = "00000000-0000-4000-8000-000000000002";
+  const claimId = "00000000-0000-4000-8000-000000000321";
+  let claim: Record<string, unknown> | null = null;
+  const proofs: Record<string, unknown>[] = [];
+  await page.route("**/api/reimbursements", async (route) => {
+    if (route.request().method() === "POST") {
+      claim = { ...route.request().postDataJSON(), id: claimId, membershipId: memberId, memberName: "林知夏", status: "draft", version: 1 };
+      return route.fulfill({ status: 201, json: { request: claim } });
+    }
+    return route.fulfill({ json: { items: claim ? [claim] : [], periods: [], canReview: false, membershipId: memberId } });
+  });
+  await page.route("**/api/evidence/capabilities", (route) => route.fulfill({ json: { fileUploads: { available: false, maxBytes: 1024 }, references: { text: true, url: true } } }));
+  await page.route(`**/api/reimbursements/${claimId}/attachments`, (route) => route.fulfill({ json: { items: proofs } }));
+  await page.route(`**/api/reimbursements/${claimId}/attachments/reference`, async (route) => {
+    const proof = { ...route.request().postDataJSON(), id: "proof-1", version: 1, status: "available", uploadedAt: new Date().toISOString(), createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+    proofs.push(proof);
+    return route.fulfill({ json: { attachment: proof } });
+  });
+  await page.route(`**/api/reimbursements/${claimId}/actions`, async (route) => {
+    expect(route.request().postDataJSON()).toEqual({ action: "submit", expectedVersion: 1 });
+    expect(proofs).toHaveLength(1);
+    claim = { ...claim, status: "pending", version: 2 };
+    return route.fulfill({ json: { request: claim } });
+  });
+  await page.goto("/login");
+  await page.getByLabel("邮箱或手机号").fill("employee@example.test");
+  await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+  await page.goto("/payroll");
+  await page.getByRole("button", { name: "申请报销", exact: true }).click();
+  await page.getByLabel("报销事项", { exact: true }).fill("客户现场交通与设备配送费用");
+  await page.getByLabel("发生日期").fill("2026-09-03");
+  await page.getByLabel("报销金额").fill("128.35");
+  await page.getByLabel("用途说明").fill("到客户现场验收，附可核验交通票据。");
+  await page.getByRole("button", { name: "保存草稿并添加凭证" }).click();
+  await page.getByPlaceholder("粘贴简短文字证据、会议纪要、命令输出或说明…").fill("发票 TEST-001，金额 128.35 元。");
+  await page.getByRole("button", { name: "保存文字", exact: true }).click();
+  await expect.poll(() => proofs.length).toBe(1);
+  await page.getByRole("button", { name: "提交报销审批" }).click();
+  await expect(page.locator(".reimbursement-summary")).toContainText("待审批");
+  await expect(page.getByText("发票 TEST-001，金额 128.35 元。", { exact: true }).first()).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true);
+  await page.evaluate(() => { (document.activeElement as HTMLElement)?.blur(); window.scrollTo(0, 0); });
+  await page.screenshot({ path: testInfo.outputPath("reimbursement.png"), fullPage: true });
+});
+
+test("work editor wraps long evidence and form controls at narrow widths", async ({ page }, testInfo) => {
+  await mockAuthenticatedWorkspace(page);
+  await page.route("**/api/evidence/capabilities", (route) => route.fulfill({ json: { fileUploads: { available: false, maxBytes: 1024 }, references: { text: true, url: true } } }));
+  await page.route("**/api/work-sessions/project-node-recommendations?**", (route) => route.fulfill({ json: { items: [] } }));
+  await page.goto("/login");
+  await page.getByLabel("邮箱或手机号").fill("employee@example.test");
+  await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+  await page.goto("/work");
+  await page.getByRole("button", { name: "手工录入", exact: true }).click();
+  for (const width of [320, 375, 768, 1024]) {
+    await page.setViewportSize({ width, height: 844 });
+    await expect(page.locator(".work-editor-form")).toBeVisible();
+    const overflow = await page.locator(".work-editor-form").evaluate((form) => [...form.querySelectorAll("input:not([type=checkbox]):not([type=radio]),select,textarea")]
+      .filter((element) => { const box = element.getBoundingClientRect(); return box.width > 0 && (box.right > innerWidth + 1 || box.left < -1); })
+      .map((element) => element.getAttribute("aria-label") ?? element.tagName));
+    expect(overflow).toEqual([]);
+  }
+  await page.setViewportSize({ width: 375, height: 844 });
+  await page.evaluate(() => { (document.activeElement as HTMLElement)?.blur(); window.scrollTo(0, 0); });
+  await page.screenshot({ path: testInfo.outputPath("work-editor-mobile.png") });
+});
+
 async function mockAuthenticatedWorkspace(
   page: Page,
   options: {
@@ -10,6 +82,7 @@ async function mockAuthenticatedWorkspace(
     canAnalyzeTeam?: boolean;
   } = {},
 ): Promise<void> {
+  await page.route("**/api/reimbursements", (route) => route.fulfill({ json: { items: [], periods: [], canReview: false, membershipId: "00000000-0000-4000-8000-000000000002" } }));
   let authenticated = false;
   await page.routeWebSocket("**/api/realtime", (socket) => {
     socket.send(JSON.stringify({ type: "realtime.ready" }));
@@ -756,6 +829,7 @@ test("Owner can configure a versioned hourly plan and create a pay period", asyn
   await page.getByRole("button", { name: "添加补贴" }).click();
   await page.getByLabel("第 2 项补贴名称").fill("通信补贴");
   await page.getByLabel("第 2 项补贴金额").fill("300");
+  await page.getByLabel("第 2 项补贴计入方式").selectOption("period_end");
   await page.getByText("周末倍率", { exact: true }).click();
   await page.getByLabel("启用周超时奖励").check();
   await page.getByRole("button", { name: "保存薪资方案新版本" }).click();
@@ -766,8 +840,8 @@ test("Owner can configure a versioned hourly plan and create a pay period", asyn
     baseAmount: "88.50",
     pendingReviewCountsInEstimate: true,
     subsidies: [
-      { name: "交通补贴", amount: "500" },
-      { name: "通信补贴", amount: "300" },
+      { name: "交通补贴", amount: "500", distribution: "daily" },
+      { name: "通信补贴", amount: "300", distribution: "period_end" },
     ],
   });
   expect(planPayload?.rules).toEqual([
@@ -2058,6 +2132,7 @@ test("the uploader can inspect rich file details and use direct preview or downl
     });
   });
 
+  await page.route(`**/api/attachments/${attachmentId}/content`, (route) => route.fulfill({ json: { text: "现场验收内容：<script>window.bad = true</script>", truncated: false } }));
   await page.goto("/login");
   await page.getByLabel("邮箱或手机号").fill("owner@example.test");
   await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
@@ -2067,7 +2142,8 @@ test("the uploader can inspect rich file details and use direct preview or downl
   await expect(page.getByText("现场说明.txt", { exact: true }).first()).toBeVisible();
   await expect(page.getByRole("link", { name: "预览" })).toHaveAttribute("href", `/api/attachments/${attachmentId}/open?mode=preview`);
   await expect(page.getByRole("link", { name: "下载" })).toHaveAttribute("href", `/api/attachments/${attachmentId}/open?mode=download`);
-  await expect(page.getByTitle("附件内容：现场说明.txt")).toBeVisible();
+  await expect(page.locator(".evidence-text-content")).toHaveText("现场验收内容：<script>window.bad = true</script>");
+  expect(await page.evaluate(() => "bad" in window)).toBe(false);
   await page.getByText("查看内容详情", { exact: true }).click();
   await expect(page.getByText("由提交人核对", { exact: true })).toBeVisible();
   await expect(page.getByText("b".repeat(64), { exact: true })).toBeVisible();
@@ -2420,8 +2496,8 @@ test("analytics uses accessible, server-backed responsive chart containers", asy
       const box = element.getBoundingClientRect();
       return { width: box.width, height: box.height };
     });
-  expect(chartToolSize.width).toBeLessThanOrEqual(32);
-  expect(chartToolSize.height).toBeLessThanOrEqual(32);
+  expect(chartToolSize.width).toBeGreaterThanOrEqual(testInfo.project.name.startsWith("mobile") ? 44 : 36);
+  expect(chartToolSize.height).toBeGreaterThanOrEqual(testInfo.project.name.startsWith("mobile") ? 44 : 36);
   if (testInfo.project.name.startsWith("mobile")) {
     const chartSpacing = await page
       .getByRole("img", { name: "每日净工时趋势图" })

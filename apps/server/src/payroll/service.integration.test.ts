@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
 import { eq } from "drizzle-orm";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Database } from "@workbench/db";
 import {
   compensationPlans,
@@ -24,6 +24,11 @@ import {
 import { PayrollService } from "./service.js";
 
 const clients: PGlite[] = [];
+
+beforeEach(() => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(new Date("2026-09-05T12:00:00Z"));
+});
 
 async function createTestDatabase(): Promise<Database> {
   const client = new PGlite();
@@ -45,6 +50,7 @@ async function createTestDatabase(): Promise<Database> {
 }
 
 afterEach(async () => {
+  vi.useRealTimers();
   await Promise.all(clients.splice(0).map((client) => client.close()));
 });
 
@@ -204,7 +210,7 @@ describe("employee payroll view and receipt acknowledgement", () => {
       approvedSeconds: 3_600,
       estimatedAmount: "100.000000",
       projection: {
-        method: "adaptive_weekday_backtest_v3",
+        method: "adaptive_weekday_backtest_v4",
         nonZeroSampleDays: 10,
       },
     });
@@ -378,7 +384,7 @@ describe("employee payroll view and receipt acknowledgement", () => {
       })
       .returning();
     const run = await service.calculate(ownerActor, period!.id);
-    expect(run.calculationVersion).toBe("payroll-engine-v5-live-month-week-bonus");
+    expect(run.calculationVersion).toBe("payroll-engine-v6-subsidy-distribution-reimbursement");
     const [item] = await db
       .select()
       .from(payrollItems)

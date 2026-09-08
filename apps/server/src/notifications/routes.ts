@@ -29,6 +29,7 @@ const notificationCategories = [
   "work_submission_overdue",
   "payroll_cutoff_pending",
   "identity_request_result",
+  "reimbursement_result",
   "export_ready",
   "export_failed",
   "ai_report_ready",

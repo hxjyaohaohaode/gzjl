@@ -21,7 +21,7 @@ describe("generated PostgreSQL migration", () => {
       const tables = await database.query<{ count: number }>(
         "select count(*)::int as count from information_schema.tables where table_schema = 'public' and table_type = 'BASE TABLE'",
       );
-      expect(tables.rows[0]?.count).toBe(69);
+      expect(tables.rows[0]?.count).toBe(70);
       const aiProviderCheckColumns = await database.query<{
         column_name: string;
         is_nullable: string;

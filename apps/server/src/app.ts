@@ -39,6 +39,7 @@ import { OperationsService } from "./operations/service.js";
 import { registerNotificationRoutes } from "./notifications/routes.js";
 import { registerPayrollRoutes } from "./payroll/routes.js";
 import { PayrollService } from "./payroll/service.js";
+import { ReimbursementService } from "./payroll/reimbursements.js";
 import { registerProjectRoutes } from "./projects/routes.js";
 import { ProjectService } from "./projects/service.js";
 import { registerSetupRoutes } from "./setup/routes.js";
@@ -286,7 +287,7 @@ export async function buildApp({
       authenticate,
     );
     const payrollService = new PayrollService(database);
-    await registerPayrollRoutes(app, payrollService, authenticate);
+    await registerPayrollRoutes(app, payrollService, authenticate, new ReimbursementService(database));
     const analyticsService = new AnalyticsService(database);
     await registerAnalyticsRoutes(
       app,

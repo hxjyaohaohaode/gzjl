@@ -352,6 +352,13 @@ describe("structured work entry and approval chain", () => {
     });
     expect(Number(link?.reportedProgress)).toBe(75);
 
+    await db.update(projectNodes).set({ progress: "100.00", status: "completed" }).where(eq(projectNodes.id, node!.id));
+    const reopened = await work.updateManualOwn(actors.employee, fact.id, fact.version, {
+      ...manualInput(startAt, endAt, "核实后重新开始任务"),
+      primaryProjectNodeId: node!.id, projectNodeIds: [node!.id], reportedProgress: 0,
+    });
+    expect((await db.select().from(projectNodes).where(eq(projectNodes.id, node!.id)))[0]).toMatchObject({ progress: "0.00", status: "not_started" });
+
     const [evidence] = await db.insert(attachments).values({
       organizationId: actors.employee.organizationId,
       uploadedBy: actors.employee.membershipId,
@@ -366,7 +373,7 @@ describe("structured work entry and approval chain", () => {
       entityId: fact.id,
       createdBy: actors.employee.membershipId,
     });
-    await expect(work.submit(actors.employee, fact.id, fact.version)).resolves.toMatchObject({
+    await expect(work.submit(actors.employee, fact.id, reopened.version)).resolves.toMatchObject({
       approvalStatus: "pending_review",
       submissionStatus: "submitted",
     });

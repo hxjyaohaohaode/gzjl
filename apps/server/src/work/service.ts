@@ -310,7 +310,9 @@ export class WorkSessionService {
             before.status !== "blocked" &&
             before.status !== "in_review"
           ? "in_progress"
-          : before.status;
+          : before.status === "completed" && reportedProgress < 100
+            ? (reportedProgress > 0 ? "in_progress" : "not_started")
+            : before.status;
     if (
       Number(before.progress) === reportedProgress &&
       before.status === nextStatus

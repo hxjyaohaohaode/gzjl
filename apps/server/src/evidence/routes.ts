@@ -88,8 +88,9 @@ export async function registerEvidenceRoutes(
     { preHandler: authenticate },
     async () => service.capabilities(),
   );
+  for (const resource of ["work-sessions", "reimbursements"]) {
   app.post(
-    "/api/work-sessions/:sessionId/attachments/upload-intent",
+    `/api/${resource}/:sessionId/attachments/upload-intent`,
     { preHandler: [app.csrfProtection, authenticate] },
     async (request, reply) => {
       try {
@@ -103,6 +104,7 @@ export async function registerEvidenceRoutes(
     },
   );
 
+  }
   app.post(
     "/api/attachments/:attachmentId/complete",
     { preHandler: [app.csrfProtection, authenticate] },
@@ -146,8 +148,9 @@ export async function registerEvidenceRoutes(
     },
   );
 
+  for (const resource of ["work-sessions", "reimbursements"]) {
   app.post(
-    "/api/work-sessions/:sessionId/attachments/reference",
+    `/api/${resource}/:sessionId/attachments/reference`,
     { preHandler: [app.csrfProtection, authenticate] },
     async (request, reply) => {
       try {
@@ -161,6 +164,7 @@ export async function registerEvidenceRoutes(
     },
   );
 
+  }
   app.patch(
     "/api/attachments/:attachmentId",
     { preHandler: [app.csrfProtection, authenticate] },
@@ -180,8 +184,9 @@ export async function registerEvidenceRoutes(
     },
   );
 
+  for (const resource of ["work-sessions", "reimbursements"]) {
   app.get(
-    "/api/work-sessions/:sessionId/attachments",
+    `/api/${resource}/:sessionId/attachments`,
     { preHandler: authenticate },
     async (request, reply) => {
       try {
@@ -193,6 +198,7 @@ export async function registerEvidenceRoutes(
     },
   );
 
+  }
   app.get(
     "/api/attachments/:attachmentId/download",
     { preHandler: authenticate },
@@ -206,6 +212,14 @@ export async function registerEvidenceRoutes(
     },
   );
 
+  app.get("/api/attachments/:attachmentId/content", { preHandler: authenticate }, async (request, reply) => {
+    try {
+      const { attachmentId } = attachmentParams.parse(request.params);
+      reply.header("cache-control", "private, no-store");
+      return await service.textContent(request.auth!, attachmentId);
+    } catch (error) { return mapEvidenceError(error, reply); }
+  });
+
   app.get(
     "/api/attachments/:attachmentId/open",
     { preHandler: authenticate },
@@ -214,6 +228,7 @@ export async function registerEvidenceRoutes(
         const { attachmentId } = attachmentParams.parse(request.params);
         const { mode } = attachmentOpenQuery.parse(request.query);
         const access = await service.access(request.auth!, attachmentId, mode);
+        reply.header("cache-control", "private, no-store");
         return reply.redirect(access.url);
       } catch (error) {
         return mapEvidenceError(error, reply);

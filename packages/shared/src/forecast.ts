@@ -11,8 +11,9 @@ export interface CalendarForecastPoint extends CalendarObservation {
 
 export interface CalendarForecastResult {
   points: CalendarForecastPoint[];
-  method: "adaptive_weekday_backtest_v3";
+  method: "adaptive_weekday_backtest_v4";
   sampleDays: number;
+  observationCoverage: number;
   nonZeroSampleDays: number;
   validationPoints: number;
   validationWape: number | null;
@@ -226,21 +227,28 @@ export function forecastCalendarSeries(
   observed.forEach((item) => {
     if (
       /^\d{4}-\d{2}-\d{2}$/.test(item.date) &&
+      Number.isFinite(Date.parse(`${item.date}T12:00:00.000Z`)) &&
+      new Date(`${item.date}T12:00:00.000Z`).toISOString().slice(0, 10) === item.date &&
       Number.isFinite(item.value) &&
       item.value >= 0
     ) {
       byDate.set(item.date, { date: item.date, value: item.value });
     }
   });
-  const clean = [...byDate.values()]
+  const ordered = [...byDate.values()]
     .sort((left, right) => left.date.localeCompare(right.date))
     .slice(-84);
-  const horizon = Math.min(60, Math.max(0, Math.floor(horizonDays)));
+  const cutoff = ordered.length ? addDateKey(ordered.at(-1)!.date, -83) : "";
+  const clean = ordered.filter((item) => item.date >= cutoff);
+  const calendarDays = clean.length ? (Date.parse(clean.at(-1)!.date) - Date.parse(clean[0]!.date)) / 86_400_000 + 1 : 0;
+  const observationCoverage = calendarDays ? clean.length / calendarDays : 0;
+  const horizon = Number.isFinite(horizonDays) ? Math.min(60, Math.max(0, Math.floor(horizonDays))) : 0;
   const nonZeroSampleDays = clean.filter((item) => item.value > 0).length;
   const emptyResult = {
     points: [],
-    method: "adaptive_weekday_backtest_v3" as const,
+    method: "adaptive_weekday_backtest_v4" as const,
     sampleDays: clean.length,
+    observationCoverage,
     nonZeroSampleDays,
     validationPoints: 0,
     validationWape: null,
@@ -261,24 +269,34 @@ export function forecastCalendarSeries(
   };
   const validationRows: Array<{
     actual: number;
-    candidates: Record<ModelName, number>;
+    prediction: number;
+    covered: boolean | null;
   }> = [];
+  const residuals: number[] = [];
   for (let index = validationStart; index < clean.length; index += 1) {
     const history = clean.slice(0, index);
     if (history.filter((item) => item.value > 0).length < 2) continue;
     const actual = clean[index]!;
-    const candidates = candidatePredictions(history, actual.date, 1);
+    const gap = (Date.parse(actual.date) - Date.parse(history.at(-1)!.date)) / 86_400_000;
+    const candidates = candidatePredictions(history, actual.date, gap);
+    // Predict and calibrate using only errors already observable at this origin.
+    // Fitting weights to the whole validation period leaks future outcomes.
+    const originScale = Math.max(average(history.map((item) => item.value)), 1);
+    const originWeights = normalizedInverseErrorWeights(modelErrors, originScale);
+    const prediction = ensembleValue(candidates, originWeights);
+    const residual = Math.abs(actual.value - prediction);
+    const covered = residuals.length >= 7
+      ? residual <= quantile(residuals, Math.min(1, Math.ceil((residuals.length + 1) * 0.9) / residuals.length))
+      : null;
+    residuals.push(residual);
     MODEL_NAMES.forEach((name) => {
       modelErrors[name].push(Math.abs(actual.value - candidates[name]));
     });
-    validationRows.push({ actual: actual.value, candidates });
+    validationRows.push({ actual: actual.value, prediction, covered });
   }
 
   const scale = Math.max(average(clean.map((item) => item.value)), 1);
   const weights = normalizedInverseErrorWeights(modelErrors, scale);
-  const residuals = validationRows.map((row) =>
-    Math.abs(row.actual - ensembleValue(row.candidates, weights)),
-  );
   const validationActualTotal = validationRows.reduce(
     (total, row) => total + row.actual,
     0,
@@ -293,12 +311,9 @@ export function forecastCalendarSeries(
       Math.max(residuals.length, 1),
   );
   const conformalError = quantile(residuals, conformalProbability);
-  const covered = validationRows.filter((row) => {
-    const prediction = ensembleValue(row.candidates, weights);
-    return Math.abs(row.actual - prediction) <= conformalError;
-  }).length;
-  const intervalCoverage = validationRows.length
-    ? covered / validationRows.length
+  const coverageRows = validationRows.filter((row) => row.covered !== null);
+  const intervalCoverage = coverageRows.length
+    ? coverageRows.filter((row) => row.covered).length / coverageRows.length
     : null;
   const seasonalityStrength = weekdaySeasonalityStrength(clean);
   const trendPerDay = robustTrendPerDay(clean);
@@ -321,13 +336,13 @@ export function forecastCalendarSeries(
       (item) => weekday(item.date) === weekday(date),
     ).length;
     const confidence: CalendarForecastPoint["confidence"] =
-      clean.length >= 28 &&
+      observationCoverage >= 0.9 && index < 14 && clean.length >= 28 &&
       sameWeekdaySupport >= 4 &&
       validationWape !== null &&
       validationWape <= 0.35 &&
       (intervalCoverage ?? 0) >= 0.8
         ? "high"
-        : clean.length >= 14 &&
+        : observationCoverage >= 0.75 && index < 28 && clean.length >= 14 &&
             sameWeekdaySupport >= 2 &&
             validationWape !== null &&
             validationWape <= 0.7
@@ -344,8 +359,9 @@ export function forecastCalendarSeries(
 
   return {
     points,
-    method: "adaptive_weekday_backtest_v3",
+    method: "adaptive_weekday_backtest_v4",
     sampleDays: clean.length,
+    observationCoverage,
     nonZeroSampleDays,
     validationPoints: validationRows.length,
     validationWape,

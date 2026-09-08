@@ -2,6 +2,7 @@ import type { FastifyInstance, preHandlerHookHandler } from "fastify";
 import { z } from "zod";
 
 import { requirePermission } from "../auth/authorization.js";
+import type { ReimbursementService } from "./reimbursements.js";
 import {
   PayrollConflictError,
   PayrollNotFoundError,
@@ -37,6 +38,7 @@ const planSchema = z.object({
   subsidies: z.array(z.object({
     name: z.string().trim().min(1, "补贴名称不能为空。").max(60),
     amount: money,
+    distribution: z.enum(["daily", "period_end"]).default("daily"),
   })).max(20, "每份薪资方案最多配置 20 项补贴。").default([]),
   effectiveFrom: z.iso.datetime({ offset: true }).transform((value) => new Date(value)),
   pendingReviewCountsInEstimate: z.boolean().default(true),
@@ -65,6 +67,7 @@ export async function registerPayrollRoutes(
   app: FastifyInstance,
   service: PayrollService,
   authenticate: preHandlerHookHandler,
+  reimbursements?: ReimbursementService,
 ): Promise<void> {
   const ownPermission = requirePermission("payroll.view_own", (request) => ({
     scopeKind: "self",
@@ -76,6 +79,29 @@ export async function registerPayrollRoutes(
   const configurePermission = requirePermission("payroll.configure", () => ({
     scopeKind: "organization",
   }));
+
+  if (reimbursements) {
+    app.get("/api/reimbursements", { preHandler: authenticate }, async (request) => reimbursements.list(request.auth!));
+    app.post("/api/reimbursements", { preHandler: [app.csrfProtection, authenticate, ownPermission] }, async (request, reply) => {
+      const input = z.object({ title: z.string().trim().min(2).max(120), description: z.string().trim().min(2).max(4000),
+        expenseDate: z.iso.date(), amount: money.refine((value) => Number(value) > 0, "报销金额必须大于零。"),
+        currency: z.string().regex(/^[A-Z]{3}$/).default("CNY") }).parse(request.body);
+      return reply.code(201).send({ request: await reimbursements.create(request.auth!, input) });
+    });
+    app.post("/api/reimbursements/:id/actions", { preHandler: [app.csrfProtection, authenticate] }, async (request, reply) => {
+      try {
+        const { id } = z.object({ id: z.uuid() }).parse(request.params);
+        const input = z.object({ action: z.enum(["submit", "cancel", "approve", "reject"]), expectedVersion: z.number().int().positive(),
+          note: z.string().trim().max(2000).optional(), payPeriodId: z.uuid().optional() })
+          .refine((value) => value.action !== "reject" || Boolean(value.note), "驳回时请填写原因。").parse(request.body);
+        return { request: await reimbursements.act(request.auth!, id, input) };
+      } catch (error) {
+        if (error instanceof PayrollNotFoundError) return reply.code(404).send({ error: "not_found", message: "报销申请不存在。" });
+        if (error instanceof PayrollConflictError) return reply.code(409).send({ error: "conflict", message: error.message });
+        throw error;
+      }
+    });
+  }
 
   app.get(
     "/api/payroll/management",

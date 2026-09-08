@@ -7,7 +7,7 @@ import {
   type S3Client,
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq, inArray, isNull } from "drizzle-orm";
 import type { Database } from "@workbench/db";
 import {
   attachmentLinks,
@@ -18,6 +18,7 @@ import {
   outboxEvents,
   workSessionProjectLinks,
   workSessions,
+  reimbursementRequests,
 } from "@workbench/db/schema";
 import { hasPermission } from "@workbench/shared";
 
@@ -204,6 +205,22 @@ class ObjectStore {
       disposition: preview ? "inline" : "attachment",
     };
   }
+
+  async readText(objectKey: string) {
+    const limit = 128 * 1024;
+    const object = await this.client.send(new GetObjectCommand({ Bucket: this.config.bucket, Key: objectKey, Range: `bytes=0-${limit}` }));
+    if (!object.Body) throw new EvidenceValidationError("无法读取文件内容。");
+    const chunks: Buffer[] = [];
+    let size = 0;
+    for await (const chunk of object.Body as unknown as AsyncIterable<Uint8Array>) {
+      const part = Buffer.from(chunk);
+      chunks.push(part.subarray(0, Math.max(0, limit + 1 - size)));
+      size += part.length;
+      if (size > limit) break;
+    }
+    const bytes = Buffer.concat(chunks);
+    return { text: bytes.subarray(0, limit).toString("utf8"), truncated: size > limit };
+  }
 }
 
 export function previewMimeType(
@@ -323,8 +340,19 @@ export class EvidenceService {
         ),
       )
       .limit(1);
-    if (!session) throw new EvidenceNotFoundError("关联的工时记录不存在。");
-    return session;
+    if (session) return { ...session, entityType: "work_session" as const };
+    const [claim] = await this.db.select().from(reimbursementRequests).where(and(
+      eq(reimbursementRequests.id, sessionId), eq(reimbursementRequests.organizationId, actor.organizationId),
+    )).limit(1);
+    if (!claim) throw new EvidenceNotFoundError("关联记录不存在。");
+    return { id: claim.id, membershipId: claim.membershipId, approvalStatus: claim.status,
+      entityType: "reimbursement" as const };
+  }
+
+  private async assertReimbursementEditable(actor: AuthContext, id: string) {
+    const container = await this.session(actor, id);
+    if (container.entityType === "reimbursement" && (container.membershipId !== actor.membershipId || container.approvalStatus !== "draft"))
+      throw new EvidenceForbiddenError("报销凭证仅允许申请人在草稿阶段修改；提交后凭证冻结。");
   }
 
   private async canViewProjectEvidence(actor: AuthContext, sessionId: string): Promise<boolean> {
@@ -384,9 +412,14 @@ export class EvidenceService {
   private async assertVisible(actor: AuthContext, attachment: Attachment, sessionId: string) {
     const session = await this.session(actor, sessionId);
     if (session.membershipId === actor.membershipId) return;
+    if (session.entityType === "reimbursement") {
+      if (attachment.visibility !== "private" && session.approvalStatus !== "draft" &&
+          hasPermission(actor.grants, "payroll.settle", { scopeKind: "organization" })) return;
+      throw new EvidenceForbiddenError();
+    }
     if (
       attachment.visibility !== "private" &&
-      session.approvalStatus === "pending_review" &&
+      ["pending_review", "approved", "returned", "locked"].includes(session.approvalStatus) &&
       (await this.canReviewSession(actor, sessionId, session.membershipId))
     ) {
       return;
@@ -417,6 +450,7 @@ export class EvidenceService {
       throw new EvidenceValidationError("对象存储尚未配置，暂时不能上传文件证据。");
     }
     const session = await this.session(actor, sessionId);
+    await this.assertReimbursementEditable(actor, sessionId);
     if (session.membershipId !== actor.membershipId && !this.canManage(actor)) {
       throw new EvidenceForbiddenError("只能为自己的工时记录上传证据。");
     }
@@ -450,7 +484,7 @@ export class EvidenceService {
       if (!created) throw new EvidenceValidationError("无法创建上传任务。");
       await tx.insert(attachmentLinks).values({
         attachmentId: created.id,
-        entityType: "work_session",
+        entityType: session.entityType,
         entityId: sessionId,
         createdBy: actor.membershipId,
       });
@@ -472,7 +506,7 @@ export class EvidenceService {
       await tx.insert(outboxEvents).values({
         organizationId: actor.organizationId,
         eventType: "evidence.changed",
-        entityType: "work_session",
+        entityType: session.entityType,
         entityId: sessionId,
         entityVersion: created.version,
         payload: { change: "upload_initiated" },
@@ -508,6 +542,7 @@ export class EvidenceService {
     }
     const mimeType = normalizeMimeType(input.mimeType);
     const row = await this.linkedAttachment(actor, attachmentId);
+    await this.assertReimbursementEditable(actor, row.link.entityId);
     if (row.attachment.kind !== "file") throw new EvidenceValidationError("只有文件证据可以替换；链接和文本请新增一条证据。");
     if (row.attachment.uploadedBy !== actor.membershipId && !this.canManage(actor)) throw new EvidenceForbiddenError();
     const objectKey = `${actor.organizationId}/${actor.membershipId}/${randomUUID()}/${safeName(input.originalName)}`;
@@ -550,7 +585,7 @@ export class EvidenceService {
       await tx.insert(outboxEvents).values({
         organizationId: actor.organizationId,
         eventType: "evidence.changed",
-        entityType: "work_session",
+        entityType: row.link.entityType,
         entityId: row.link.entityId,
         entityVersion: updated.version,
         payload: { change: "replacement_initiated" },
@@ -572,6 +607,7 @@ export class EvidenceService {
       throw new EvidenceValidationError("对象存储尚未配置，暂时不能继续上传文件证据。");
     }
     const row = await this.linkedAttachment(actor, attachmentId);
+    await this.assertReimbursementEditable(actor, row.link.entityId);
     if (row.attachment.uploadedBy !== actor.membershipId && !this.canManage(actor)) {
       throw new EvidenceForbiddenError();
     }
@@ -628,7 +664,7 @@ export class EvidenceService {
         and(
           eq(attachments.id, attachmentId),
           eq(attachments.organizationId, actor.organizationId),
-          eq(attachmentLinks.entityType, "work_session"),
+          inArray(attachmentLinks.entityType, ["work_session", "reimbursement"]),
           isNull(attachments.deletedAt),
         ),
       )
@@ -640,6 +676,7 @@ export class EvidenceService {
   async completeFile(actor: AuthContext, attachmentId: string) {
     if (!this.store) throw new EvidenceValidationError("对象存储尚未配置。");
     const row = await this.linkedAttachment(actor, attachmentId);
+    await this.assertReimbursementEditable(actor, row.link.entityId);
     if (row.attachment.uploadedBy !== actor.membershipId && !this.canManage(actor)) {
       throw new EvidenceForbiddenError();
     }
@@ -705,6 +742,7 @@ export class EvidenceService {
     },
   ) {
     const session = await this.session(actor, sessionId);
+    await this.assertReimbursementEditable(actor, sessionId);
     if (session.membershipId !== actor.membershipId && !this.canManage(actor)) {
       throw new EvidenceForbiddenError("只能为自己的工时记录添加证据。");
     }
@@ -725,7 +763,7 @@ export class EvidenceService {
       if (!created) throw new EvidenceValidationError("无法创建证据。");
       await tx.insert(attachmentLinks).values({
         attachmentId: created.id,
-        entityType: "work_session",
+        entityType: session.entityType,
         entityId: sessionId,
         createdBy: actor.membershipId,
       });
@@ -740,7 +778,7 @@ export class EvidenceService {
       await tx.insert(outboxEvents).values({
         organizationId: actor.organizationId,
         eventType: "evidence.changed",
-        entityType: "work_session",
+        entityType: session.entityType,
         entityId: sessionId,
         entityVersion: created.version,
         payload: { change: "reference_created" },
@@ -758,7 +796,7 @@ export class EvidenceService {
       .innerJoin(attachments, eq(attachments.id, attachmentLinks.attachmentId))
       .where(
         and(
-          eq(attachmentLinks.entityType, "work_session"),
+          inArray(attachmentLinks.entityType, ["work_session", "reimbursement"]),
           eq(attachmentLinks.entityId, sessionId),
           eq(attachments.organizationId, actor.organizationId),
           isNull(attachments.deletedAt),
@@ -783,6 +821,7 @@ export class EvidenceService {
       externalUrl: attachment.externalUrl,
       ...(attachment.kind === "text" ? { textContent: attachment.textContent } : {}),
       mimeType: attachment.mimeType,
+      previewMimeType: previewMimeType(attachment.mimeType, attachment.originalName),
       sizeBytes: attachment.sizeBytes,
       sha256: attachment.sha256,
       visibility: attachment.visibility,
@@ -797,6 +836,16 @@ export class EvidenceService {
 
   async download(actor: AuthContext, attachmentId: string) {
     return this.access(actor, attachmentId, "download");
+  }
+
+  async textContent(actor: AuthContext, attachmentId: string) {
+    const row = await this.linkedAttachment(actor, attachmentId);
+    await this.assertVisible(actor, row.attachment, row.link.entityId);
+    const type = previewMimeType(row.attachment.mimeType, row.attachment.originalName);
+    if (row.attachment.status !== "available" || !row.attachment.objectKey || !this.store ||
+        !type || !["text/plain", "text/markdown", "text/csv", "application/json"].includes(type))
+      throw new EvidenceValidationError("该文件不能作为纯文本预览。");
+    return this.store.readText(row.attachment.objectKey);
   }
 
   async access(
@@ -852,6 +901,7 @@ export class EvidenceService {
     },
   ) {
     const row = await this.linkedAttachment(actor, attachmentId);
+    await this.assertReimbursementEditable(actor, row.link.entityId);
     if (
       row.attachment.uploadedBy !== actor.membershipId &&
       !this.canManage(actor)
@@ -931,7 +981,7 @@ export class EvidenceService {
       await tx.insert(outboxEvents).values({
         organizationId: actor.organizationId,
         eventType: "evidence.changed",
-        entityType: "work_session",
+        entityType: row.link.entityType,
         entityId: row.link.entityId,
         entityVersion: updated.version,
         payload: { change: "updated", attachmentId },
@@ -942,6 +992,7 @@ export class EvidenceService {
 
   async remove(actor: AuthContext, attachmentId: string, reason: string) {
     const row = await this.linkedAttachment(actor, attachmentId);
+    await this.assertReimbursementEditable(actor, row.link.entityId);
     if (row.attachment.uploadedBy !== actor.membershipId && !this.canManage(actor)) throw new EvidenceForbiddenError();
     await this.db.transaction(async (tx) => {
       const [removed] = await tx.update(attachments).set({
@@ -962,7 +1013,7 @@ export class EvidenceService {
       await tx.insert(outboxEvents).values({
         organizationId: actor.organizationId,
         eventType: "evidence.changed",
-        entityType: "work_session",
+        entityType: row.link.entityType,
         entityId: row.link.entityId,
         entityVersion: removed.version,
         payload: { change: "deleted" },

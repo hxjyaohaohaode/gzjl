@@ -1,4 +1,4 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { MutationCache, QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter } from "react-router-dom";
@@ -8,6 +8,14 @@ import { startOfflineReplay } from "./offline.js";
 import "./styles.css";
 
 const queryClient = new QueryClient({
+  mutationCache: new MutationCache({
+    onSuccess: () => {
+      // Dependent screens must refetch on navigation even without WebSocket.
+      // The mutation's own handler reconciles its active view; refetching here
+      // would race its optimistic updates and duplicate requests.
+      void queryClient.invalidateQueries({ refetchType: "none" });
+    },
+  }),
   defaultOptions: {
     queries: {
       staleTime: 30_000,
