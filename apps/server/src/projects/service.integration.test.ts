@@ -11,10 +11,13 @@ import {
   projectActivityLog,
   projectEdges,
   projectNodeVersions,
+  projectNodeAssignees,
+  outboxEvents,
+  auditLogs,
   users,
 } from "@workbench/db/schema";
 
-import { ProjectService, ProjectTreeValidationError } from "./service.js";
+import { ProjectService, ProjectTreeValidationError, ProjectNotFoundError, ProjectVersionConflictError } from "./service.js";
 
 const clients: PGlite[] = [];
 
@@ -79,6 +82,41 @@ async function createFixture() {
 }
 
 describe("project node derived work-line transaction", () => {
+  it("lets an employee join and claim without replacing collaborators or another responsible member", async () => {
+    const { db, actor, service, project, root } = await createFixture();
+    const [user] = await db.insert(users).values({ displayName: "主动认领员工", status: "active" }).returning();
+    const [member] = await db.insert(orgMemberships).values({ organizationId: actor.organizationId, userId: user!.id, status: "active" }).returning();
+    const employee = { organizationId: actor.organizationId, membershipId: member!.id };
+    await expect(service.setNodeAssignees(employee, project.id, root.id, root.version, [], true)).rejects.toBeInstanceOf(ProjectNotFoundError);
+    await service.joinProject(employee, project.id);
+    const assigned = await service.setNodeAssignees(actor, project.id, root.id, root.version, [{ membershipId: actor.membershipId, isResponsible: false }]);
+    await expect(service.setNodeAssignees(employee, project.id, root.id, root.version, [], true)).rejects.toBeInstanceOf(ProjectVersionConflictError);
+    const claimed = await service.setNodeAssignees(employee, project.id, root.id, assigned.version, [], true);
+    const assignments = await db.select().from(projectNodeAssignees);
+    expect(assignments).toHaveLength(2);
+    expect(assignments).toEqual(expect.arrayContaining([
+      expect.objectContaining({ membershipId: actor.membershipId, isResponsible: false }),
+      expect.objectContaining({ membershipId: employee.membershipId, isResponsible: true }),
+    ]));
+    // Retrying a committed claim does not produce a new version or erase peers.
+    expect((await service.setNodeAssignees(employee, project.id, root.id, assigned.version, [], true)).version).toBe(claimed.version);
+    await expect(service.setNodeAssignees(actor, project.id, root.id, claimed.version, [], true)).rejects.toThrow("已有负责人");
+    await expect(service.setNodeAssignees({ ...employee, organizationId: crypto.randomUUID() }, project.id, root.id, claimed.version, [], true)).rejects.toBeInstanceOf(ProjectNotFoundError);
+    expect(await db.select().from(auditLogs)).toEqual(expect.arrayContaining([expect.objectContaining({ action: "project.node_self_claimed" })]));
+    expect(await db.select().from(outboxEvents)).toEqual(expect.arrayContaining([expect.objectContaining({ entityId: root.id, entityVersion: claimed.version })]));
+  });
+
+  it("refuses claims on archived branches and ended nodes", async () => {
+    const { actor, service, project, root, branch } = await createFixture();
+    const finished = await service.updateNode(actor, project.id, root.id, root.version, { status: "completed", changeSummary: "完成" });
+    await expect(service.setNodeAssignees(actor, project.id, root.id, finished.version, [], true)).rejects.toThrow("已完成或已取消");
+    const derived = await service.createBranch(actor, project.id, { name: "归档任务", parentBranchId: branch.id, sourceNodeId: root.id });
+    const tree = await service.tree(actor, project.id, true);
+    const node = tree.nodes.find((item) => item.branchId === derived.id)!;
+    await service.archiveBranch(actor, project.id, derived.id, derived.version);
+    await expect(service.setNodeAssignees(actor, project.id, node.id, node.version, [], true)).rejects.toThrow("归档分支");
+  });
+
   it("creates a visible entry node and merges its complete hierarchy back under the source node", async () => {
     const { db, actor, service, project, branch: main, root } =
       await createFixture();

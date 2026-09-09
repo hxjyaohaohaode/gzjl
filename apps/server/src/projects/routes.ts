@@ -692,6 +692,20 @@ export async function registerProjectRoutes(
   );
 
   app.post(
+    "/api/projects/:projectId/nodes/:nodeId/assignees/self",
+    { preHandler: [app.csrfProtection, authenticate] },
+    async (request, reply) => {
+      const { projectId, nodeId } = nodeParams.parse(request.params);
+      const { expectedVersion } = z.object({ expectedVersion: z.number().int().positive() }).strict().parse(request.body);
+      try {
+        return { node: await service.setNodeAssignees(request.auth!, projectId, nodeId, expectedVersion, [], true) };
+      } catch (error) {
+        return mapProjectError(error, reply);
+      }
+    },
+  );
+
+  app.post(
     "/api/projects/:projectId/nodes/:nodeId/move",
     { preHandler: mutationHooks },
     async (request, reply) => {

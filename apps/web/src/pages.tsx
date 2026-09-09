@@ -57,6 +57,7 @@ import {
   type Me,
 } from "./api.js";
 import { readableForeground } from "./color.js";
+import { completeEvidenceUpload, putEvidenceFile, type EvidenceUploadReceipt } from "./evidence-upload.js";
 import { sendQueueableTimerEvent } from "./offline.js";
 import {
   getOrganizationTimezone,
@@ -3013,6 +3014,7 @@ interface QueuedEvidenceFile {
   file: File;
   state: EvidenceUploadState;
   attachmentId?: string;
+  bytesUploaded?: boolean;
   error?: string;
 }
 
@@ -3038,7 +3040,12 @@ async function uploadNewWorkEvidenceFile(
   file: File,
   visibility: string,
   capabilities: EvidenceCapabilities | undefined,
+  receipt: EvidenceUploadReceipt,
 ): Promise<void> {
+  if (receipt.attachmentId && receipt.bytesUploaded) {
+    await completeEvidenceUpload(receipt.attachmentId);
+    return;
+  }
   if (!capabilities?.fileUploads.available) {
     throw new Error(
       capabilities?.fileUploads.unavailableReason ||
@@ -3057,7 +3064,9 @@ async function uploadNewWorkEvidenceFile(
   const sha256 = Array.from(new Uint8Array(digest), (byte) =>
     byte.toString(16).padStart(2, "0"),
   ).join("");
-  const intent = await api<EvidenceUploadIntent>(
+  const intent = receipt.attachmentId
+    ? await api<EvidenceUploadIntent>(`/api/attachments/${receipt.attachmentId}/upload-url`, { method: "POST" })
+    : await api<EvidenceUploadIntent>(
     `/api/work-sessions/${sessionId}/attachments/upload-intent`,
     {
       method: "POST",
@@ -3070,17 +3079,17 @@ async function uploadNewWorkEvidenceFile(
       },
     },
   );
-  const uploaded = await fetch(intent.uploadUrl, {
-    method: "PUT",
-    headers: intent.requiredHeaders,
-    body: file,
-  });
-  if (!uploaded.ok) {
-    throw new Error(`“${file.name}”上传失败（HTTP ${uploaded.status}）。`);
-  }
-  await api(`/api/attachments/${intent.attachment.id}/complete`, {
-    method: "POST",
-  });
+  receipt.attachmentId = intent.attachment.id;
+  await putEvidenceFile(intent.uploadUrl, intent.requiredHeaders, file);
+  receipt.bytesUploaded = true;
+  await completeEvidenceUpload(intent.attachment.id);
+}
+
+interface FailedWorkEvidence {
+  sessionId: string;
+  label: string;
+  error: string;
+  retry: () => Promise<unknown>;
 }
 
 async function persistNewWorkEvidence(
@@ -3088,7 +3097,7 @@ async function persistNewWorkEvidence(
   pending: PendingWorkEvidence,
   visibility: string,
   capabilities: EvidenceCapabilities | undefined,
-): Promise<string[]> {
+): Promise<FailedWorkEvidence[]> {
   if (session.recordKind === "plan") return [];
   const operations: Array<{ label: string; run: () => Promise<unknown> }> = [];
   if (pending.url.trim()) {
@@ -3120,19 +3129,18 @@ async function persistNewWorkEvidence(
     });
   }
   for (const file of pending.files) {
+    const receipt: EvidenceUploadReceipt = {};
     operations.push({
       label: file.name,
-      run: () => uploadNewWorkEvidenceFile(session.id, file, visibility, capabilities),
+      run: () => uploadNewWorkEvidenceFile(session.id, file, visibility, capabilities, receipt),
     });
   }
-  const failures: string[] = [];
+  const failures: FailedWorkEvidence[] = [];
   for (const operation of operations) {
     try {
       await operation.run();
     } catch (error) {
-      failures.push(
-        `${operation.label}：${error instanceof Error ? error.message : "保存失败"}`,
-      );
+      failures.push({ sessionId: session.id, label: operation.label, error: error instanceof Error ? error.message : "保存失败", retry: operation.run });
     }
   }
   return failures;
@@ -3945,6 +3953,12 @@ export function EvidencePanel({
     );
   };
   const uploadOne = async (queued: QueuedEvidenceFile) => {
+    if (queued.attachmentId && queued.bytesUploaded) {
+      updateQueuedFile(queued.id, { state: "verifying" });
+      await completeEvidenceUpload(queued.attachmentId);
+      updateQueuedFile(queued.id, { state: "complete" });
+      return;
+    }
     const fileUploads = capabilities.data?.fileUploads;
     if (!fileUploads?.available) {
       throw new Error(
@@ -4004,20 +4018,9 @@ export function EvidencePanel({
       state: "uploading",
       attachmentId: intent.attachment.id,
     });
-    const uploaded = await fetch(intent.uploadUrl, {
-      method: "PUT",
-      headers: intent.requiredHeaders,
-      body: queued.file,
-    });
-    if (!uploaded.ok) {
-      throw new Error(
-        `“${queued.file.name}”未能上传到受保护的对象存储（HTTP ${uploaded.status}）。可直接重试。`,
-      );
-    }
-    updateQueuedFile(queued.id, { state: "verifying" });
-    await api(`/api/attachments/${intent.attachment.id}/complete`, {
-      method: "POST",
-    });
+    await putEvidenceFile(intent.uploadUrl, intent.requiredHeaders, queued.file);
+    updateQueuedFile(queued.id, { state: "verifying", bytesUploaded: true });
+    await completeEvidenceUpload(intent.attachment.id);
     updateQueuedFile(queued.id, { state: "complete" });
   };
   const upload = useMutation({
@@ -4149,6 +4152,7 @@ export function EvidencePanel({
                 <input
                   accept="*/*"
                   aria-label={replacementFor ? "选择替换文件" : "选择工作证据文件"}
+                  disabled={upload.isPending}
                   className="block min-w-0 flex-1 text-sm"
                   multiple={!replacementFor}
                   onChange={(event) => {
@@ -4921,6 +4925,22 @@ export function WorkPage() {
     AdditionalWorkSegment[]
   >([]);
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
+  const [failedEvidence, setFailedEvidence] = useState<FailedWorkEvidence[]>([]);
+  const retryEvidence = useMutation({
+    mutationFn: async () => {
+      const remaining: FailedWorkEvidence[] = [];
+      for (const item of failedEvidence) {
+        try { await item.retry(); }
+        catch (error) { remaining.push({ ...item, error: error instanceof Error ? error.message : "保存失败" }); }
+      }
+      return { remaining, attempted: failedEvidence };
+    },
+    onSuccess: async ({ remaining, attempted }) => {
+      setFailedEvidence((current) => [...current.filter((item) => !attempted.includes(item)), ...remaining]);
+      setSaveMessage(remaining.length ? `仍有 ${remaining.length} 项证据未完成，请查看下方原因。` : "证据已全部保存并完成核验，可在对应工作记录中提交审核。");
+      await queryClient.invalidateQueries({ queryKey: ["evidence"] });
+    },
+  });
   const [manualBreaks, setManualBreaks] = useState<
     Array<{ id: string; startAt: string; endAt: string }>
   >([]);
@@ -5041,6 +5061,22 @@ export function WorkPage() {
   const selectedPrimaryNode = primaryChoices.find(
     (node) => node.id === primaryProjectNodeId,
   );
+  const progressIsAutomatic = Boolean(selectedPrimaryNode?.progressMode && selectedPrimaryNode.progressMode !== "manual");
+  const manualDescendants = (() => {
+    if (!progressIsAutomatic) return [];
+    const children = new Map<string, string[]>();
+    for (const node of activeProjectNodes) {
+      if (node.parentId) children.set(node.parentId, [...(children.get(node.parentId) ?? []), node.id]);
+    }
+    const visited = new Set([primaryProjectNodeId]);
+    const pending = [primaryProjectNodeId];
+    for (let index = 0; index < pending.length; index += 1) {
+      for (const id of children.get(pending[index]!) ?? []) {
+        if (!visited.has(id)) { visited.add(id); pending.push(id); }
+      }
+    }
+    return activeProjectNodes.filter((node) => node.id !== primaryProjectNodeId && visited.has(node.id) && (!node.progressMode || node.progressMode === "manual"));
+  })();
   const addLinkedNode = (node: LinkedProjectNode, primary = false) => {
     setLinkedProjectNodes((current) =>
       current.some((candidate) => candidate.id === node.id)
@@ -5198,14 +5234,14 @@ export function WorkPage() {
           method: "POST",
           body: { ...body, reason: correctionReason.trim() },
         });
-        return { savedCount: 1, evidenceFailures: [] as string[] };
+        return { savedCount: 1, evidenceFailures: [] as FailedWorkEvidence[] };
       }
       if (editingSession) {
         await api("/api/work-sessions/" + editingSession.id, {
           method: "PATCH",
           body: { ...body, expectedVersion: editingSession.version },
         });
-        return { savedCount: 1, evidenceFailures: [] as string[] };
+        return { savedCount: 1, evidenceFailures: [] as FailedWorkEvidence[] };
       }
 
       const allSegments = [
@@ -5256,7 +5292,7 @@ export function WorkPage() {
                 )
               ).session,
             ];
-      const evidenceFailures: string[] = [];
+      const evidenceFailures: FailedWorkEvidence[] = [];
       for (const [index, session] of sessions.entries()) {
         evidenceFailures.push(
           ...(await persistNewWorkEvidence(
@@ -5270,6 +5306,7 @@ export function WorkPage() {
       return { savedCount: sessions.length, evidenceFailures };
     },
     onSuccess: async (result) => {
+      setFailedEvidence((current) => [...current, ...result.evidenceFailures]);
       setConflictSessionId(null);
       setShowForm(false);
       setEditingSession(null);
@@ -5300,7 +5337,7 @@ export function WorkPage() {
       setProjectNodeSearch("");
       setSaveMessage(
         result.evidenceFailures.length
-          ? `已保存 ${result.savedCount} 段工作；${result.evidenceFailures.length} 项证据未上传，请在对应记录中重试。${result.evidenceFailures[0]}`
+          ? `已保存 ${result.savedCount} 段工作；${result.evidenceFailures.length} 项证据未完成，文件已保留在当前页面，可直接重试。`
           : `已保存 ${result.savedCount} 段工作${result.savedCount > 1 ? "，批次内没有部分写入" : ""}。`,
       );
       await refresh();
@@ -5644,6 +5681,14 @@ export function WorkPage() {
           <span>{saveMessage}</span>
           <button aria-label="关闭保存结果" onClick={() => setSaveMessage(null)} type="button">×</button>
         </div>
+      ) : null}
+      {failedEvidence.length ? (
+        <Card className="mb-5"><CardContent>
+          <p className="font-bold">证据待完成，工作记录已保存</p>
+          <p className="text-sm">请在离开或刷新页面前重试，避免重新选择本地文件。重试不会重复创建工作记录。</p>
+          <ul className="my-3 text-sm break-words">{failedEvidence.map((item, index) => <li key={`${item.sessionId}-${index}`}>{item.label}：{item.error}</li>)}</ul>
+          <Button type="button" disabled={retryEvidence.isPending} onClick={() => retryEvidence.mutate()}>{retryEvidence.isPending ? "正在重试证据…" : "重试未完成证据"}</Button>
+        </CardContent></Card>
       ) : null}
       {showForm ? (
         <Card className="work-editor mb-5">
@@ -6309,12 +6354,32 @@ export function WorkPage() {
                             placeholder="留空"
                             step="1"
                             type="number"
+                            inputMode="numeric"
                             value={reportedProgress}
                           />
                         </div>
+                        {progressIsAutomatic ? (
+                          <div className="work-progress-child-picker">
+                            <label>
+                              选择要更新的子节点
+                              <select aria-label="选择要更新的子节点" className={fieldClass} value="" onChange={(event) => choosePrimaryNode(event.target.value)}>
+                                <option value="">选择具体任务后填写完成度</option>
+                                {manualDescendants.map((node) => <option key={node.id} value={node.id}>{node.title} · {Number(node.progress)}%</option>)}
+                              </select>
+                            </label>
+                            {!manualDescendants.length ? <p>当前节点下没有可手动更新的任务，请选择其他主节点，或请项目管理员添加子任务。</p> : null}
+                          </div>
+                        ) : (
+                          <div className="work-progress-presets" role="group" aria-label="快捷设置完成度">
+                            {[0, 25, 50, 75, 100].map((value) => (
+                              <button key={value} type="button" aria-pressed={reportedProgress === String(value)} onClick={() => setReportedProgress(String(value))}>{value}%</button>
+                            ))}
+                            <button type="button" onClick={() => setReportedProgress("")}>不更新</button>
+                          </div>
+                        )}
                         {reportedProgress !== "" ? (
                           <p>
-                            保存真实工作后会立即更新主节点；项目总图、团队动态、分析和薪资缓存将通过实时事件重新拉取。
+                            保存真实工作后会同步更新该节点完成度，并重新汇总项目进度。
                           </p>
                         ) : null}
                       </div>
@@ -6489,6 +6554,7 @@ export function WorkPage() {
                 <div className="mt-5 grid grid-cols-2 gap-2">
                   {activeTimer.status === "running" ? (
                     <Button
+                      disabled={transition.isPending}
                       onClick={() =>
                         transition.mutate({
                           timerId: activeTimer.id,
@@ -6502,6 +6568,7 @@ export function WorkPage() {
                     </Button>
                   ) : activeTimer.status === "paused" ? (
                     <Button
+                      disabled={transition.isPending}
                       onClick={() =>
                         transition.mutate({
                           timerId: activeTimer.id,
@@ -6514,6 +6581,7 @@ export function WorkPage() {
                     </Button>
                   ) : (
                     <Button
+                      disabled={transition.isPending}
                       onClick={() =>
                         transition.mutate({
                           timerId: activeTimer.id,
@@ -6527,6 +6595,7 @@ export function WorkPage() {
                   )}
                   {activeTimer.status !== "on_break" ? (
                     <Button
+                      disabled={transition.isPending}
                       onClick={() =>
                         transition.mutate({
                           timerId: activeTimer.id,
@@ -6541,6 +6610,7 @@ export function WorkPage() {
                   ) : null}
                   <Button
                     className="col-span-2"
+                    disabled={transition.isPending}
                     onClick={() =>
                       transition.mutate({
                         timerId: activeTimer.id,
@@ -6980,6 +7050,7 @@ export function ProjectsPage({ me }: { me: Me }) {
                     ) : (
                       <Button
                         aria-label={`加入项目 ${project.name}`}
+                        className="project-join-button"
                         disabled={join.isPending}
                         onClick={() => join.mutate(project.id)}
                         size="compact"
@@ -11342,7 +11413,7 @@ export function AnalyticsPage({ me }: { me: Me }) {
                     <tbody className="divide-y divide-[var(--border-soft)]">
                       {analytics.data.projectHealth.map((item) => (
                         <tr key={item.projectId}>
-                          <td className="px-3 py-3"><button className="font-semibold text-[var(--accent)]" onClick={() => changeFilter("projectId", item.projectId)} type="button">{item.projectName}</button></td>
+                          <td className="px-3 py-3"><button className="analytics-project-filter font-semibold text-[var(--accent)]" onClick={() => changeFilter("projectId", item.projectId)} type="button">{item.projectName}</button></td>
                           <td className="px-3 py-3">{item.status ? projectStatusLabels[item.status] ?? item.status : "—"}</td>
                           <td className="px-3 py-3 tabular-nums">{formatDuration(item.seconds)}</td>
                           <td className="px-3 py-3 tabular-nums">{item.progress.toFixed(1)}%</td>

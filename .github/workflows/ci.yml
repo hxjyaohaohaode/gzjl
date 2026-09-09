@@ -66,10 +66,24 @@ jobs:
         run: pnpm check
 
       - name: Install Playwright browser
-        run: pnpm exec playwright install --with-deps chromium
+        run: pnpm exec playwright install --with-deps chromium firefox webkit
 
       - name: Run browser end-to-end tests
         run: pnpm test:e2e
+
+      - name: Verify real API and database workflows across screen sizes
+        run: pnpm test:live
+
+      - name: Retain cross-browser acceptance screenshots and control inventories
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: workspace-acceptance-${{ github.run_id }}
+          path: |
+            test-results/live
+            test-results/engines
+          if-no-files-found: ignore
+          retention-days: 7
 
       # A failed browser assertion should be diagnosable without weakening the
       # deployment gate.  These files contain only CI fixtures, are retained

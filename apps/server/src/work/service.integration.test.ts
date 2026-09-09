@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
 import { eq } from "drizzle-orm";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Database } from "@workbench/db";
 import {
   attachmentLinks,
@@ -24,7 +24,7 @@ import {
 
 import { ApprovalService } from "../approvals/service.js";
 import type { ServerConfig } from "../config.js";
-import { EvidenceService } from "../evidence/service.js";
+import { EvidenceService, EvidenceValidationError } from "../evidence/service.js";
 import {
   WorkSessionConflictError,
   WorkSessionEvidenceRequiredError,
@@ -111,6 +111,38 @@ function manualInput(startAt: Date, endAt: Date, content: string) {
 }
 
 describe("structured work entry and approval chain", () => {
+  it("submits an uploaded image only after verification and rejects quarantined completion retries", async () => {
+    const db = await createTestDatabase();
+    const { employee } = await seedActors(db);
+    const actor = { ...employee, userId: crypto.randomUUID(), displayName: "员工", timezone: "Asia/Shanghai", isOwner: false, grants: [] };
+    const work = new WorkSessionService(db);
+    const anchor = Date.now() - 4 * 3600_000;
+    const fact = await work.createManual(employee, manualInput(new Date(anchor), new Date(anchor + 3600_000), "图片验收证据"));
+    const evidence = new EvidenceService(db, { ATTACHMENT_MAX_BYTES: 10485760 } as ServerConfig);
+    const verify = vi.fn().mockRejectedValueOnce(new Error("temporary object storage failure")).mockResolvedValue(undefined);
+    Object.assign(evidence, { store: {
+      createUploadUrl: async () => ({ uploadUrl: "https://storage.example.test/photo", requiredHeaders: {} }),
+      verify,
+    } });
+    const intent = await evidence.initiateFile(actor, fact.id, { originalName: "验收.png", mimeType: "image/png", sizeBytes: 68, sha256: "a".repeat(64), visibility: "management_only" });
+    await expect(work.submit(employee, fact.id, fact.version)).rejects.toBeInstanceOf(WorkSessionEvidenceRequiredError);
+    await expect(evidence.completeFile(actor, intent.attachment.id)).rejects.toThrow("temporary");
+    const completions = await Promise.all([
+      evidence.completeFile(actor, intent.attachment.id), evidence.completeFile(actor, intent.attachment.id),
+    ]);
+    expect(completions.map(({ attachment }) => attachment.status)).toEqual(["available", "available"]);
+    await expect(evidence.completeFile(actor, intent.attachment.id)).resolves.toMatchObject({ attachment: { status: "available" } });
+    expect(verify).toHaveBeenCalledTimes(3);
+    await expect(work.submit(employee, fact.id, fact.version)).resolves.toMatchObject({ approvalStatus: "pending_review" });
+
+    const second = await work.createManual(employee, manualInput(new Date(anchor + 3600_000), new Date(anchor + 7200_000), "损坏文件核验"));
+    const invalid = await evidence.initiateFile(actor, second.id, { originalName: "损坏.png", mimeType: "image/png", sizeBytes: 68, sha256: "b".repeat(64), visibility: "management_only" });
+    verify.mockRejectedValueOnce(new EvidenceValidationError("文件内容与登记的 SHA-256 不一致"));
+    await expect(evidence.completeFile(actor, invalid.attachment.id)).rejects.toThrow("SHA-256");
+    await expect(evidence.completeFile(actor, invalid.attachment.id)).rejects.toThrow("尚未通过核验");
+    await expect(work.submit(employee, second.id, second.version)).rejects.toBeInstanceOf(WorkSessionEvidenceRequiredError);
+  });
+
   it("rolls back the entire multi-segment batch when one segment overlaps", async () => {
     const db = await createTestDatabase();
     const actors = await seedActors(db);

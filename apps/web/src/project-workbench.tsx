@@ -1262,6 +1262,7 @@ function ProjectTeamPanel({
 }
 
 function NodeInspectorContent({
+  membershipId,
   node,
   nodes,
   assignees,
@@ -1271,6 +1272,7 @@ function NodeInspectorContent({
   onDeriveBranch,
   onOpenRecycle,
 }: {
+  membershipId: string;
   node: ProjectNode;
   nodes: ProjectNode[];
   assignees: ProjectNodeAssignee[];
@@ -1338,6 +1340,13 @@ function NodeInspectorContent({
     queryClient.invalidateQueries({
       queryKey: ["project-node-versions", projectId, node.id],
     });
+  const responsible = assignees.find((item) => item.isResponsible);
+  const claim = useMutation({
+    mutationFn: () => api(`/api/projects/${projectId}/nodes/${node.id}/assignees/self`, {
+      method: "POST", body: { expectedVersion: node.version },
+    }),
+    onSuccess: async () => { await Promise.all([refresh(), refreshHistory()]); },
+  });
   const update = useMutation({
     mutationFn: () =>
       api(`/api/projects/${projectId}/nodes/${node.id}`, {
@@ -1574,6 +1583,21 @@ function NodeInspectorContent({
         </section>
         <section className="project-inspector-section">
           <p className="app-section-label">协作者与负责人</p>
+          <div className="project-self-claim">
+            {responsible ? (
+              <p>{responsible.membershipId === membershipId ? "你已认领此节点，可在添加工作记录时同步完成度。" : `此节点由 ${responsible.displayName} 负责；调整分工请联系负责人或项目管理员。`}</p>
+            ) : node.status === "completed" || node.status === "cancelled" ? (
+              <p>此节点已结束，暂不可认领。</p>
+            ) : (
+              <>
+                <p>此节点尚无负责人，项目成员可以主动认领。</p>
+                <Button disabled={claim.isPending} onClick={() => claim.mutate()} type="button">
+                  <UserPlus size={16} />{claim.isPending ? "正在认领…" : "认领此节点"}
+                </Button>
+              </>
+            )}
+            <ErrorMessage error={claim.error} />
+          </div>
           <div className="project-node-assignee-readout">
             <AssigneeAvatarGroup assignees={assignees} />
             <span>
@@ -2122,6 +2146,7 @@ function NodeInspectorContent({
 }
 
 function NodeInspector({
+  membershipId,
   node,
   nodes,
   assignees,
@@ -2131,6 +2156,7 @@ function NodeInspector({
   onDeriveBranch,
   onOpenRecycle,
 }: {
+  membershipId: string;
   node: ProjectNode;
   nodes: ProjectNode[];
   assignees: ProjectNodeAssignee[];
@@ -2142,6 +2168,7 @@ function NodeInspector({
 }) {
   return (
     <NodeInspectorContent
+      membershipId={membershipId}
       canManage={canManage}
       key={`${node.id}-${node.version}`}
       node={node}
@@ -2626,7 +2653,7 @@ export function ProjectDetailPage({ me }: { me: Me }) {
           mobileFullscreen && "is-mobile-fullscreen",
         )}
       >
-        <main className="project-workbench-main">
+        <section className="project-workbench-main" aria-label="项目工作区">
           <ProjectOverview
             assigneesByNodeId={assigneesByNodeId}
             branches={activeBranches}
@@ -3534,7 +3561,7 @@ export function ProjectDetailPage({ me }: { me: Me }) {
             </span>
           </div>
           <ErrorMessage error={createBranch.error} />
-        </main>
+        </section>
         {selected ? (
           <>
             <button
@@ -3544,6 +3571,7 @@ export function ProjectDetailPage({ me }: { me: Me }) {
               type="button"
             />
             <NodeInspector
+              membershipId={me.user.membershipId}
               canManage={canManage}
               node={selected}
               nodes={allNodes}

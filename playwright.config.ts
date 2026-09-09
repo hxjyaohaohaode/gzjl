@@ -22,6 +22,7 @@ const localLaunch = localChromium
 
 export default defineConfig({
   testDir: "./tests/e2e",
+  outputDir: "test-results/e2e",
   fullyParallel: true,
   // Dynamic chart modules are intentionally exercised in both viewports. Keep
   // local fallback Chromium from saturating a Windows development machine.

@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { Readable } from "node:stream";
+import { validateHeaderValue } from "node:http";
 
 import { describe, expect, it, vi } from "vitest";
 import type { Database } from "@workbench/db";
@@ -38,6 +39,20 @@ const config: ServerConfig = {
 };
 
 describe("evidence storage capabilities", () => {
+  it("signs Unicode download filenames as valid ASCII HTTP headers without losing the name", async () => {
+    const service = new EvidenceService({} as Database, { ...config,
+      S3_ENDPOINT: "https://storage.example.test", S3_REGION: "us-east-1",
+      S3_BUCKET: "private-evidence", S3_ACCESS_KEY_ID: "test-key", S3_SECRET_ACCESS_KEY: "test-secret",
+    });
+    const store = (service as unknown as { store: { createAccessUrl(key: string, name: string, mime: string, mode: "preview" | "download"): Promise<{ url: string }> } }).store;
+    for (const mode of ["preview", "download"] as const) {
+      const result = await store.createAccessUrl("evidence/file.png", "中文验收凭证.png", "image/png", mode);
+      const header = new URL(result.url).searchParams.get("response-content-disposition")!;
+      expect(() => validateHeaderValue("Content-Disposition", header)).not.toThrow();
+      expect(decodeURIComponent(header.split("filename*=UTF-8''")[1]!)).toBe("中文验收凭证.png");
+      expect(header.startsWith(mode === "preview" ? "inline;" : "attachment;")).toBe(true);
+    }
+  });
   it("previews passive document and media formats while forcing archives and active content to download", () => {
     expect(previewMimeType("application/pdf", "proof.pdf")).toBe("application/pdf");
     expect(previewMimeType("", "README")).toBe("text/plain");

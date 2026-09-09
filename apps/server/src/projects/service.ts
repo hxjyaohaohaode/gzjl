@@ -17,6 +17,7 @@ import {
 } from "@workbench/shared";
 import {
   auditLogs,
+  outboxEvents,
   projectActivityLog,
   projectBranches,
   projectBranchVersions,
@@ -873,7 +874,7 @@ export class ProjectService {
   async joinProject(actor: ProjectActor, projectId: string) {
     return this.db.transaction(async (tx) => {
       const [project] = await tx
-        .select({ id: projects.id, status: projects.status })
+        .select({ id: projects.id, status: projects.status, version: projects.version })
         .from(projects)
         .where(
           and(
@@ -953,6 +954,11 @@ export class ProjectService {
         entityId: member.id,
         before,
         after: member,
+      });
+      await tx.insert(outboxEvents).values({
+        organizationId: actor.organizationId, eventType: "project.changed",
+        entityType: "project", entityId: projectId, entityVersion: project.version,
+        payload: { change: "member_self_joined" },
       });
       return member;
     });
@@ -1041,8 +1047,9 @@ export class ProjectService {
     nodeId: string,
     expectedVersion: number,
     assignments: ProjectNodeAssigneeInput[],
+    selfClaim = false,
   ) {
-    const membershipIds = assignments.map((assignment) => assignment.membershipId);
+    let membershipIds = assignments.map((assignment) => assignment.membershipId);
     if (new Set(membershipIds).size !== membershipIds.length) {
       throw new ProjectTreeValidationError("同一成员不能重复分配到一个项目节点。");
     }
@@ -1063,6 +1070,38 @@ export class ProjectService {
         .for("update")
         .limit(1);
       if (!node) throw new ProjectNotFoundError();
+      if (selfClaim) {
+        const [member] = await tx.select({ id: projectMembers.id })
+          .from(projectMembers)
+          .innerJoin(projects, eq(projects.id, projectMembers.projectId))
+          .innerJoin(orgMemberships, eq(orgMemberships.id, projectMembers.membershipId))
+          .innerJoin(users, eq(users.id, orgMemberships.userId))
+          .where(and(
+            eq(projectMembers.projectId, projectId),
+            eq(projectMembers.membershipId, actor.membershipId),
+            isNull(projectMembers.leftAt),
+            eq(projects.organizationId, actor.organizationId),
+            eq(orgMemberships.organizationId, actor.organizationId),
+            eq(orgMemberships.status, "active"), eq(users.status, "active"),
+            isNull(projects.deletedAt), ne(projects.status, "archived"),
+          )).limit(1);
+        if (!member) throw new ProjectNotFoundError();
+        if (node.status === "completed" || node.status === "cancelled") {
+          throw new ProjectTreeValidationError("已完成或已取消的节点不能认领。");
+        }
+        const existing = await tx.select().from(projectNodeAssignees)
+          .where(eq(projectNodeAssignees.nodeId, nodeId));
+        if (existing.some((item) => item.membershipId === actor.membershipId && item.isResponsible)) return node;
+        if (existing.some((item) => item.isResponsible)) {
+          throw new ProjectTreeValidationError("该节点已有负责人，请联系负责人或项目管理员调整分工。");
+        }
+        assignments = [
+          ...existing.filter((item) => item.membershipId !== actor.membershipId)
+            .map((item) => ({ membershipId: item.membershipId, isResponsible: item.isResponsible })),
+          { membershipId: actor.membershipId, isResponsible: true },
+        ];
+        membershipIds = assignments.map((item) => item.membershipId);
+      }
       const [branch] = await tx
         .select({ id: projectBranches.id })
         .from(projectBranches)
@@ -1126,7 +1165,7 @@ export class ProjectService {
       await this.recordNodeVersion(
         tx,
         updated,
-        "更新节点负责人",
+        selfClaim ? "员工主动认领节点" : "更新节点负责人",
         actor.membershipId,
       );
       await tx.insert(projectActivityLog).values({
@@ -1141,11 +1180,16 @@ export class ProjectService {
       await tx.insert(auditLogs).values({
         organizationId: actor.organizationId,
         actorMembershipId: actor.membershipId,
-        action: "project.node_assignments_updated",
+        action: selfClaim ? "project.node_self_claimed" : "project.node_assignments_updated",
         entityType: "project_node",
         entityId: nodeId,
         before: beforeAssignments,
         after: assignments,
+      });
+      await tx.insert(outboxEvents).values({
+        organizationId: actor.organizationId, eventType: "project.changed",
+        entityType: "project_node", entityId: nodeId, entityVersion: updated.version,
+        payload: { projectId, change: selfClaim ? "node_self_claimed" : "node_assignments_updated" },
       });
       return updated;
     });

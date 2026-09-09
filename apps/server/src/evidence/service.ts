@@ -187,6 +187,12 @@ class ObjectStore {
     const expiresInSeconds = Math.min(this.config.signedUrlTtlSeconds, 5 * 60);
     const previewType = previewMimeType(declaredMimeType, originalName);
     const preview = mode === "preview" && previewType !== null;
+    const fileName = safeName(originalName ?? "evidence");
+    const asciiName = fileName.replace(/[^a-zA-Z0-9._-]+/g, "_");
+    // HTTP header values cannot contain raw Chinese/Unicode. Keep an ASCII
+    // fallback and an RFC 5987 UTF-8 filename for international file names.
+    const encodedName = encodeURIComponent(fileName).replace(/[!'()*]/g,
+      (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
     return {
       url: await getSignedUrl(
         this.client,
@@ -195,7 +201,7 @@ class ObjectStore {
           Key: objectKey,
           // Preview only passive formats and keep them on the isolated object
           // storage origin. Active or unknown formats remain forced downloads.
-          ResponseContentDisposition: `${preview ? "inline" : "attachment"}; filename="${safeName(originalName ?? "evidence")}"`,
+          ResponseContentDisposition: `${preview ? "inline" : "attachment"}; filename="${asciiName}"; filename*=UTF-8''${encodedName}`,
           ResponseContentType: previewType ?? genericBinaryMimeType,
         }),
         { expiresIn: expiresInSeconds },
@@ -255,11 +261,11 @@ export function previewMimeType(
 
 function safeName(name: string): string {
   return (
-    name
+    Array.from(name
       .normalize("NFKC")
       .replace(/[^\p{L}\p{N}._-]+/gu, "-")
-      .replace(/^-+|-+$/g, "")
-      .slice(0, 120) || "evidence"
+      .replace(/^-+|-+$/g, ""))
+      .slice(0, 120).join("") || "evidence"
   );
 }
 
@@ -689,7 +695,10 @@ export class EvidenceService {
     ) {
       throw new EvidenceValidationError("该证据不是待完成的文件上传。");
     }
-    if (attachment.status !== "pending_upload") return { attachment };
+    if (attachment.status === "available") return { attachment };
+    if (attachment.status !== "pending_upload") {
+      throw new EvidenceValidationError("文件尚未通过核验，不能完成提交；请重新选择文件或替换此证据。");
+    }
     try {
       await this.store.verify(attachment.objectKey, attachment.sizeBytes, attachment.sha256);
     } catch (error) {
@@ -711,6 +720,16 @@ export class EvidenceService {
       .set({ status: "available", updatedAt: new Date() })
       .where(and(eq(attachments.id, attachmentId), eq(attachments.status, "pending_upload")))
       .returning();
+    if (!updated) {
+      // Another device may have completed the same upload during verification.
+      // Return its committed status instead of our stale pending snapshot, and
+      // do not emit another completion audit/event for that upload.
+      const latest = await this.linkedAttachment(actor, attachmentId);
+      if (latest.attachment.status !== "available") {
+        throw new EvidenceValidationError("文件核验状态已变化，请刷新证据列表后重试。");
+      }
+      return { attachment: latest.attachment };
+    }
     await this.db.insert(auditLogs).values({
       organizationId: actor.organizationId,
       actorMembershipId: actor.membershipId,
@@ -724,10 +743,10 @@ export class EvidenceService {
       eventType: "evidence.changed",
       entityType: "work_session",
       entityId: row.link.entityId,
-      entityVersion: (updated ?? attachment).version,
+      entityVersion: updated.version,
       payload: { change: "upload_completed" },
     });
-    return { attachment: updated ?? attachment };
+    return { attachment: updated };
   }
 
   async createReference(
