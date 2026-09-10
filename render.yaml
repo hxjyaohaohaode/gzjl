@@ -126,10 +126,6 @@ services:
       # an omitted key safely keeps Push disabled until it is added manually.
       - key: VAPID_PUBLIC_KEY
         sync: false
-      - key: ZHIPU_API_BASE_URL
-        value: https://open.bigmodel.cn/api/paas/v4
-      - key: ZHIPU_MODEL
-        value: glm-4.7-flash
 
   - type: worker
     name: gzjl-hxjyaohaohaode-worker
@@ -213,7 +209,3 @@ services:
         value: "60000"
       - key: AI_MAX_RETRIES
         value: "2"
-      - key: ZHIPU_API_BASE_URL
-        value: https://open.bigmodel.cn/api/paas/v4
-      - key: ZHIPU_MODEL
-        value: glm-4.7-flash

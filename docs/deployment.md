@@ -21,7 +21,7 @@ Render 的 `RENDER_EXTERNAL_URL` 会自动提供 Web Service 的 `onrender.com` 
 | 邮箱自动投递、邮箱绑定验证和自助找回密码 | Web | `SMTP_HOST`、`SMTP_USER`、`SMTP_PASSWORD`、`SMTP_FROM` |
 | 短信自动投递、手机号绑定验证和自助找回密码 | Web | `SMS_PROVIDER=twilio`、`TWILIO_ACCOUNT_SID`、`TWILIO_AUTH_TOKEN`、`TWILIO_FROM` |
 | 浏览器 Push | Web 与 Worker | Web 填 `VAPID_PUBLIC_KEY`；Worker 填同一个 `VAPID_PUBLIC_KEY`、匹配的 `VAPID_PRIVATE_KEY` 和 `VAPID_SUBJECT=mailto:你的运维邮箱` |
-| 部署级 AI 回退 | Web 和 Worker | 两边都添加相同的 `ZHIPU_API_KEY` |
+| 部署级 AI 回退 | Web 和 Worker | 两边都显式设置 `AI_ENABLED=true`、`AI_API_KEY`、`AI_API_BASE_URL` 和 `AI_MODEL`；优先在系统内保存组织配置 |
 
 没有配置外部服务时，应用会明确告知“尚未配置”，不会伪造文件上传、邮件、短信或 AI 已完成。成员管理中的默认邀请方式是 **手工复制一次性链接**：填写邮箱、中国大陆 11 位手机号、带国家区号的国际手机号或邮箱与手机号两者后，链接只在当前授权管理员的这次操作中显示；服务端会统一规范化手机号，避免同一号码形成重复账号。请复制后通过企业私聊、受控工单或其他私密渠道单独传递，不要发公开群。界面会禁用尚未配置的邮件/短信自动渠道；若已配置的自动渠道在投递时未能确认成功，系统会写入审计记录并回退为只向当前管理员显示的一次性手工链接。首次 Owner 初始化时邮箱是可用的引导登录方式；可选手机号会安全保存为“待验证”，只有在随后配置 Twilio 并从 **账户安全** 发出、确认真实短信链接后才可用于登录或找回密码。对无法使用自助找回的在职成员，唯一 Owner 可在 **组织与人员 → 成员详情** 以当前密码（和已启用的 TOTP）二次验证后生成手工重置链接；生成新链接会撤销旧的未使用重置链接。老板也可以在系统的 **工作智能 → 组织 AI 配置** 中填写组织级 HTTPS OpenAI-compatible Base URL、模型与 Key；密钥只以密文保存在服务端，员工与浏览器不能读取。
 
@@ -67,3 +67,13 @@ B2 是独立的私有对象存储，浏览器通过短时预签名地址直接�
 安全验收：B2 bucket 保持 private；员工浏览器只能看到短时预签名 URL，不能看到 B2 API key；预签名上传地址 15 分钟失效，下载地址最多 5 分钟失效；Master Application Key 已轮换作废，Render 只持有单 bucket 的独立 key；默认服务端加密已开启；业务数据库与对象存储共同让多端在刷新或实时事件到达后看到同一附件和导出状态。
 
 以后若绑定自定义域名，应将 `WEB_ORIGIN` 和 `PUBLIC_APP_URL` 改为该域名的同一 HTTPS origin，并在对象存储 CORS 中替换为该精确域名。不要在证书生效前修改它们。
+
+## 组织 AI 配置与供应商切换
+
+Owner 在 **工作智能 → 组织 AI 配置** 中管理 Base URL、完整模型标识、API Key、输出 Token 上限、请求超时、最大尝试次数、Temperature、Top P、Token 参数名称和响应格式，无需修改代码或重新部署。支持 `provider/model` 形式的模型名；粘贴 `/chat/completions` 完整地址会自动去掉重复路径。
+
+默认不发送 Temperature、Top P 或 response_format，避免不支持这些参数的模型拒绝请求。供应商要求时可切换 `max_completion_tokens` 或 JSON 对象模式；按供应商文档配置：[OpenAI 输出长度说明](https://help.openai.com/en/articles/5072518-controlling-the-length-of-openai-model-responses)、[OpenRouter Chat Completions](https://openrouter.ai/docs/api/api-reference/chat/send-chat-completion-request)。测试与正式调用共用请求配置，超时覆盖完整响应读取。连接测试只验证供应商能返回文本，不能替代实际报告生成验收；推理模型的 Token 上限也需要容纳推理消耗。
+
+点击 **保存并测试新配置** 后，查看连接历史中的成功、HTTP 错误或超时提示。后台任务在开始每次调用时读取当前整套配置，模型、地址与密钥一起切换；已经发出的请求继续使用发出时的配置。临时网络错误、限流、服务异常及无法解析的结构化回答按配置有限重试；密钥、路径、参数错误会直接显示原因。Worker 中断超过最长请求超时加一分钟后会回收任务：未耗尽尝试次数的重新排队，已耗尽的显示失败并允许手动重试；旧请求不能覆盖新的尝试结果。编辑旧记录或更换供应商不会修改工时事实。
+
+部署需要执行新增迁移 `0013_famous_bastion.sql`。现有组织地址、模型和密文 Key 保留；新安装不再预设供应商品牌或模型。旧 `ZHIPU_API_KEY`、`ZHIPU_API_BASE_URL`、`ZHIPU_MODEL` 仅作为显式配置的兼容别名保留。基础接入参数在页面管理，`AI_CONFIG_ENCRYPTION_KEY` 仍作为基础设施密钥由 API 与 Worker 共享，不能改成浏览器配置。

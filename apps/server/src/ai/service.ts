@@ -526,6 +526,8 @@ export class AiService {
             baseUrl: provider.baseUrl,
             model: provider.model,
             maxOutputTokens: provider.maxOutputTokens,
+            configurationVersion: provider.configurationVersion,
+            generationOptions: provider.generationOptions,
           },
           template: "structured-work-intelligence-v5-payroll",
         }),

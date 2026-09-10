@@ -8,18 +8,13 @@ import { z } from "zod";
 import {
   createDatabase,
   decryptScopedSecret,
-  decryptSecret,
-  SecretCipherError,
 } from "@workbench/db";
 import {
   aiJobs,
-  aiReports,
-  aiReportSources,
   notificationDeliveries,
   notifications,
   notificationPreferences,
   organizationOwners,
-  organizationAiSettings,
   orgMemberships,
   outboxEvents,
   payPeriods,
@@ -33,7 +28,7 @@ import {
 } from "@workbench/db/schema";
 
 import { createExportJobRuntime } from "./export-jobs.js";
-import { buildAiSystemPrompt } from "./ai-prompt.js";
+import { createAiJobProcessor, recoverStaleAiJobs } from "./ai-jobs.js";
 import { createS3CompatibleClient } from "./s3-compatible-client.js";
 import {
   isPermanentWebPushFailure,
@@ -47,12 +42,16 @@ const config = z.object({
   DATABASE_POOL_MAX: z.coerce.number().int().positive().default(5),
   DATABASE_SSL: z.stringbool().default(false),
   LOG_LEVEL: z.enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"]).default("info"),
+  AI_API_KEY: z.string().min(1).optional(),
+  AI_API_BASE_URL: z.url().optional(),
+  AI_MODEL: z.string().min(1).optional(),
   ZHIPU_API_KEY: z.string().min(1).optional(),
-  ZHIPU_API_BASE_URL: z.url().default("https://open.bigmodel.cn/api/paas/v4"),
-  ZHIPU_MODEL: z.string().min(1).default("glm-4.7-flash"),
+  ZHIPU_API_BASE_URL: z.url().optional(),
+  ZHIPU_MODEL: z.string().min(1).optional(),
   AI_ENABLED: z.stringbool().default(false),
   AI_CONFIG_ENCRYPTION_KEY: z.string().min(32).optional(),
-  AI_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(5_000).max(180_000).default(60_000),
+  AI_MAX_RETRIES: z.coerce.number().int().min(1).max(5).default(2),
+  AI_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(5_000).max(300_000).default(60_000),
   VAPID_PUBLIC_KEY: z.string().min(1).optional(),
   VAPID_PRIVATE_KEY: z.string().min(1).optional(),
   VAPID_SUBJECT: z.string().min(1).optional(),
@@ -133,60 +132,6 @@ if (pushReady) {
   );
 }
 
-const aiOutputSchema = z.object({
-  title: z.string().min(1).max(200),
-  summary: z.string().min(1).max(10_000),
-  highlights: z.array(z.string().max(1_000)).max(20).default([]),
-  risks: z.array(z.string().max(1_000)).max(20).default([]),
-  suggestions: z.array(z.string().max(1_000)).max(20).default([]),
-});
-
-function parseAiJson(content: string) {
-  const cleaned = content.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
-  return aiOutputSchema.parse(JSON.parse(cleaned));
-}
-
-async function resolveAiProvider(organizationId: string) {
-  const [settings] = await database.db
-    .select()
-    .from(organizationAiSettings)
-    .where(eq(organizationAiSettings.organizationId, organizationId))
-    .limit(1);
-  if (settings) {
-    if (!settings.enabled || !settings.apiKeyCiphertext) {
-      throw new Error("Organization AI is disabled or has no configured key");
-    }
-    if (!config.AI_CONFIG_ENCRYPTION_KEY) {
-      throw new Error("AI_CONFIG_ENCRYPTION_KEY is not configured in the worker");
-    }
-    try {
-      return {
-        baseUrl: settings.baseUrl.replace(/\/$/, ""),
-        apiKey: decryptSecret(
-          settings.apiKeyCiphertext,
-          config.AI_CONFIG_ENCRYPTION_KEY,
-        ),
-        model: settings.model,
-      };
-    } catch (error) {
-      if (error instanceof SecretCipherError) {
-        throw new Error("Organization AI key cannot be decrypted", {
-          cause: error,
-        });
-      }
-      throw error;
-    }
-  }
-  if (!config.AI_ENABLED || !config.ZHIPU_API_KEY) {
-    throw new Error("No organization or deployment-default AI key is configured");
-  }
-  return {
-    baseUrl: config.ZHIPU_API_BASE_URL.replace(/\/$/, ""),
-    apiKey: config.ZHIPU_API_KEY,
-    model: config.ZHIPU_MODEL,
-  };
-}
-
 async function notificationEventEnabled(membershipId: string, category: string): Promise<boolean> {
   const [preference] = await database.db.select().from(notificationPreferences).where(and(eq(notificationPreferences.membershipId, membershipId), eq(notificationPreferences.category, category))).limit(1);
   if (!preference) return true;
@@ -254,7 +199,7 @@ async function enqueueAiJob(jobId: string): Promise<void> {
     .from(aiJobs)
     .where(eq(aiJobs.id, jobId))
     .limit(1);
-  if (!job || job.status === "completed" || job.status === "cancelled") return;
+  if (!job || job.status !== "queued") return;
   await boss.send(
     "ai-generate-report",
     { jobId: job.id },
@@ -267,6 +212,7 @@ async function enqueueAiJob(jobId: string): Promise<void> {
 }
 
 async function dispatchAiJobs(): Promise<void> {
+  await recoverStaleAiJobs(database.db);
   const queued = await database.db
     .select({ id: aiJobs.id })
     .from(aiJobs)
@@ -277,98 +223,7 @@ async function dispatchAiJobs(): Promise<void> {
   }
 }
 
-async function processAiJob(jobId: string): Promise<void> {
-  const [job] = await database.db.select().from(aiJobs).where(eq(aiJobs.id, jobId)).limit(1);
-  if (!job || job.status === "completed" || job.status === "cancelled") return;
-  const attempt = job.attempt + 1;
-  await database.db.update(aiJobs).set({ status: "running", attempt, startedAt: new Date(), errorSummary: null }).where(eq(aiJobs.id, job.id));
-  try {
-    const provider = await resolveAiProvider(job.organizationId);
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), config.AI_REQUEST_TIMEOUT_MS);
-    let response: Response;
-    try {
-      response = await fetch(`${provider.baseUrl}/chat/completions`, {
-        method: "POST",
-        headers: { authorization: `Bearer ${provider.apiKey}`, "content-type": "application/json" },
-        signal: controller.signal,
-        body: JSON.stringify({
-          model: job.model || provider.model,
-          temperature: 0.2,
-          max_tokens: job.maxOutputTokens,
-          // An Owner may choose any OpenAI-compatible provider. `response_format`
-          // is not implemented consistently across that ecosystem, so use the
-          // portable strict prompt below and validate the returned JSON locally
-          // instead of turning a provider dialect difference into a paid 400.
-          messages: [
-            {
-              role: "system",
-              content: buildAiSystemPrompt(job.taskType),
-            },
-            { role: "user", content: JSON.stringify(job.sourceSummary) },
-          ],
-        }),
-      });
-    } finally {
-      clearTimeout(timeout);
-    }
-    if (!response.ok) throw new Error(`AI provider returned ${response.status}`);
-    const payload = (await response.json()) as {
-      id?: string;
-      choices?: Array<{ message?: { content?: string } }>;
-      usage?: { prompt_tokens?: number; completion_tokens?: number };
-    };
-    const content = payload.choices?.[0]?.message?.content;
-    if (!content) throw new Error("AI provider returned no content");
-    const output = parseAiJson(content);
-    const sourceSummary = job.sourceSummary as { sources?: Array<{ entityType: string; entityId: string; entityVersion?: string; label: string }> };
-    await database.db.transaction(async (tx) => {
-      // Completion and cancellation race on the same conditional update. If
-      // cancellation won while the provider request was in flight, discard
-      // the paid response instead of resurrecting the cancelled job.
-      const [completedJob] = await tx.update(aiJobs).set({ status: "completed", completedAt: new Date(), errorSummary: null, inputTokens: payload.usage?.prompt_tokens ?? null, outputTokens: payload.usage?.completion_tokens ?? null, providerRequestId: payload.id ?? null }).where(and(eq(aiJobs.id, job.id), eq(aiJobs.status, "running"))).returning({ id: aiJobs.id });
-      if (!completedJob) return;
-      const [report] = await tx.insert(aiReports).values({ aiJobId: job.id, title: output.title, summary: output.summary, structuredOutput: output, sourceCount: sourceSummary.sources?.length ?? 0 }).onConflictDoNothing().returning();
-      if (report && sourceSummary.sources?.length) {
-        await tx.insert(aiReportSources).values(sourceSummary.sources.map((source) => ({ aiReportId: report.id, entityType: source.entityType, entityId: source.entityId, entityVersion: source.entityVersion, label: source.label }))).onConflictDoNothing();
-      }
-      await tx.insert(outboxEvents).values({ organizationId: job.organizationId, eventType: "ai.report.completed", entityType: "ai_job", entityId: job.id, entityVersion: attempt, payload: { jobId: job.id, reportId: report?.id ?? null } });
-      if (await notificationEventEnabled(job.requestedBy, "ai_report_ready")) await tx.insert(notifications).values({ organizationId: job.organizationId, recipientMembershipId: job.requestedBy, category: "ai_report_ready", severity: "info", title: "AI 工作洞察已生成", body: output.title, actionUrl: report ? `/ai?report=${report.id}` : "/ai", dedupeKey: `ai-report:${job.id}` }).onConflictDoNothing();
-    });
-  } catch (error) {
-    const finalFailure = attempt >= job.maxAttempts;
-    const errorSummary = (() => {
-      if (error instanceof DOMException && error.name === "AbortError") {
-        return "AI 供应商响应超时，请稍后重试。";
-      }
-      if (error instanceof Error && /^AI provider returned \d{3}$/.test(error.message)) {
-        return error.message.replace("AI provider returned", "AI 供应商返回 HTTP");
-      }
-      if (error instanceof SyntaxError || error instanceof z.ZodError) {
-        return "AI 供应商返回了不兼容的结构化内容。";
-      }
-      if (error instanceof Error && error.message === "AI provider returned no content") {
-        return "AI 供应商未返回可用内容。";
-      }
-      return "AI 供应商暂时不可用，请检查组织配置或稍后重试。";
-    })();
-    const failureRecorded = await database.db.transaction(async (tx) => {
-      const [updatedJob] = await tx.update(aiJobs).set({ status: finalFailure ? "failed" : "queued", errorSummary, completedAt: finalFailure ? new Date() : null }).where(and(eq(aiJobs.id, job.id), eq(aiJobs.status, "running"))).returning({ id: aiJobs.id });
-      if (!updatedJob) return false;
-      if (finalFailure) {
-        await tx.insert(outboxEvents).values({ organizationId: job.organizationId, eventType: "ai.report.failed", entityType: "ai_job", entityId: job.id, entityVersion: attempt, payload: { jobId: job.id } });
-      }
-      return true;
-    });
-    // A user cancellation is a successful terminal state, not a provider
-    // failure that pg-boss should retry or notify about.
-    if (!failureRecorded) return;
-    if (finalFailure) {
-      if (await notificationEventEnabled(job.requestedBy, "ai_report_failed")) await database.db.insert(notifications).values({ organizationId: job.organizationId, recipientMembershipId: job.requestedBy, category: "ai_report_failed", severity: "warning", title: "AI 报告生成失败", body: "事实数据未受影响，可以稍后重试生成报告。", actionUrl: "/ai", dedupeKey: `ai-report-failed:${job.id}` }).onConflictDoNothing();
-    }
-    throw error;
-  }
-}
+const processAiJob = createAiJobProcessor(database.db, config, notificationEventEnabled);
 
 async function evaluateReminders(): Promise<void> {
   const rules = await database.db.select().from(reminderRules).where(eq(reminderRules.enabled, true));

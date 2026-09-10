@@ -1688,7 +1688,7 @@ test("manual work recording persists primary and auxiliary project-node associat
         "00000000-0000-4000-8000-000000000007",
         "00000000-0000-4000-8000-000000000006",
       ],
-      reportedProgress: 85,
+      projectProgressUpdates: [{ projectNodeId: "00000000-0000-4000-8000-000000000007", progress: 85 }],
       source: "manual",
     });
     await route.fulfill({ json: { ok: true } });
@@ -1712,7 +1712,8 @@ test("manual work recording persists primary and auxiliary project-node associat
     .getByLabel("主项目节点", { exact: true })
     .selectOption("00000000-0000-4000-8000-000000000007");
   await page.getByLabel("关联 工作台正式版", { exact: true }).check();
-  await page.getByLabel("主项目节点完成度", { exact: true }).fill("85");
+  await page.getByLabel("更新 实现项目画布 的进度").check();
+  await page.getByLabel("实现项目画布完成度", { exact: true }).fill("85");
   expect(
     await page.evaluate(
       () => document.documentElement.scrollWidth <= window.innerWidth + 1,
@@ -3592,7 +3593,7 @@ test("image evidence retries verification and submits work with mobile progress 
   await page.route("**/api/work-sessions", async (route) => {
     created += 1;
     const body = route.request().postDataJSON();
-    expect(body).toMatchObject({ primaryProjectNodeId: nodeId, reportedProgress: 75 });
+    expect(body).toMatchObject({ primaryProjectNodeId: parentId, projectProgressUpdates: [{ projectNodeId: nodeId, progress: 75 }] });
     record = { ...body, id: sessionId, membershipId: "00000000-0000-4000-8000-000000000002", recordKind: "fact", submissionStatus: "draft", approvalStatus: "not_requested", netSeconds: 3600, version: 1, projectLinks: [] };
     await route.fulfill({ json: { session: record } });
   });
@@ -3622,14 +3623,14 @@ test("image evidence retries verification and submits work with mobile progress 
   await page.getByRole("button", { name: "手工录入" }).click();
   await page.getByLabel("工作内容").fill("手机验收并上传图片");
   await page.getByLabel("关联项目（可选）", { exact: true }).selectOption(projectId);
-  await page.getByLabel("主项目节点", { exact: true }).selectOption(parentId);
-  await expect(page.getByLabel("主项目节点完成度", { exact: true })).toBeDisabled();
-  await page.getByLabel("选择要更新的子节点").selectOption(nodeId);
+  await page.getByLabel("关联 自动汇总阶段", { exact: true }).check();
+  await expect(page.getByLabel("更新 自动汇总阶段 的进度")).toHaveCount(0);
+  await page.getByLabel("自动汇总阶段的子节点").selectOption(nodeId);
   const progressButton = page.getByRole("button", { name: "75%", exact: true });
   if (testInfo.project.name.startsWith("mobile")) await progressButton.tap();
   else await progressButton.click();
-  await expect(page.getByLabel("主项目节点完成度", { exact: true })).toHaveValue("75");
-  const slider = page.getByLabel("主项目节点完成度滑块");
+  await expect(page.getByLabel("移动端验收任务完成度", { exact: true })).toHaveValue("75");
+  const slider = page.getByLabel("移动端验收任务完成度滑块");
   expect((await slider.boundingBox())!.height).toBeGreaterThanOrEqual(44);
   await page.locator('.work-direct-file input[type="file"]').setInputFiles({ name: "手机验收.png", mimeType: "image/png", buffer: Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6tOIAAAAASUVORK5CYII=", "base64") });
   await page.getByRole("button", { name: "保存真实工时草稿" }).click();
@@ -5901,4 +5902,116 @@ test("mobile project canvas enters a true viewport-sized mode with list fallback
   await expect(page.locator(".project-workbench-tree-list")).toBeVisible();
   await page.getByRole("button", { name: "退出项目全屏" }).click();
   await expect(workbench).toHaveCount(0);
+});
+
+
+test("work entry updates selected nodes across projects without reselecting unrelated nodes", async ({ page }, testInfo) => {
+  await mockAuthenticatedWorkspace(page);
+  const a = "00000000-0000-4000-8000-000000000901";
+  const b = "00000000-0000-4000-8000-000000000902";
+  const first = "00000000-0000-4000-8000-000000000911";
+  const second = "00000000-0000-4000-8000-000000000912";
+  const unrelated = "00000000-0000-4000-8000-000000000913";
+  const recordId = "00000000-0000-4000-8000-000000000921";
+  let submitted: Record<string, unknown> | null = null;
+  await page.route("**/api/projects", (route) => route.fulfill({ json: { items: [{ id: a, key: "A", name: "项目甲" }, { id: b, key: "B", name: "项目乙" }] } }));
+  await page.route("**/api/projects/" + a + "/tree", (route) => route.fulfill({ json: { nodes: [{ id: first, title: "项目甲交付", type: "task", status: "in_progress", progress: "10", progressMode: "manual" }, { id: unrelated, title: "未选任务", type: "task", status: "in_progress", progress: "5", progressMode: "manual" }] } }));
+  await page.route("**/api/projects/" + b + "/tree", (route) => route.fulfill({ json: { nodes: [{ id: second, title: "项目乙验收", type: "task", status: "in_progress", progress: "20", progressMode: "manual" }] } }));
+  await page.route("**/api/work-sessions/project-node-recommendations?**", (route) => route.fulfill({ json: { items: [] } }));
+  await page.route("**/api/work-sessions?**", (route) => route.fulfill({ json: { items: [] } }));
+  await page.route("**/api/work-sessions", async (route) => {
+    submitted = route.request().postDataJSON();
+    await route.fulfill({ json: { session: { ...submitted, id: recordId, version: 1, recordKind: "fact" } } });
+  });
+  await page.route("**/api/work-sessions/" + recordId + "/attachments/reference", (route) => route.fulfill({ json: { attachment: { id: "proof", status: "available" } } }));
+  await page.route("**/api/evidence/capabilities", (route) => route.fulfill({ json: { fileUploads: { available: false, maxBytes: 1024 }, references: { text: true, url: true } } }));
+  await page.goto("/login");
+  await page.getByLabel("邮箱或手机号").fill("owner@example.test");
+  await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+  await expect(page).not.toHaveURL(/\/login(?:[?#].*)?$/);
+  await page.goto("/work");
+  await page.getByRole("button", { name: "手工录入" }).click();
+  await page.getByLabel("工作内容").fill("同一时段推进两个项目");
+  await page.getByLabel("本段文字证据").fill("项目甲代码交付记录及项目乙验收说明");
+  await page.getByLabel("关联项目（可选）", { exact: true }).selectOption(a);
+  await page.getByLabel("关联 项目甲交付", { exact: true }).check();
+  await expect(page.getByLabel("主项目节点", { exact: true }).locator("option")).toHaveCount(2);
+  await expect(page.getByLabel("主项目节点", { exact: true })).not.toContainText("未选任务");
+  await page.getByLabel("更新 项目甲交付 的进度").check();
+  await page.getByLabel("项目甲交付完成度", { exact: true }).fill("25");
+  await page.getByLabel("关联项目（可选）", { exact: true }).selectOption(b);
+  await page.getByLabel("关联 项目乙验收", { exact: true }).check();
+  await page.getByLabel("更新 项目乙验收 的进度").check();
+  await page.getByLabel("项目乙验收完成度", { exact: true }).fill("75");
+  await page.getByRole("button", { name: "移除关联 项目乙验收", exact: true }).click();
+  await page.getByLabel("关联 项目乙验收", { exact: true }).check();
+  await expect(page.getByLabel("更新 项目乙验收 的进度")).not.toBeChecked();
+  await page.getByLabel("更新 项目乙验收 的进度").check();
+  await page.getByLabel("项目乙验收完成度", { exact: true }).fill("100");
+  await page.getByLabel("主项目节点", { exact: true }).selectOption(second);
+  await expect(page.getByLabel("项目甲交付完成度", { exact: true })).toHaveValue("25");
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath("multi-project-progress.png"), fullPage: true });
+  await page.getByRole("button", { name: "保存真实工时草稿" }).click();
+  await expect.poll(() => submitted).toMatchObject({ primaryProjectNodeId: second, projectNodeIds: [first, second], projectProgressUpdates: [{ projectNodeId: first, progress: 25 }, { projectNodeId: second, progress: 100 }] });
+  await expect(page.getByText("已保存 1 段工作。", { exact: true })).toBeVisible();
+});
+
+test("Owner saves and tests a new provider with editable generation settings", async ({ page }, testInfo) => {
+  await mockAuthenticatedWorkspace(page);
+  let settings: Record<string, unknown> = { source: "organization", enabled: true, baseUrl: "https://old.example/v1", model: "old-model", hasApiKey: true, encryptionReady: true, usable: true, dailyRequestLimit: 20, monthlyRequestLimit: 300, maxOutputTokens: 1200, usage: { daily: 0, monthly: 0, timezone: "Asia/Shanghai" } };
+  let saved: Record<string, unknown> | null = null;
+  let rejectNextCheck = false;
+  const sequence: string[] = [];
+  const checks: Array<Record<string, unknown>> = [];
+  await page.route("**/api/ai/reports", (route) => route.fulfill({ json: { items: [] } }));
+  await page.route("**/api/ai/settings", async (route) => {
+    if (route.request().method() === "PUT") {
+      saved = route.request().postDataJSON();
+      sequence.push("save");
+      settings = { ...settings, baseUrl: saved!.baseUrl, model: saved!.model, maxOutputTokens: saved!.maxOutputTokens, generationOptions: saved!.generationOptions };
+    }
+    await route.fulfill({ json: settings });
+  });
+  await page.route("**/api/ai/settings/checks", (route) => route.fulfill({ json: { items: checks } }));
+  await page.route("**/api/ai/settings/check", async (route) => {
+    sequence.push("check");
+    if (rejectNextCheck) return route.fulfill({ status: 409, json: { message: "连接测试最多每 30 秒执行一次，请稍后再试。" } });
+    checks.push({ id: "test-check", source: "organization", endpointHost: "new.example", model: settings.model, status: "succeeded", latencyMs: 80, httpStatus: 200, checkedAt: new Date().toISOString() });
+    await route.fulfill({ json: { check: checks[0] } });
+  });
+  await page.goto("/login");
+  await page.getByLabel("邮箱或手机号").fill("owner@example.test");
+  await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+  await expect(page).not.toHaveURL(/\/login(?:[?#].*)?$/);
+  await page.goto("/ai");
+  await page.getByRole("button", { name: "组织 AI 配置" }).click();
+  await page.getByLabel("AI Base URL").fill("https://new.example/v1");
+  await page.getByLabel("模型标识").fill("vendor/reasoning-model");
+  await page.getByLabel("API Key", { exact: true }).fill("new-test-secret-key");
+  await page.getByLabel("请求超时（秒）").fill("150");
+  await page.getByLabel("最大尝试次数").fill("4");
+  await page.getByLabel("最大输出 Token").fill("8000");
+  await page.getByLabel("温度（Temperature，可选）").fill("");
+  await page.getByLabel("Top P（可选）").fill("0.8");
+  await page.getByLabel("输出 Token 参数").selectOption("max_completion_tokens");
+  await page.getByLabel("响应格式").selectOption("json_object");
+  await page.getByLabel("当前 Owner 密码").fill("Current-owner-password-123!");
+  await page.getByRole("button", { name: "保存并测试新配置" }).click();
+  await expect(page.getByText("连接成功", { exact: true })).toBeVisible();
+  expect(sequence).toEqual(["save", "check"]);
+  expect(saved).toMatchObject({ baseUrl: "https://new.example/v1", model: "vendor/reasoning-model", generationOptions: { requestTimeoutMs: 150000, maxAttempts: 4, temperature: null, topP: 0.8, tokenLimitParameter: "max_completion_tokens", responseFormat: "json_object" } });
+  await expect(page.getByLabel("API Key", { exact: true })).toHaveValue("");
+  await expect(page.getByLabel("请求超时（秒）")).toHaveValue("150");
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath("configurable-ai.png"), fullPage: true });
+  rejectNextCheck = true;
+  await page.getByLabel("AI Base URL").fill("https://third.example/v1");
+  await page.getByLabel("当前 Owner 密码").fill("Current-owner-password-123!");
+  await page.getByRole("button", { name: "保存并测试新配置" }).click();
+  await expect(page.getByRole("status").filter({ hasText: "配置已保存，连接测试未完成" })).toBeVisible();
+  await expect(page.getByLabel("AI Base URL")).toHaveValue("https://third.example/v1");
+  await expect(page.getByLabel("当前 Owner 密码")).toHaveValue("");
 });

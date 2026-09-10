@@ -22,6 +22,7 @@ import {
 } from "@workbench/db/schema";
 import {
   calculateWorkDuration,
+  createWorkSessionSchema,
   type CreateWorkSessionInput,
   workDurationAnomalyFlags,
 } from "@workbench/shared";
@@ -80,6 +81,19 @@ export interface WorkSessionListOptions {
 
 const maximumPlanHorizonMs = 366 * 86_400_000;
 const factualFutureGraceMs = 5 * 60_000;
+
+function progressUpdatesFor(input: CreateWorkSessionInput, recordKind: WorkRecordKind) {
+  // Validate at the service boundary too: imports and batch creation call it directly.
+  const parsed = createWorkSessionSchema.safeParse(input);
+  if (!parsed.success) throw new WorkSessionValidationError(parsed.error.issues[0]?.message ?? "工作记录格式不正确。");
+  const updates = new Map<string, number>();
+  if (recordKind !== "fact") return updates;
+  if (input.primaryProjectNodeId && input.reportedProgress != null) {
+    updates.set(input.primaryProjectNodeId, input.reportedProgress);
+  }
+  for (const update of input.projectProgressUpdates ?? []) updates.set(update.projectNodeId, update.progress);
+  return new Map([...updates].sort(([left], [right]) => left.localeCompare(right)));
+}
 
 function normalizedRecommendationText(value: string): string {
   return value
@@ -294,7 +308,7 @@ export class WorkSessionService {
       .then((rows) => rows[0]?.project_nodes);
     if (!before) {
       throw new WorkSessionValidationError(
-        "主项目节点不存在、已删除或你尚未加入该项目。",
+        "项目节点不存在、已删除或你尚未加入该项目。",
       );
     }
     if (before.progressMode !== "manual") {
@@ -640,7 +654,7 @@ export class WorkSessionService {
         ]),
       );
       const primaryProjectNodeId = input.primaryProjectNodeId ?? null;
-      const reportedProgress = input.reportedProgress ?? null;
+      const progressUpdates = progressUpdatesFor(input, recordKind);
       const linkedNodes = linkedNodeIds.length
         ? await tx
             .select({
@@ -757,27 +771,18 @@ export class WorkSessionService {
           projectBranchId: node.branchId,
           isPrimary: node.id === primaryProjectNodeId,
           allocationBasisPoints: node.id === primaryProjectNodeId ? 10_000 : 0,
-          reportedProgress:
-            node.id === primaryProjectNodeId && reportedProgress !== null
-              ? reportedProgress.toFixed(2)
-              : null,
-          progressReportedAt:
-            node.id === primaryProjectNodeId && reportedProgress !== null
-              ? now
-              : null,
+          reportedProgress: progressUpdates.get(node.id)?.toFixed(2) ??
+            beforeProjectLinks.find((link) => link.projectNodeId === node.id)?.reportedProgress ?? null,
+          progressReportedAt: progressUpdates.has(node.id) ? now :
+            beforeProjectLinks.find((link) => link.projectNodeId === node.id)?.progressReportedAt ?? null,
         };
       });
       if (projectLinks.length > 0) {
         await tx.insert(workSessionProjectLinks).values(projectLinks);
       }
-      await this.applyReportedProgress(
-        tx,
-        actor,
-        sessionId,
-        primaryProjectNodeId,
-        reportedProgress,
-        recordKind,
-      );
+      for (const [nodeId, progress] of progressUpdates) {
+        await this.applyReportedProgress(tx, actor, sessionId, nodeId, progress, recordKind);
+      }
       const snapshot = { ...updated, breaks, projectLinks };
       await tx.insert(workSessionVersions).values({
         workSessionId: sessionId,
@@ -890,7 +895,7 @@ export class WorkSessionService {
       ]),
     );
     const primaryProjectNodeId = input.primaryProjectNodeId ?? null;
-    const reportedProgress = input.reportedProgress ?? null;
+    const progressUpdates = progressUpdatesFor(input, recordKind);
     const linkedNodes = linkedNodeIds.length
       ? await db
         .select({
@@ -986,27 +991,16 @@ export class WorkSessionService {
         projectBranchId: node.branchId,
         isPrimary: node.id === primaryProjectNodeId,
         allocationBasisPoints: node.id === primaryProjectNodeId ? 10_000 : 0,
-        reportedProgress:
-          node.id === primaryProjectNodeId && reportedProgress !== null
-            ? reportedProgress.toFixed(2)
-            : null,
-        progressReportedAt:
-          node.id === primaryProjectNodeId && reportedProgress !== null
-            ? new Date()
-            : null,
+        reportedProgress: progressUpdates.get(node.id)?.toFixed(2) ?? null,
+        progressReportedAt: progressUpdates.has(node.id) ? new Date() : null,
       };
     });
     if (projectLinks.length > 0) {
       await db.insert(workSessionProjectLinks).values(projectLinks);
     }
-    await this.applyReportedProgress(
-      db,
-      actor,
-      session.id,
-      primaryProjectNodeId,
-      reportedProgress,
-      recordKind,
-    );
+    for (const [nodeId, progress] of progressUpdates) {
+      await this.applyReportedProgress(db, actor, session.id, nodeId, progress, recordKind);
+    }
     const snapshot = { ...session, breaks, projectLinks };
     await db.insert(workSessionVersions).values({
       workSessionId: session.id,

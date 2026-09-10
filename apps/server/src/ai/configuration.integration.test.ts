@@ -4,9 +4,11 @@ import { resolve } from "node:path";
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { encryptSecret, type Database } from "@workbench/db";
+import { encryptSecret, resolveOrganizationAiProvider, type Database } from "@workbench/db";
+import { aiGenerationOptionsSchema, requestAiChatCompletion } from "@workbench/shared";
 import {
   organizationAiSettings,
+  aiProviderChecks,
   organizationOwners,
   organizations,
   orgMemberships,
@@ -82,7 +84,7 @@ describe("organization AI provider health check", () => {
       });
       expect(JSON.parse(String(init?.body))).toMatchObject({
         model: "safe-model",
-        max_tokens: 8,
+        max_tokens: 1200,
       });
       return new Response(
         JSON.stringify({
@@ -128,5 +130,30 @@ describe("organization AI provider health check", () => {
         status: "succeeded",
       }),
     ]);
+    const options = aiGenerationOptionsSchema.parse({ requestTimeoutMs: 150000, maxAttempts: 4, temperature: null, topP: 0.8, tokenLimitParameter: "max_completion_tokens", responseFormat: "json_object" });
+    const updated = await service.updateSettings(actor, { enabled: true, baseUrl: "https://second.example/api/v1/chat/completions/", model: "vendor/reasoning-model:free", apiKey: "replacement-secret", maxOutputTokens: 8000, dailyRequestLimit: 50, monthlyRequestLimit: 600, generationOptions: options });
+    expect(updated).toMatchObject({ baseUrl: "https://second.example/api/v1", model: "vendor/reasoning-model:free", hasApiKey: true, generationOptions: options });
+    expect(JSON.stringify(updated)).not.toContain("replacement-secret");
+    const provider = await resolveOrganizationAiProvider(db, actor.organizationId, { AI_ENABLED: false, AI_CONFIG_ENCRYPTION_KEY: encryptionKey, AI_REQUEST_TIMEOUT_MS: 5000, AI_MAX_RETRIES: 1 });
+    expect(provider).toMatchObject({ baseUrl: updated.baseUrl, model: updated.model, apiKey: "replacement-secret", maxAttempts: 4, generationOptions: options, configurationVersion: 2 });
+    const switchedFetch = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body));
+      expect(body).toMatchObject({ model: updated.model, max_completion_tokens: 8000, top_p: 0.8, response_format: { type: "json_object" } });
+      expect(body).not.toHaveProperty("temperature");
+      expect(body).not.toHaveProperty("max_tokens");
+      expect(init?.headers).toMatchObject({ authorization: "Bearer replacement-secret" });
+      return new Response(JSON.stringify({ choices: [{ message: { content: '{"ok":true}' } }] }));
+    }) as typeof fetch;
+    await requestAiChatCompletion(provider!, [{ role: "user", content: "JSON test" }], switchedFetch);
+    expect(switchedFetch).toHaveBeenCalledWith("https://second.example/api/v1/chat/completions", expect.anything());
+    // A saved-config check uses exactly the same options as the Worker resolver.
+    await db.update(aiProviderChecks).set({ checkedAt: new Date(Date.now() - 31000) });
+    const secondService = new AiConfigurationService(db, { NODE_ENV: "test", AI_ENABLED: true, ZHIPU_API_KEY: "legacy-fallback-secret", AI_CONFIG_ENCRYPTION_KEY: encryptionKey, AI_REQUEST_TIMEOUT_MS: 5000, AI_MAX_RETRIES: 1 } as ServerConfig, switchedFetch);
+    expect(await secondService.checkProvider(actor)).toMatchObject({ status: "succeeded", model: updated.model });
+    const retained = await secondService.updateSettings(actor, { ...updated, model: "vendor/another-model" });
+    expect(retained.hasApiKey).toBe(true);
+    const cleared = await secondService.updateSettings(actor, { ...retained, enabled: false, clearApiKey: true });
+    expect(cleared).toMatchObject({ hasApiKey: false, usable: false });
+    expect(await secondService.resolveEffective(actor.organizationId)).toBeNull();
   });
 });

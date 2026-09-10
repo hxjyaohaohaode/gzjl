@@ -1,3 +1,5 @@
+import { aiGenerationOptionsSchema, type AiGenerationOptions } from "@workbench/shared";
+import { WorkProgressReporter } from "./work-progress-reporter.js";
 import { ReimbursementPanel } from "./reimbursement-panel.js";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { EChartsCoreOption } from "echarts/core";
@@ -2950,6 +2952,7 @@ interface LocalManualPrefill {
   primaryProjectNodeId: string;
   linkedProjectNodes: LinkedProjectNode[];
   reportedProgress?: string;
+  projectProgressUpdates?: Record<string, string>;
 }
 
 const manualPrefillStorageKey = "workbench:manual-work-prefill:v1";
@@ -4964,7 +4967,7 @@ export function WorkPage() {
   const [linkedProjectNodes, setLinkedProjectNodes] = useState<
     LinkedProjectNode[]
   >([]);
-  const [reportedProgress, setReportedProgress] = useState("");
+  const [projectProgressUpdates, setProjectProgressUpdates] = useState<Record<string, string>>({});
   const [projectNodeSearch, setProjectNodeSearch] = useState("");
   const [recommendationQuery, setRecommendationQuery] = useState("");
   useEffect(() => {
@@ -5054,61 +5057,32 @@ export function WorkPage() {
           .includes(normalizedNodeSearch),
       )
     : activeNodeOptions;
-  const primaryChoices = [...activeNodeOptions, ...linkedProjectNodes].filter(
-    (node, index, items) =>
-      items.findIndex((candidate) => candidate.id === node.id) === index,
-  );
-  const selectedPrimaryNode = primaryChoices.find(
-    (node) => node.id === primaryProjectNodeId,
-  );
-  const progressIsAutomatic = Boolean(selectedPrimaryNode?.progressMode && selectedPrimaryNode.progressMode !== "manual");
-  const manualDescendants = (() => {
-    if (!progressIsAutomatic) return [];
-    const children = new Map<string, string[]>();
-    for (const node of activeProjectNodes) {
-      if (node.parentId) children.set(node.parentId, [...(children.get(node.parentId) ?? []), node.id]);
-    }
-    const visited = new Set([primaryProjectNodeId]);
-    const pending = [primaryProjectNodeId];
-    for (let index = 0; index < pending.length; index += 1) {
-      for (const id of children.get(pending[index]!) ?? []) {
-        if (!visited.has(id)) { visited.add(id); pending.push(id); }
-      }
-    }
-    return activeProjectNodes.filter((node) => node.id !== primaryProjectNodeId && visited.has(node.id) && (!node.progressMode || node.progressMode === "manual"));
-  })();
+  const primaryChoices = linkedProjectNodes;
+  const setNodeProgress = (nodeId: string, value: string | undefined) => {
+    setProjectProgressUpdates((current) => {
+      const next = { ...current };
+      if (value === undefined) delete next[nodeId];
+      else next[nodeId] = value;
+      return next;
+    });
+  };
   const addLinkedNode = (node: LinkedProjectNode, primary = false) => {
-    setLinkedProjectNodes((current) =>
-      current.some((candidate) => candidate.id === node.id)
-        ? current
-        : [...current, node],
-    );
-    if (primary || !primaryProjectNodeId) {
-      if (node.id !== primaryProjectNodeId) setReportedProgress("");
-      setPrimaryProjectNodeId(node.id);
-    }
+    if (!linkedProjectNodes.some((candidate) => candidate.id === node.id) && linkedProjectNodes.length >= 32) return;
+    setLinkedProjectNodes((current) => current.some((candidate) => candidate.id === node.id) ? current : [...current, node]);
+    if (primary || !primaryProjectNodeId) setPrimaryProjectNodeId(node.id);
   };
   const removeLinkedNode = (nodeId: string) => {
     const remaining = linkedProjectNodes.filter((node) => node.id !== nodeId);
     setLinkedProjectNodes(remaining);
-    if (primaryProjectNodeId === nodeId) {
-      setPrimaryProjectNodeId(remaining[0]?.id ?? "");
-      setReportedProgress("");
-    }
+    setNodeProgress(nodeId, undefined);
+    if (primaryProjectNodeId === nodeId) setPrimaryProjectNodeId(remaining[0]?.id ?? "");
   };
   const toggleLinkedNode = (node: LinkedProjectNode, checked: boolean) => {
     if (checked) addLinkedNode(node);
     else removeLinkedNode(node.id);
   };
   const choosePrimaryNode = (nodeId: string) => {
-    const node = primaryChoices.find((candidate) => candidate.id === nodeId);
-    if (!node) {
-      setPrimaryProjectNodeId("");
-      setReportedProgress("");
-      return;
-    }
-    if (node.id !== primaryProjectNodeId) setReportedProgress("");
-    addLinkedNode(node, true);
+    if (primaryChoices.some((node) => node.id === nodeId)) setPrimaryProjectNodeId(nodeId);
   };
   const addRecommendedNode = (node: RecommendedProjectNode) => {
     addLinkedNode(
@@ -5147,7 +5121,7 @@ export function WorkPage() {
     setLinkedProjectId("");
     setPrimaryProjectNodeId("");
     setLinkedProjectNodes([]);
-    setReportedProgress("");
+    setProjectProgressUpdates({});
     setProjectNodeSearch("");
     setPrefillMessage(null);
   };
@@ -5218,10 +5192,9 @@ export function WorkPage() {
         nextStep: manual.nextStep,
         primaryProjectNodeId: primaryProjectNodeId || null,
         projectNodeIds: linkedProjectNodes.map((node) => node.id),
-        reportedProgress:
-          recordKind === "fact" && reportedProgress !== "" && (!selectedPrimaryNode?.progressMode || selectedPrimaryNode.progressMode === "manual")
-            ? Number(reportedProgress)
-            : null,
+        projectProgressUpdates: recordKind === "fact" && editingSession?.recordKind !== "plan" && !correctionSession
+          ? linkedProjectNodes.filter((node) => projectProgressUpdates[node.id] !== undefined).map((node) => ({ projectNodeId: node.id, progress: Number(projectProgressUpdates[node.id]) }))
+          : [],
         visibility:
           recordKind === "plan" || editingSession?.recordKind === "plan"
             ? "private"
@@ -5260,7 +5233,7 @@ export function WorkPage() {
             blockers: "",
             nextStep: "",
             breaks: [],
-            reportedProgress: null,
+            projectProgressUpdates: [],
           },
           evidence: segment.evidence,
           requestedKind: "fact" as const,
@@ -5333,7 +5306,7 @@ export function WorkPage() {
       setLinkedProjectId("");
       setPrimaryProjectNodeId("");
       setLinkedProjectNodes([]);
-      setReportedProgress("");
+      setProjectProgressUpdates({});
       setProjectNodeSearch("");
       setSaveMessage(
         result.evidenceFailures.length
@@ -5444,9 +5417,8 @@ export function WorkPage() {
       })),
     );
     setPrimaryProjectNodeId(item.primaryProjectNodeId ?? "");
-    setReportedProgress(
-      links.find((link) => link.isPrimary)?.reportedProgress ?? "",
-    );
+    // Editing text must not replay a historical percentage over newer project progress.
+    setProjectProgressUpdates({});
     setLinkedProjectId(
       links.find((link) => link.isPrimary)?.projectId ?? links[0]?.projectId ?? "",
     );
@@ -5499,9 +5471,8 @@ export function WorkPage() {
       })),
     );
     setPrimaryProjectNodeId(item.primaryProjectNodeId ?? "");
-    setReportedProgress(
-      links.find((link) => link.isPrimary)?.reportedProgress ?? "",
-    );
+    // Editing text must not replay a historical percentage over newer project progress.
+    setProjectProgressUpdates({});
     setLinkedProjectId(
       links.find((link) => link.isPrimary)?.projectId ??
         links[0]?.projectId ??
@@ -5520,7 +5491,7 @@ export function WorkPage() {
       linkedProjectId,
       primaryProjectNodeId,
       linkedProjectNodes,
-      reportedProgress,
+      projectProgressUpdates,
     };
     try {
       window.localStorage.setItem(manualPrefillStorageKey, JSON.stringify(payload));
@@ -5591,11 +5562,8 @@ export function WorkPage() {
           : "",
       );
       setLinkedProjectNodes(storedNodes);
-      setReportedProgress(
-        typeof candidate.reportedProgress === "string"
-          ? candidate.reportedProgress
-          : "",
-      );
+      const storedProgress = candidate.projectProgressUpdates ?? (candidate.primaryProjectNodeId && candidate.reportedProgress ? { [candidate.primaryProjectNodeId]: candidate.reportedProgress } : {});
+      setProjectProgressUpdates(Object.fromEntries(storedNodes.filter((node) => typeof storedProgress[node.id] === "string" && storedProgress[node.id]!.trim() !== "" && Number.isFinite(Number(storedProgress[node.id])) && Number(storedProgress[node.id]) >= 0 && Number(storedProgress[node.id]) <= 100).map((node) => [node.id, storedProgress[node.id]!])));
       setShowForm(true);
       setPrefillMessage("已恢复本机预填写。保存草稿前请再次核验时间和项目关联。");
     } catch {
@@ -6213,7 +6181,7 @@ export function WorkPage() {
                       hint={
                         linkedProjectTree.isPending
                           ? "正在读取该项目的可关联节点…"
-                          : "勾选辅助节点；首个勾选节点会自动成为主关联。"
+                          : "勾选本次工作的节点；可切换项目继续添加，已选节点会保留。"
                       }
                       label="从当前项目添加节点"
                     >
@@ -6301,87 +6269,14 @@ export function WorkPage() {
                         </select>
                       </Field>
                     </div>
-                    {primaryProjectNodeId ? (
-                      <div className="work-progress-reporter md:col-span-2">
-                        <div className="work-progress-reporter-head">
-                          <div>
-                            <strong>同步主节点完成度</strong>
-                            <small>
-                              {selectedPrimaryNode?.progressMode &&
-                              selectedPrimaryNode.progressMode !== "manual"
-                                ? "该节点由子节点自动汇总，请改选其手动进度子节点"
-                                : `项目总图当前为 ${Number(selectedPrimaryNode?.progress ?? 0)}%；留空则只关联工作、不修改进度`}
-                            </small>
-                          </div>
-                          <output>
-                            {reportedProgress === ""
-                              ? "不更新"
-                              : `${reportedProgress}%`}
-                          </output>
-                        </div>
-                        <div className="work-progress-reporter-controls">
-                          <input
-                            aria-label="主项目节点完成度滑块"
-                            disabled={
-                              selectedPrimaryNode?.progressMode !== undefined &&
-                              selectedPrimaryNode.progressMode !== "manual"
-                            }
-                            max="100"
-                            min="0"
-                            onChange={(event) =>
-                              setReportedProgress(event.target.value)
-                            }
-                            step="1"
-                            type="range"
-                            value={
-                              reportedProgress === ""
-                                ? String(Number(selectedPrimaryNode?.progress ?? 0))
-                                : reportedProgress
-                            }
-                          />
-                          <input
-                            aria-label="主项目节点完成度"
-                            className={fieldClass}
-                            disabled={
-                              selectedPrimaryNode?.progressMode !== undefined &&
-                              selectedPrimaryNode.progressMode !== "manual"
-                            }
-                            max="100"
-                            min="0"
-                            onChange={(event) =>
-                              setReportedProgress(event.target.value)
-                            }
-                            placeholder="留空"
-                            step="1"
-                            type="number"
-                            inputMode="numeric"
-                            value={reportedProgress}
-                          />
-                        </div>
-                        {progressIsAutomatic ? (
-                          <div className="work-progress-child-picker">
-                            <label>
-                              选择要更新的子节点
-                              <select aria-label="选择要更新的子节点" className={fieldClass} value="" onChange={(event) => choosePrimaryNode(event.target.value)}>
-                                <option value="">选择具体任务后填写完成度</option>
-                                {manualDescendants.map((node) => <option key={node.id} value={node.id}>{node.title} · {Number(node.progress)}%</option>)}
-                              </select>
-                            </label>
-                            {!manualDescendants.length ? <p>当前节点下没有可手动更新的任务，请选择其他主节点，或请项目管理员添加子任务。</p> : null}
-                          </div>
-                        ) : (
-                          <div className="work-progress-presets" role="group" aria-label="快捷设置完成度">
-                            {[0, 25, 50, 75, 100].map((value) => (
-                              <button key={value} type="button" aria-pressed={reportedProgress === String(value)} onClick={() => setReportedProgress(String(value))}>{value}%</button>
-                            ))}
-                            <button type="button" onClick={() => setReportedProgress("")}>不更新</button>
-                          </div>
-                        )}
-                        {reportedProgress !== "" ? (
-                          <p>
-                            保存真实工作后会同步更新该节点完成度，并重新汇总项目进度。
-                          </p>
-                        ) : null}
+                    {linkedProjectNodes.length && !correctionSession && editingSession?.recordKind !== "plan" ? (
+                      <div className="space-y-3 md:col-span-2" aria-label="更新已选项目进度">
+                        <p className="text-sm text-[var(--text-muted)]">从已关联节点中勾选本次推进的任务，可同时更新多个项目；未勾选的节点保持当前进度。保存真实工作时生效，计划不更新进度。</p>
+                        {linkedProjectNodes.map((node) => (
+                          <WorkProgressReporter key={node.id} node={node} value={projectProgressUpdates[node.id]}
+                            onChange={(value) => setNodeProgress(node.id, value)} fieldClass={fieldClass} canAdd={linkedProjectNodes.length < 32}
+                            onAddNode={(child) => { addLinkedNode(child); setNodeProgress(child.id, String(Number(child.progress ?? 0))); }} />
+                        ))}
                       </div>
                     ) : null}
                     {linkedProjectNodes.length ? (
@@ -6427,7 +6322,7 @@ export function WorkPage() {
                     ) : (
                       <div className="flex items-end text-xs leading-5 text-[var(--text-muted)] md:col-span-2">
                         <p>
-                          请选择一条主项目节点，或在上方勾选辅助节点后由系统自动指定主关联。
+                          请先在上方勾选本次工作的节点，首个节点会自动成为主关联。
                         </p>
                       </div>
                     )}
@@ -11578,6 +11473,7 @@ interface AiSettings {
   dailyRequestLimit: number;
   monthlyRequestLimit: number;
   maxOutputTokens: number;
+  generationOptions?: AiGenerationOptions;
   usage: { daily: number; monthly: number; timezone: string };
 }
 
@@ -11595,6 +11491,7 @@ interface AiProviderCheck {
 }
 
 function AiSettingsPanel({ onClose }: { onClose: () => void }) {
+  const [saveMessage, setSaveMessage] = useState<string | null>(null);
   const settings = useQuery({
     queryKey: ["ai-settings"],
     queryFn: () => api<AiSettings>("/api/ai/settings"),
@@ -11635,16 +11532,21 @@ function AiSettingsPanel({ onClose }: { onClose: () => void }) {
     current.dailyRequestLimit,
     current.monthlyRequestLimit,
     current.maxOutputTokens,
+    JSON.stringify(current.generationOptions),
   ].join("|");
-  return <AiSettingsEditor current={current} key={settingsKey} onClose={onClose} />;
+  return <AiSettingsEditor current={current} key={settingsKey} onClose={onClose} saveMessage={saveMessage} onSaved={setSaveMessage} />;
 }
 
 function AiSettingsEditor({
   current,
   onClose,
+  saveMessage,
+  onSaved,
 }: {
   current: AiSettings;
   onClose: () => void;
+  saveMessage: string | null;
+  onSaved: (message: string) => void;
 }) {
   const queryClient = useQueryClient();
   const checks = useQuery({
@@ -11659,14 +11561,15 @@ function AiSettingsEditor({
     dailyRequestLimit: current.dailyRequestLimit,
     monthlyRequestLimit: current.monthlyRequestLimit,
     maxOutputTokens: current.maxOutputTokens,
+    generationOptions: aiGenerationOptionsSchema.parse(current.generationOptions ?? {}),
     apiKey: "",
     clearApiKey: false,
     password: "",
     totpCode: "",
   }));
   const save = useMutation({
-    mutationFn: () =>
-      api<AiSettings>("/api/ai/settings", {
+    mutationFn: async (testAfterSave: boolean = false) => {
+      const updated = await api<AiSettings>("/api/ai/settings", {
         method: "PUT",
         body: {
           enabled: form.enabled,
@@ -11675,13 +11578,27 @@ function AiSettingsEditor({
           dailyRequestLimit: form.dailyRequestLimit,
           monthlyRequestLimit: form.monthlyRequestLimit,
           maxOutputTokens: form.maxOutputTokens,
+          generationOptions: form.generationOptions,
           ...(form.apiKey.trim() ? { apiKey: form.apiKey.trim() } : {}),
           clearApiKey: form.clearApiKey,
           password: form.password,
           ...(form.totpCode.trim() ? { totpCode: form.totpCode.trim() } : {}),
         },
-      }),
-    onSuccess: async (updated) => {
+      });
+      let message = "组织 AI 配置已保存，新请求将使用当前配置。";
+      if (testAfterSave) {
+        try {
+          const result = await api<{ check: AiProviderCheck }>("/api/ai/settings/check", { method: "POST", body: { password: form.password, ...(form.totpCode.trim() ? { totpCode: form.totpCode.trim() } : {}) } });
+          message = result.check.status === "succeeded" ? "配置已保存，连接测试成功。" : `配置已保存，连接测试失败：${result.check.errorSummary ?? "请查看连接记录。"}`;
+        } catch (error) {
+          message = `配置已保存，连接测试未完成：${error instanceof Error ? error.message : "请稍后重试。"}`;
+        }
+        await queryClient.invalidateQueries({ queryKey: ["ai-provider-checks"] });
+      }
+      return { updated, message };
+    },
+    onSuccess: async ({ updated, message }) => {
+      onSaved(message);
       setForm({
         enabled: updated.enabled,
         baseUrl: updated.baseUrl,
@@ -11689,6 +11606,7 @@ function AiSettingsEditor({
         dailyRequestLimit: updated.dailyRequestLimit,
         monthlyRequestLimit: updated.monthlyRequestLimit,
         maxOutputTokens: updated.maxOutputTokens,
+        generationOptions: aiGenerationOptionsSchema.parse(updated.generationOptions ?? {}),
         apiKey: "",
         clearApiKey: false,
         password: "",
@@ -11764,7 +11682,7 @@ function AiSettingsEditor({
           </div>
           <div>
             <small>当前可用性</small>
-            <strong>{current.usable ? "可生成报告" : "尚不可用"}</strong>
+            <strong>{current.usable ? "配置就绪，可测试连接" : "尚不可用"}</strong>
           </div>
         </div>
         {!current.encryptionReady ? (
@@ -11776,7 +11694,7 @@ function AiSettingsEditor({
           className="mt-5 grid gap-4 md:grid-cols-2"
           onSubmit={(event) => {
             event.preventDefault();
-            save.mutate();
+            save.mutate(false);
           }}
         >
           <label className="flex items-center gap-3 rounded-xl bg-[var(--surface-subtle)] px-3 py-3 text-sm font-semibold md:col-span-2">
@@ -11790,7 +11708,7 @@ function AiSettingsEditor({
             启用本组织 AI 工作洞察
           </label>
           <Field
-            hint="生产环境必须是 HTTPS；使用 OpenAI 兼容的 /v4 或同类基础路径，不要填写 /chat/completions。"
+            hint="填写供应商提供的 OpenAI 兼容 API 基础路径（如 /v1）；也可粘贴完整 /chat/completions 地址，系统会自动规范化。生产环境使用 HTTPS。"
             label="AI Base URL"
           >
             <input
@@ -11804,7 +11722,7 @@ function AiSettingsEditor({
               value={form.baseUrl}
             />
           </Field>
-          <Field hint="例如 glm-4.7-flash；由你的 AI 供应商决定。" label="模型标识">
+          <Field hint="复制供应商提供的完整模型标识，支持 provider/model 等带斜杠的名称。" label="模型标识">
             <input
               autoCapitalize="none"
               className={fieldClass}
@@ -11816,7 +11734,7 @@ function AiSettingsEditor({
             />
           </Field>
           <Field
-            hint={current.hasApiKey ? "留空会保留当前密钥；输入新值会安全替换它。" : "首次启用必须填写；保存后不可再次查看。"}
+            hint={current.source === "deployment_default" ? "首次保存组织配置请填写密钥，部署密钥不会自动复制；之后留空可保留组织密钥。" : current.hasApiKey ? "留空会保留当前密钥；输入新值会安全替换它。" : "首次启用必须填写；保存后不可再次查看。"}
             label="API Key"
           >
             <PasswordInput
@@ -11825,7 +11743,7 @@ function AiSettingsEditor({
               onChange={(event) =>
                 setForm((current) => ({ ...current, apiKey: event.target.value }))
               }
-              placeholder={current.hasApiKey ? "已保存，输入新密钥才会替换" : "仅在服务端加密保存"}
+              placeholder={current.source === "organization" && current.hasApiKey ? "已保存，输入新密钥才会替换" : "仅在服务端加密保存"}
               value={form.apiKey}
             />
           </Field>
@@ -11839,6 +11757,28 @@ function AiSettingsEditor({
               type="number"
               value={form.maxOutputTokens}
             />
+          </Field>
+          <Field hint="超时覆盖连接与完整响应读取，慢模型可适当调高。" label="请求超时（秒）">
+            <input className={fieldClass} type="number" min={5} max={300} required value={form.generationOptions.requestTimeoutMs / 1000} onChange={(event) => setForm((current) => ({ ...current, generationOptions: { ...current.generationOptions, requestTimeoutMs: Number(event.target.value) * 1000 } }))} />
+          </Field>
+          <Field hint="包含首次请求；1 表示不自动重试。网络、限流、服务或回答格式异常可重试，配置错误直接提示。" label="最大尝试次数">
+            <input className={fieldClass} type="number" min={1} max={5} required value={form.generationOptions.maxAttempts} onChange={(event) => setForm((current) => ({ ...current, generationOptions: { ...current.generationOptions, maxAttempts: Number(event.target.value) } }))} />
+          </Field>
+          <Field hint="留空使用模型默认值，适用于不接受此参数的模型。" label="温度（Temperature，可选）">
+            <input className={fieldClass} type="number" min={0} max={2} step="0.01" placeholder="模型默认" value={form.generationOptions.temperature ?? ""} onChange={(event) => setForm((current) => ({ ...current, generationOptions: { ...current.generationOptions, temperature: event.target.value === "" ? null : Number(event.target.value) } }))} />
+          </Field>
+          <Field hint="留空使用模型默认值；通常只调整温度或 Top P 中的一项。" label="Top P（可选）">
+            <input className={fieldClass} type="number" min={0} max={1} step="0.01" placeholder="模型默认" value={form.generationOptions.topP ?? ""} onChange={(event) => setForm((current) => ({ ...current, generationOptions: { ...current.generationOptions, topP: event.target.value === "" ? null : Number(event.target.value) } }))} />
+          </Field>
+          <Field hint="按供应商文档选择；部分推理模型要求 max_completion_tokens。" label="输出 Token 参数">
+            <select className={fieldClass} value={form.generationOptions.tokenLimitParameter} onChange={(event) => setForm((current) => ({ ...current, generationOptions: { ...current.generationOptions, tokenLimitParameter: event.target.value as AiGenerationOptions["tokenLimitParameter"] } }))}>
+              <option value="max_tokens">max_tokens</option><option value="max_completion_tokens">max_completion_tokens</option>
+            </select>
+          </Field>
+          <Field hint="通用模式通过提示词要求结构化回答；供应商支持时可启用 JSON 模式。" label="响应格式">
+            <select className={fieldClass} value={form.generationOptions.responseFormat} onChange={(event) => setForm((current) => ({ ...current, generationOptions: { ...current.generationOptions, responseFormat: event.target.value as AiGenerationOptions["responseFormat"] } }))}>
+              <option value="text">通用模式</option><option value="json_object">JSON 对象模式</option>
+            </select>
           </Field>
           <Field hint={`按 ${current.usage.timezone} 组织时区计数。重复相同事实的请求会复用已有任务。`} label="每日请求上限">
             <input
@@ -11892,20 +11832,21 @@ function AiSettingsEditor({
               checked={form.clearApiKey}
               disabled={Boolean(form.apiKey.trim())}
               onChange={(event) =>
-                setForm((current) => ({ ...current, clearApiKey: event.target.checked }))
+                setForm((current) => ({ ...current, clearApiKey: event.target.checked, enabled: event.target.checked ? false : current.enabled }))
               }
               type="checkbox"
             />
             清除已保存密钥并停用组织 AI（不能与替换密钥同时使用）
           </label>
           <div className="flex flex-wrap items-center gap-3 md:col-span-2">
-            <Button disabled={save.isPending} type="submit">
+            <Button disabled={save.isPending || checkProvider.isPending} type="submit">
               <KeyRound size={16} />
               {save.isPending ? "正在安全保存…" : "验证并保存组织配置"}
             </Button>
+            <Button disabled={save.isPending || checkProvider.isPending || !form.enabled || form.password.length < 8} type="button" variant="secondary" onClick={(event) => { if (event.currentTarget.form?.reportValidity()) save.mutate(true); }}>保存并测试新配置</Button>
             <Button
               disabled={
-                checkProvider.isPending ||
+                checkProvider.isPending || save.isPending ||
                 form.password.length < 8 ||
                 !current.usable
               }
@@ -11919,13 +11860,14 @@ function AiSettingsEditor({
           </div>
           <div className="md:col-span-2">
             <ErrorMessage error={save.error ?? checkProvider.error} />
+            {saveMessage ? <p role="status" className="mt-2 text-sm text-[var(--text-muted)]">{saveMessage}</p> : null}
           </div>
         </form>
         <section className="mt-5" aria-label="AI 连接测试历史">
           <div className="flex items-center justify-between gap-3">
             <h3 className="text-sm font-bold">连接记录</h3>
             <span className="text-xs text-[var(--text-subtle)]">
-              测试会产生一次极小调用
+              测试使用已配置参数，按供应商实际用量计费
             </span>
           </div>
           {checks.isPending ? (

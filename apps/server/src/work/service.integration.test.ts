@@ -111,6 +111,48 @@ function manualInput(startAt: Date, endAt: Date, content: string) {
 }
 
 describe("structured work entry and approval chain", () => {
+  it("updates multiple projects atomically, preserves unselected progress and never replays history", async () => {
+    const db = await createTestDatabase();
+    const { employee } = await seedActors(db);
+    const service = new WorkSessionService(db);
+    const nodes: Array<{ id: string; projectId: string }> = [];
+    for (let index = 0; index < 3; index += 1) {
+      const [project] = await db.insert(projects).values({ organizationId: employee.organizationId, key: "MP" + index, name: "多项目" + index, createdBy: employee.membershipId }).returning();
+      await db.insert(projectMembers).values({ projectId: project!.id, membershipId: employee.membershipId, role: "member" });
+      const [branch] = await db.insert(projectBranches).values({ projectId: project!.id, name: "主结构", createdBy: employee.membershipId }).returning();
+      const [node] = await db.insert(projectNodes).values({ projectId: project!.id, branchId: branch!.id, title: "任务" + index, progress: "20", progressMode: "manual", createdBy: employee.membershipId }).returning();
+      nodes.push(node!);
+    }
+    const [first, second, third] = nodes;
+    const input = { ...manualInput(new Date(Date.now() - 7200000), new Date(Date.now() - 3600000), "同时推进两个项目"), primaryProjectNodeId: first!.id, projectNodeIds: nodes.map((node) => node.id), projectProgressUpdates: [{ projectNodeId: first!.id, progress: 0 }, { projectNodeId: second!.id, progress: 100 }] };
+    const saved = await service.createManual(employee, input);
+    const readProgress = async (id: string) => Number((await db.select().from(projectNodes).where(eq(projectNodes.id, id)))[0]!.progress);
+    expect(await Promise.all(nodes.map((node) => readProgress(node.id)))).toEqual([0, 100, 20]);
+    const links = await db.select().from(workSessionProjectLinks).where(eq(workSessionProjectLinks.workSessionId, saved.id));
+    expect(links.map((link) => link.allocationBasisPoints).reduce((a, b) => a + b, 0)).toBe(10000);
+    expect(links.find((link) => link.projectNodeId === second!.id)?.reportedProgress).toBe("100.00");
+    expect(links.find((link) => link.projectNodeId === third!.id)?.reportedProgress).toBeNull();
+
+    await db.update(projectNodes).set({ progress: "55.00" }).where(eq(projectNodes.id, first!.id));
+    const edited = await service.updateManualOwn(employee, saved.id, saved.version, { ...input, content: "只修改文字", projectProgressUpdates: [] });
+    expect(await readProgress(first!.id)).toBe(55);
+    expect(edited.projectLinks.find((link) => link.projectNodeId === first!.id)?.reportedProgress).toBe("0.00");
+    await service.updateManualOwn(employee, saved.id, edited.version, { ...input, projectProgressUpdates: [{ projectNodeId: first!.id, progress: 65 }, { projectNodeId: second!.id, progress: 80 }] });
+    expect(await Promise.all(nodes.map((node) => readProgress(node.id)))).toEqual([65, 80, 20]);
+
+    // If the last node becomes automatic, all earlier writes and the work record roll back.
+    await db.update(projectNodes).set({ progressMode: "weighted_children" }).where(eq(projectNodes.id, second!.id));
+    await expect(service.createManual(employee, { ...input, parallelWork: true, projectProgressUpdates: [{ projectNodeId: first!.id, progress: 95 }, { projectNodeId: second!.id, progress: 90 }] })).rejects.toThrow("自动汇总");
+    expect(await readProgress(first!.id)).toBe(65);
+    expect(await db.select().from(workSessions)).toHaveLength(1);
+    await db.delete(projectMembers).where(eq(projectMembers.projectId, third!.projectId));
+    await expect(service.createManual(employee, { ...input, parallelWork: true })).rejects.toThrow("不存在或不可用");
+    expect(await db.select().from(workSessions)).toHaveLength(1);
+
+    await service.createPlan(employee, { ...input, startAt: new Date(Date.now() + 3600000).toISOString(), endAt: new Date(Date.now() + 7200000).toISOString(), projectNodeIds: [first!.id, second!.id] });
+    expect(await Promise.all([first!, second!].map((node) => readProgress(node.id)))).toEqual([65, 80]);
+  });
+
   it("submits an uploaded image only after verification and rejects quarantined completion retries", async () => {
     const db = await createTestDatabase();
     const { employee } = await seedActors(db);

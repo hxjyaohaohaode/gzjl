@@ -175,14 +175,13 @@ export const organizationAiSettings = pgTable(
       .primaryKey()
       .references(() => organizations.id, { onDelete: "cascade" }),
     enabled: boolean("enabled").notNull().default(false),
-    baseUrl: text("base_url")
-      .notNull()
-      .default("https://open.bigmodel.cn/api/paas/v4"),
-    model: text("model").notNull().default("glm-4.7-flash"),
+    baseUrl: text("base_url").notNull(),
+    model: text("model").notNull(),
     apiKeyCiphertext: text("api_key_ciphertext"),
     dailyRequestLimit: integer("daily_request_limit").notNull().default(20),
     monthlyRequestLimit: integer("monthly_request_limit").notNull().default(300),
     maxOutputTokens: integer("max_output_tokens").notNull().default(1_200),
+    generationOptions: jsonb("generation_options").notNull().default({}),
     version: integer("version").notNull().default(1),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

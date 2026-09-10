@@ -12,6 +12,16 @@ const baseInput = {
 };
 
 describe("createWorkSessionSchema project-node associations", () => {
+  it("accepts independent progress including zero and rejects unlinked, duplicate or conflicting reports", () => {
+    const input = { ...baseInput, primaryProjectNodeId: primaryNodeId, projectNodeIds: [primaryNodeId, auxiliaryNodeId] };
+    expect(createWorkSessionSchema.parse({ ...input, projectProgressUpdates: [{ projectNodeId: primaryNodeId, progress: 0 }, { projectNodeId: auxiliaryNodeId, progress: 100 }] }).projectProgressUpdates).toHaveLength(2);
+    for (const invalid of [
+      { projectProgressUpdates: [{ projectNodeId: "00000000-0000-4000-8000-000000000008", progress: 10 }] },
+      { projectProgressUpdates: [{ projectNodeId: primaryNodeId, progress: 10 }, { projectNodeId: primaryNodeId, progress: 20 }] },
+      { reportedProgress: 20, projectProgressUpdates: [{ projectNodeId: primaryNodeId, progress: 30 }] },
+      { projectProgressUpdates: [{ projectNodeId: auxiliaryNodeId, progress: 101 }] },
+    ]) expect(createWorkSessionSchema.safeParse({ ...input, ...invalid }).success).toBe(false);
+  });
   it("keeps the primary node and every auxiliary node in an explicit fact payload", () => {
     const parsed = createWorkSessionSchema.parse({
       ...baseInput,

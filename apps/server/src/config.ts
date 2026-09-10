@@ -33,10 +33,13 @@ const serverConfigSchema = z.object({
   DATABASE_POOL_MAX: z.coerce.number().int().positive().default(10),
   DATABASE_SSL: booleanString.default(false),
   AI_ENABLED: booleanString.default(false),
+  AI_API_KEY: z.string().min(1).optional(),
+  AI_API_BASE_URL: z.url().optional(),
+  AI_MODEL: z.string().min(1).optional(),
   ZHIPU_API_KEY: z.string().min(1).optional(),
-  ZHIPU_API_BASE_URL: z.url().default("https://open.bigmodel.cn/api/paas/v4"),
-  ZHIPU_MODEL: z.string().min(1).default("glm-4.7-flash"),
-  AI_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(5_000).max(180_000).default(60_000),
+  ZHIPU_API_BASE_URL: z.url().optional(),
+  ZHIPU_MODEL: z.string().min(1).optional(),
+  AI_REQUEST_TIMEOUT_MS: z.coerce.number().int().min(5_000).max(300_000).default(60_000),
   AI_MAX_RETRIES: z.coerce.number().int().min(1).max(5).default(2),
   /**
    * Dedicated envelope key for organization-owned AI keys. This must be the
@@ -97,8 +100,9 @@ const serverConfigSchema = z.object({
   if (value.NODE_ENV !== "production") return;
 
   const assertPublicHttps = (
-    key: "WEB_ORIGIN" | "PUBLIC_APP_URL" | "ZHIPU_API_BASE_URL",
+    key: "WEB_ORIGIN" | "PUBLIC_APP_URL" | "ZHIPU_API_BASE_URL" | "AI_API_BASE_URL",
   ) => {
+    if (!value[key]) return;
     const url = new URL(value[key]);
     if (url.protocol !== "https:" || url.username || url.password) {
       context.addIssue({
@@ -111,6 +115,7 @@ const serverConfigSchema = z.object({
   assertPublicHttps("WEB_ORIGIN");
   assertPublicHttps("PUBLIC_APP_URL");
   assertPublicHttps("ZHIPU_API_BASE_URL");
+  assertPublicHttps("AI_API_BASE_URL");
   if (value.S3_BROWSER_ORIGIN) {
     const url = new URL(value.S3_BROWSER_ORIGIN);
     if (url.protocol !== "https:" || url.username || url.password) {

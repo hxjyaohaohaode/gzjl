@@ -32,6 +32,10 @@ export const createWorkSessionSchema = z
     primaryProjectNodeId: uuidSchema.nullable().default(null),
     projectNodeIds: z.array(uuidSchema).max(32).default([]),
     reportedProgress: z.number().min(0).max(100).nullable().optional(),
+    projectProgressUpdates: z.array(z.object({
+      projectNodeId: uuidSchema,
+      progress: z.number().min(0).max(100),
+    })).max(32).optional(),
     visibility: z.enum(workSessionVisibilities).default("management_only"),
     parallelWork: z.boolean().default(false),
     breaks: z
@@ -46,9 +50,20 @@ export const createWorkSessionSchema = z
   })
   .superRefine(
     (
-      { startAt, endAt, primaryProjectNodeId, projectNodeIds, reportedProgress },
+      { startAt, endAt, primaryProjectNodeId, projectNodeIds, reportedProgress, projectProgressUpdates },
       context,
     ) => {
+      const progressNodeIds = new Set<string>();
+      for (const [index, update] of (projectProgressUpdates ?? []).entries()) {
+        if (progressNodeIds.has(update.projectNodeId) ||
+          !(projectNodeIds.includes(update.projectNodeId) || primaryProjectNodeId === update.projectNodeId)) {
+          context.addIssue({ code: "custom", path: ["projectProgressUpdates", index, "projectNodeId"], message: "只能更新已关联的节点，且每个节点只能填写一次完成度。" });
+        }
+        progressNodeIds.add(update.projectNodeId);
+        if (update.projectNodeId === primaryProjectNodeId && reportedProgress != null && update.progress !== reportedProgress) {
+          context.addIssue({ code: "custom", path: ["projectProgressUpdates", index, "progress"], message: "主节点的两份完成度不能冲突。" });
+        }
+      }
       if (new Date(endAt) <= new Date(startAt)) {
         context.addIssue({
           code: "custom",

@@ -1,5 +1,6 @@
 import type { FastifyInstance, preHandlerHookHandler } from "fastify";
 import { z } from "zod";
+import { aiGenerationOptionsSchema } from "@workbench/shared";
 
 import { isAuthorized } from "../auth/authorization.js";
 import {
@@ -72,6 +73,7 @@ const settingsSchema = z
     dailyRequestLimit: z.number().int().min(1).max(10_000),
     monthlyRequestLimit: z.number().int().min(1).max(300_000),
     maxOutputTokens: z.number().int().min(128).max(16_000),
+    generationOptions: aiGenerationOptionsSchema.optional(),
     apiKey: z.string().trim().min(8).max(2_000).optional(),
     clearApiKey: z.boolean().default(false),
   })

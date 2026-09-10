@@ -2,9 +2,10 @@ import { isIP } from "node:net";
 
 import { and, count, desc, eq, gte, sql } from "drizzle-orm";
 import {
-  decryptSecret,
   encryptSecret,
-  SecretCipherError,
+  deploymentAiSettings,
+  resolveOrganizationAiProvider,
+  type EffectiveAiProvider,
   type Database,
 } from "@workbench/db";
 import {
@@ -16,25 +17,20 @@ import {
   organizations,
 } from "@workbench/db/schema";
 
+import { aiGenerationOptionsSchema, AiProviderResponseError, requestAiChatCompletion, type AiGenerationOptions } from "@workbench/shared";
+
 import type { ServerConfig } from "../config.js";
 
 const defaultDailyRequestLimit = 20;
 const defaultMonthlyRequestLimit = 300;
-const defaultMaxOutputTokens = 1_200;
+const defaultMaxOutputTokens = 4_096;
 
 export interface OrganizationAiActor {
   organizationId: string;
   membershipId: string;
 }
 
-export interface EffectiveAiProvider {
-  source: "organization" | "deployment_default";
-  baseUrl: string;
-  apiKey: string;
-  model: string;
-  maxOutputTokens: number;
-  maxAttempts: number;
-}
+export type { EffectiveAiProvider } from "@workbench/db";
 
 export interface UpdateOrganizationAiSettingsInput {
   enabled: boolean;
@@ -43,6 +39,7 @@ export interface UpdateOrganizationAiSettingsInput {
   dailyRequestLimit: number;
   monthlyRequestLimit: number;
   maxOutputTokens: number;
+  generationOptions?: AiGenerationOptions | undefined;
   apiKey?: string | undefined;
   clearApiKey?: boolean | undefined;
 }
@@ -71,6 +68,7 @@ export class AiQuotaExceededError extends Error {
 }
 
 export function safeAiProviderError(error: unknown): string {
+  if (error instanceof AiProviderResponseError) return error.message;
   if (error instanceof DOMException && error.name === "AbortError") {
     return "连接超时，请检查 Base URL、网络或供应商状态。";
   }
@@ -165,7 +163,7 @@ export function normalizeAiBaseUrl(
       "AI Base URL 不能指向本机、保留地址或私有网络地址。",
     );
   }
-  return url.toString().replace(/\/$/, "");
+  return url.toString().replace(/\/+$/, "").replace(/\/chat\/completions$/i, "");
 }
 
 function localBoundary(timezone: string, kind: "day" | "month"): Date {
@@ -230,40 +228,7 @@ export class AiConfigurationService {
   async resolveEffective(
     organizationId: string,
   ): Promise<EffectiveAiProvider | null> {
-    const [settings] = await this.db
-      .select()
-      .from(organizationAiSettings)
-      .where(eq(organizationAiSettings.organizationId, organizationId))
-      .limit(1);
-    if (settings) {
-      if (!settings.enabled || !settings.apiKeyCiphertext) return null;
-      if (!this.config.AI_CONFIG_ENCRYPTION_KEY) return null;
-      try {
-        return {
-          source: "organization",
-          baseUrl: settings.baseUrl,
-          apiKey: decryptSecret(
-            settings.apiKeyCiphertext,
-            this.config.AI_CONFIG_ENCRYPTION_KEY,
-          ),
-          model: settings.model,
-          maxOutputTokens: settings.maxOutputTokens,
-          maxAttempts: this.config.AI_MAX_RETRIES,
-        };
-      } catch (error) {
-        if (error instanceof SecretCipherError) return null;
-        throw error;
-      }
-    }
-    if (!this.config.AI_ENABLED || !this.config.ZHIPU_API_KEY) return null;
-    return {
-      source: "deployment_default",
-      baseUrl: this.config.ZHIPU_API_BASE_URL.replace(/\/$/, ""),
-      apiKey: this.config.ZHIPU_API_KEY,
-      model: this.config.ZHIPU_MODEL,
-      maxOutputTokens: defaultMaxOutputTokens,
-      maxAttempts: this.config.AI_MAX_RETRIES,
-    };
+    return resolveOrganizationAiProvider(this.db, organizationId, this.config);
   }
 
   async getSettings(actor: OrganizationAiActor) {
@@ -286,12 +251,13 @@ export class AiConfigurationService {
       this.countRequests(actor.organizationId, localBoundary(timezone, "month")),
     ]);
     const effective = await this.resolveEffective(actor.organizationId);
+    const deployment = deploymentAiSettings(this.config);
     return {
       source: settings ? "organization" : "deployment_default",
       enabled: settings ? settings.enabled : this.config.AI_ENABLED,
-      baseUrl: settings?.baseUrl ?? this.config.ZHIPU_API_BASE_URL,
-      model: settings?.model ?? this.config.ZHIPU_MODEL,
-      hasApiKey: Boolean(settings?.apiKeyCiphertext || this.config.ZHIPU_API_KEY),
+      baseUrl: settings?.baseUrl ?? deployment.baseUrl ?? "",
+      model: settings?.model ?? deployment.model ?? "",
+      hasApiKey: Boolean(settings ? settings.apiKeyCiphertext : deployment.apiKey),
       encryptionReady: Boolean(this.config.AI_CONFIG_ENCRYPTION_KEY),
       usable: Boolean(effective),
       dailyRequestLimit:
@@ -299,6 +265,7 @@ export class AiConfigurationService {
       monthlyRequestLimit:
         settings?.monthlyRequestLimit ?? defaultMonthlyRequestLimit,
       maxOutputTokens: settings?.maxOutputTokens ?? defaultMaxOutputTokens,
+      generationOptions: effective?.generationOptions ?? aiGenerationOptionsSchema.parse(settings?.generationOptions ?? {}),
       usage: { daily, monthly, timezone },
     };
   }
@@ -313,8 +280,8 @@ export class AiConfigurationService {
     }
     const baseUrl = normalizeAiBaseUrl(input.baseUrl, this.config.NODE_ENV);
     const model = input.model.trim();
-    if (!/^[A-Za-z0-9._:-]{1,160}$/.test(model)) {
-      throw new AiConfigurationError("模型标识只能包含字母、数字、点、下划线、连字符或冒号。");
+    if (!model || model.length > 160 || /[\s\p{Cc}]/u.test(model)) {
+      throw new AiConfigurationError("模型标识不能为空或包含空白、控制字符；请复制供应商提供的完整标识。");
     }
     const apiKey = input.apiKey?.trim();
     if (apiKey && !this.config.AI_CONFIG_ENCRYPTION_KEY) {
@@ -340,6 +307,7 @@ export class AiConfigurationService {
           "启用组织级 AI 前必须填写 API Key；密钥只会加密保存，之后无法再次读取。",
         );
       }
+      const generationOptions = aiGenerationOptionsSchema.parse(input.generationOptions ?? current?.generationOptions ?? {});
       const next = {
         enabled: input.enabled,
         baseUrl,
@@ -348,6 +316,7 @@ export class AiConfigurationService {
         dailyRequestLimit: input.dailyRequestLimit,
         monthlyRequestLimit: input.monthlyRequestLimit,
         maxOutputTokens: input.maxOutputTokens,
+        generationOptions,
         updatedAt: now,
       };
       if (current) {
@@ -375,6 +344,7 @@ export class AiConfigurationService {
           dailyRequestLimit: input.dailyRequestLimit,
           monthlyRequestLimit: input.monthlyRequestLimit,
           maxOutputTokens: input.maxOutputTokens,
+          generationOptions,
         },
       });
     });
@@ -444,61 +414,18 @@ export class AiConfigurationService {
       return reserved;
     });
 
-    const controller = new AbortController();
-    const timeout = setTimeout(
-      () => controller.abort(),
-      Math.min(this.config.AI_REQUEST_TIMEOUT_MS, 30_000),
-    );
     let status: "succeeded" | "failed" = "failed";
     let httpStatus: number | null = null;
     let providerRequestId: string | null = null;
     let errorSummary: string | null = null;
     try {
-      const response = await this.providerFetch(
-        `${provider.baseUrl.replace(/\/$/, "")}/chat/completions`,
-        {
-          method: "POST",
-          headers: {
-            authorization: `Bearer ${provider.apiKey}`,
-            "content-type": "application/json",
-          },
-          signal: controller.signal,
-          body: JSON.stringify({
-            model: provider.model,
-            temperature: 0,
-            max_tokens: 8,
-            messages: [
-              {
-                role: "user",
-                content: "这是一次连接测试。只回复 OK。",
-              },
-            ],
-          }),
-        },
-      );
-      httpStatus = response.status;
-      if (!response.ok) {
-        throw new Error(`AI provider returned HTTP ${response.status}`);
-      }
-      const raw = await response.text();
-      if (raw.length > 262_144) {
-        throw new Error("AI provider returned an invalid response");
-      }
-      const payload = JSON.parse(raw) as {
-        id?: unknown;
-        choices?: Array<{ message?: { content?: unknown } }>;
-      };
-      const content = payload.choices?.[0]?.message?.content;
-      if (typeof content !== "string" || !content.trim()) {
-        throw new Error("AI provider returned an invalid response");
-      }
-      providerRequestId =
-        typeof payload.id === "string" ? payload.id.slice(0, 255) : null;
+      const result = await requestAiChatCompletion(provider, [{ role: "user", content: provider.generationOptions.responseFormat === "json_object" ? '这是一次连接测试，只输出 JSON：{"ok":true}' : "这是一次连接测试。只回复 OK。" }], this.providerFetch);
+      httpStatus = result.httpStatus;
+      providerRequestId = result.id ?? null;
       status = "succeeded";
     } catch (error) {
+      if (error instanceof AiProviderResponseError) httpStatus = error.httpStatus;
       errorSummary = safeAiProviderError(error);
-    } finally {
-      clearTimeout(timeout);
     }
 
     const latencyMs = Math.max(0, Date.now() - startedAt);
