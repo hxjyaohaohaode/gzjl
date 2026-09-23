@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gte, gt, inArray, isNull, lt, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, gt, inArray, isNull, lt, ne, or, sql } from "drizzle-orm";
 import type { Database } from "@workbench/db";
 import {
   auditLogs,
@@ -6,6 +6,7 @@ import {
   compensationPlanVersions,
   orgMemberships,
   payrollAdjustments,
+  payrollRuns,
   payPeriods,
   users,
   workSessionCorrections,
@@ -18,6 +19,8 @@ import {
   type CreateWorkSessionInput,
   type PermissionGrant,
 } from "@workbench/shared";
+import { workReviewScope } from "./review-scope.js";
+import { lockPayrollInputs } from "../payroll/input-lock.js";
 
 export interface WorkCorrectionActor {
   organizationId: string;
@@ -243,11 +246,13 @@ export class WorkCorrectionService {
           eq(workSessions.organizationId, actor.organizationId),
           eq(workSessions.recordKind, "fact"),
           eq(workSessionCorrections.status, "pending"),
+          ne(workSessionCorrections.requestedBy, actor.membershipId),
+          workReviewScope(actor.grants),
           isNull(workSessions.deletedAt),
         ),
       )
       .orderBy(desc(workSessionCorrections.createdAt))
-      .limit(Math.min(limit * 3, 300));
+      .limit(limit);
     const visible = [];
     for (const candidate of candidates) {
       const allowed = await this.canReview(
@@ -276,6 +281,9 @@ export class WorkCorrectionService {
     correctionId: string,
     input: CorrectionDecisionInput,
   ) {
+    if (input.adjustment && !hasPermission(actor.grants, "payroll.settle", { scopeKind: "organization" })) {
+      throw new WorkCorrectionForbiddenError("工时审核权限不包含工资调整；创建下期金额调整需要组织级薪资结算权限。");
+    }
     const [candidate] = await this.db
       .select({
         sessionId: workSessions.id,
@@ -303,6 +311,7 @@ export class WorkCorrectionService {
     }
 
     return this.db.transaction(async (tx) => {
+      await lockPayrollInputs(tx, actor.organizationId);
       const [record] = await tx
         .select({ correction: workSessionCorrections, session: workSessions })
         .from(workSessionCorrections)
@@ -400,14 +409,22 @@ export class WorkCorrectionService {
             ),
           )
           .orderBy(asc(payPeriods.startsAt))
+          .for("update")
           .limit(1);
         if (!targetPeriod) {
           throw new WorkCorrectionConflictError(
             "尚未创建原工资周期后的开放周期，不能安全写入下期调整。",
           );
         }
+        const [activeRun] = await tx.select({ id: payrollRuns.id }).from(payrollRuns).where(and(
+          eq(payrollRuns.payPeriodId, targetPeriod.id),
+          inArray(payrollRuns.status, ["queued", "calculating", "ready", "review_required", "settled"]),
+        )).limit(1);
+        if (activeRun) {
+          throw new WorkCorrectionConflictError("下期已有有效薪资计算批次，请先撤销计算后再纳入更正金额。");
+        }
         const targetPlans = await tx
-          .select({ currency: compensationPlans.currency })
+          .selectDistinct({ id: compensationPlans.id, currency: compensationPlans.currency })
           .from(compensationPlans)
           .innerJoin(
             compensationPlanVersions,
@@ -415,10 +432,6 @@ export class WorkCorrectionService {
               eq(
                 compensationPlanVersions.compensationPlanId,
                 compensationPlans.id,
-              ),
-              eq(
-                compensationPlanVersions.version,
-                compensationPlans.activeVersion,
               ),
             ),
           )

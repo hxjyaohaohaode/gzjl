@@ -27,7 +27,7 @@ import {
   Zap,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { Button, cn } from "@workbench/ui";
@@ -35,14 +35,16 @@ import { Button, cn } from "@workbench/ui";
 import {
   api,
   hasGrant,
-  notifySessionChanged,
-  resetCsrfToken,
   type Me,
 } from "./api.js";
 import type { RealtimeSyncStatus } from "./realtime.js";
 import { AccentPicker } from "./accent-picker.js";
 import { readableForeground, sanitizeAccent } from "./color.js";
-import { detachCurrentBrowserPushBeforeLogout } from "./push-client.js";
+import { endCurrentSession } from "./session.js";
+import { readPreference, writePreference } from "./browser-preferences.js";
+import { useDialogFocus } from "./dialog-focus.js";
+import { WorkspaceErrorBoundary } from "./error-boundary.js";
+import { getOrganizationTimezone } from "./timezone.js";
 
 interface NavigationItem {
   label: string;
@@ -360,6 +362,7 @@ const sectionNames: Record<NavigationItem["section"], string> = {
 
 function formatHeaderDate(): string {
   return new Intl.DateTimeFormat("zh-CN", {
+    timeZone: getOrganizationTimezone(),
     month: "long",
     day: "numeric",
     weekday: "short",
@@ -374,6 +377,8 @@ function CommandPalette({
   onClose: () => void;
 }) {
   const [query, setQuery] = useState("");
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useDialogFocus(dialogRef, true);
   const [settledQuery, setSettledQuery] = useState("");
   const navigate = useNavigate();
   const normalizedQuery = query.trim();
@@ -384,9 +389,10 @@ function CommandPalette({
   }, [normalizedQuery]);
   const search = useQuery({
     queryKey: ["global-search", settledQuery],
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       api<{ items: GlobalSearchResult[] }>(
         `/api/search?q=${encodeURIComponent(settledQuery)}&limit=5`,
+        { signal },
       ),
     enabled: settledQuery.length >= 2,
     staleTime: 15_000,
@@ -409,6 +415,8 @@ function CommandPalette({
       aria-modal="true"
       className="fixed inset-0 z-[70] grid place-items-start bg-[#151735]/35 p-4 pt-[10vh] backdrop-blur-sm"
       role="dialog"
+      ref={dialogRef}
+      tabIndex={-1}
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) onClose();
       }}
@@ -418,7 +426,6 @@ function CommandPalette({
           <Search className="text-[var(--text-subtle)]" size={19} />
           <input
             aria-label="搜索工作台"
-            autoFocus
             className="h-14 min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-[var(--text-subtle)]"
             onChange={(event) => setQuery(event.target.value)}
             placeholder="搜索工作、项目、成员、附件或报告…"
@@ -474,9 +481,10 @@ function CommandPalette({
                   搜索中…
                 </p>
               ) : search.isError ? (
-                <p className="px-3 py-6 text-center text-sm text-[var(--danger)]">
+                <div className="px-3 py-6 text-center text-sm text-[var(--danger)]" role="alert">
                   搜索暂时不可用，请重试。
-                </p>
+                  <Button className="ml-2" disabled={search.isFetching} onClick={() => void search.refetch()} variant="secondary" size="compact">重新搜索</Button>
+                </div>
               ) : search.data?.items.length ? (
                 search.data.items.map((item) => (
                   <button
@@ -548,10 +556,10 @@ export function AppShell({
 }) {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(
-    () => localStorage.getItem("workbench-sidebar-collapsed") === "true",
+    () => readPreference("workbench-sidebar-collapsed") === "true",
   );
   const [sidebarWidth, setSidebarWidth] = useState(() => {
-    const stored = Number(localStorage.getItem("workbench-sidebar-width"));
+    const stored = Number(readPreference("workbench-sidebar-width"));
     return Number.isFinite(stored) && stored >= 224 && stored <= 420
       ? stored
       : 272;
@@ -560,11 +568,20 @@ export function AppShell({
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [commandOpen, setCommandOpen] = useState(false);
   const [contextOpen, setContextOpen] = useState(false);
+  const openCommand = useCallback(() => {
+    // Fullscreen charts own their keyboard controls. Search would be hidden
+    // behind the native fullscreen layer or the viewport fallback.
+    if (document.fullscreenElement || document.querySelector(".analytics-chart-expanded")) return;
+    setContextOpen(false);
+    setSettingsOpen(false);
+    setNotificationsOpen(false);
+    setCommandOpen(true);
+  }, []);
   const [contextDrafts, setContextDrafts] = useState<Record<string, string>>({});
   const [contextScope, setContextScope] = useState<"self" | "team">("self");
   const [online, setOnline] = useState(() => navigator.onLine);
   const [theme, setTheme] = useState<"system" | "light" | "dark">(() => {
-    const storedTheme = localStorage.getItem("workbench-theme");
+    const storedTheme = readPreference("workbench-theme");
     return storedTheme === "light" ||
       storedTheme === "dark" ||
       storedTheme === "system"
@@ -572,7 +589,7 @@ export function AppShell({
       : "light";
   });
   const [accent, setAccent] = useState(() => {
-    const storedAccent = localStorage.getItem("workbench-accent");
+    const storedAccent = readPreference("workbench-accent");
     // The first workbench release persisted its built-in green as if it were a
     // custom user choice. Migrate only that legacy default; real custom colors stay intact.
     return storedAccent?.toLowerCase() === "#1f765c"
@@ -586,6 +603,7 @@ export function AppShell({
   const utilityMenuRef = useRef<HTMLDivElement>(null);
   const sidebarTouchStartX = useRef<number | null>(null);
   const contextPanelRef = useRef<HTMLElement>(null);
+  useDialogFocus(contextPanelRef, contextOpen);
   const contextScrollRef = useRef<HTMLDivElement>(null);
   const pageCopilot = useMemo(
     () => resolvePageCopilotContext(location.pathname),
@@ -621,19 +639,9 @@ export function AppShell({
     .map((path) => visibleNavigation.find((item) => item.to === path))
     .filter((item): item is NavigationItem => Boolean(item));
   const logout = useMutation({
-    mutationFn: async () => {
-      await detachCurrentBrowserPushBeforeLogout();
-      return api<void>("/api/auth/logout", { method: "POST" });
-    },
-    onSettled: async () => {
-      resetCsrfToken();
-      queryClient.removeQueries({
-        predicate: (query) => query.queryKey[0] !== "me",
-      });
-      queryClient.setQueryData(["me"], null);
-      notifySessionChanged();
-      navigate("/login", { replace: true });
-    },
+    mutationFn: () => endCurrentSession(queryClient),
+    onSuccess: () => navigate("/login", { replace: true }),
+    onError: () => setSidebarOpen(false),
   });
   const notifications = useQuery({
     queryKey: ["notifications"],
@@ -672,7 +680,7 @@ export function AppShell({
     .map((item) => `${item.job.id}:${item.job.status}:${Boolean(item.report)}`)
     .join("|");
   const sendCopilot = useMutation({
-    mutationFn: () => {
+    mutationFn: (input: { question: string; conversationId: string }) => {
       const to = new Date();
       to.setSeconds(0, 0);
       to.setMinutes(Math.floor(to.getMinutes() / 5) * 5);
@@ -681,8 +689,8 @@ export function AppShell({
         body: {
           taskType: "assistant_chat",
           scope: canUseTeamCopilot ? contextScope : "self",
-          question: contextQuestion.trim(),
-          conversationId: pageCopilot.conversationId,
+          question: input.question.trim(),
+          conversationId: input.conversationId,
           pageContext: {
             area: pageCopilot.area,
             ...(pageCopilot.entityId ? { entityId: pageCopilot.entityId } : {}),
@@ -692,11 +700,9 @@ export function AppShell({
         },
       });
     },
-    onSuccess: async () => {
-      setContextDrafts((current) => ({
-        ...current,
-        [pageCopilot.conversationId]: "",
-      }));
+    onSuccess: async (_response, input) => {
+      setContextDrafts((current) => current[input.conversationId] === input.question
+        ? { ...current, [input.conversationId]: "" } : current);
       await queryClient.invalidateQueries({ queryKey: ["ai-reports"] });
     },
   });
@@ -706,27 +712,15 @@ export function AppShell({
     onSuccess: async () =>
       queryClient.invalidateQueries({ queryKey: ["ai-reports"] }),
   });
+  const cancelCopilot = useMutation({
+    mutationFn: (jobId: string) => api(`/api/ai/jobs/${jobId}/cancel`, { method: "POST" }),
+    onSuccess: async () => queryClient.invalidateQueries({ queryKey: ["ai-reports"] }),
+  });
   const copilotError =
-    copilotReports.error ?? sendCopilot.error ?? retryCopilot.error;
-  const markRead = useMutation({
-    mutationFn: (id: string) =>
-      api(`/api/notifications/${id}/read`, { method: "POST" }),
-    onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ["notifications"] });
-    },
-  });
-  const markUnread = useMutation({
-    mutationFn: (id: string) =>
-      api(`/api/notifications/${id}/unread`, { method: "POST" }),
-    onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ["notifications"] });
-    },
-  });
-  const markAllRead = useMutation({
-    mutationFn: () =>
-      api<{ updatedCount: number }>("/api/notifications/read-all", {
-        method: "POST",
-      }),
+    copilotReports.error ?? sendCopilot.error ?? retryCopilot.error ?? cancelCopilot.error;
+  const updateNotification = useMutation({
+    mutationFn: (action: { id: string; state: "read" | "unread" } | { state: "read-all" }) =>
+      api(action.state === "read-all" ? "/api/notifications/read-all" : `/api/notifications/${action.id}/${action.state}`, { method: "POST" }),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["notifications"] });
     },
@@ -738,16 +732,16 @@ export function AppShell({
   useEffect(() => {
     const root = document.documentElement;
     root.dataset.theme = theme;
-    localStorage.setItem("workbench-theme", theme);
+    writePreference("workbench-theme", theme);
   }, [theme]);
   useEffect(() => {
-    localStorage.setItem(
+    writePreference(
       "workbench-sidebar-collapsed",
       String(sidebarCollapsed),
     );
   }, [sidebarCollapsed]);
   useEffect(() => {
-    localStorage.setItem("workbench-sidebar-width", String(sidebarWidth));
+    writePreference("workbench-sidebar-width", String(sidebarWidth));
   }, [sidebarWidth]);
   useEffect(() => {
     if (!sidebarOpen) return undefined;
@@ -775,7 +769,7 @@ export function AppShell({
       "--accent-soft",
       "color-mix(in srgb, " + selectedAccent + " 13%, transparent)",
     );
-    localStorage.setItem("workbench-accent", selectedAccent);
+    writePreference("workbench-accent", selectedAccent);
   }, [selectedAccent]);
   useEffect(() => {
     const setStatus = () => setOnline(navigator.onLine);
@@ -790,7 +784,7 @@ export function AppShell({
     const listener = (event: KeyboardEvent) => {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
         event.preventDefault();
-        setCommandOpen(true);
+        openCommand();
       }
       if (event.key === "Escape") {
         setCommandOpen(false);
@@ -802,7 +796,7 @@ export function AppShell({
     };
     window.addEventListener("keydown", listener);
     return () => window.removeEventListener("keydown", listener);
-  }, []);
+  }, [openCommand]);
   useEffect(() => {
     if (!settingsOpen && !notificationsOpen) return;
     const closeUtilityMenus = (event: PointerEvent) => {
@@ -834,7 +828,7 @@ export function AppShell({
     if (!contextOpen) return;
     const container = contextScrollRef.current;
     if (!container) return;
-    container.scrollTo({ top: container.scrollHeight, behavior: "smooth" });
+    container.scrollTo({ top: container.scrollHeight, behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "instant" : "smooth" });
   }, [contextOpen, copilotUpdateKey]);
   return (
     <div
@@ -897,7 +891,7 @@ export function AppShell({
         <div className="px-4 pb-4">
           <button
             className="app-sidebar-search flex h-10 w-full items-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface-raised)] px-3 text-left text-xs text-[var(--text-muted)] transition"
-            onClick={() => setCommandOpen(true)}
+            onClick={openCommand}
             type="button"
           >
             <Search size={16} />
@@ -986,7 +980,7 @@ export function AppShell({
             variant="ghost"
           >
             <LogOut size={15} />
-            退出登录
+            {logout.isPending ? "正在退出…" : "退出登录"}
           </Button>
         </div>
         {!sidebarCollapsed ? (
@@ -1197,28 +1191,29 @@ export function AppShell({
                   <p className="font-bold">通知中心</p>
                   <div className="flex items-center gap-2">
                     <span className="text-xs text-[var(--text-muted)]">
-                      {unreadCount} 条未读
+                      {notifications.isPending ? "读取中…" : notifications.isError && !notifications.data ? "未读数待确认" : `${unreadCount} 条未读`}
                     </span>
                     {unreadCount ? (
                       <Button
-                        disabled={markAllRead.isPending}
-                        onClick={() => markAllRead.mutate()}
+                        disabled={updateNotification.isPending}
+                        onClick={() => updateNotification.mutate({ state: "read-all" })}
                         size="compact"
                         type="button"
                         variant="ghost"
                       >
-                        {markAllRead.isPending ? "处理中…" : "全部已读"}
+                        {updateNotification.isPending && updateNotification.variables.state === "read-all" ? "处理中…" : "全部已读"}
                       </Button>
                     ) : null}
                   </div>
                 </div>
+                {updateNotification.error ? <p className="p-3 text-sm text-[var(--danger)]" role="alert">通知状态未能更新：{updateNotification.error.message} 请重试该操作。</p> : null}
+                {notifications.error ? <div className="p-3 text-sm text-[var(--danger)]" role="alert">
+                  <p>{notifications.error.message}{notifications.data ? " 下方保留上次读取的通知。" : ""}</p>
+                  <Button className="mt-2" disabled={notifications.isFetching} onClick={() => void notifications.refetch()} variant="secondary" size="compact">重新加载通知</Button>
+                </div> : null}
                 {notifications.isPending ? (
-                  <p className="p-3 text-sm text-[var(--text-muted)]">
+                  <p className="p-3 text-sm text-[var(--text-muted)]" role="status">
                     正在读取通知…
-                  </p>
-                ) : notifications.error ? (
-                  <p className="p-3 text-sm text-[var(--danger)]">
-                    通知暂时不可用。
                   </p>
                 ) : notifications.data?.items.length ? (
                   <div className="space-y-1">
@@ -1234,7 +1229,7 @@ export function AppShell({
                           aria-label={`${item.title}：${item.body}`}
                           className="flex w-full gap-2 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
                           onClick={() => {
-                            if (!item.readAt) markRead.mutate(item.id);
+                            if (!item.readAt && !updateNotification.isPending) updateNotification.mutate({ id: item.id, state: "read" });
                             if (item.actionUrl) {
                               setNotificationsOpen(false);
                               navigate(item.actionUrl);
@@ -1271,10 +1266,9 @@ export function AppShell({
                         </button>
                         <Button
                           className="absolute right-2 top-2 opacity-80 group-hover:opacity-100"
-                          disabled={markRead.isPending || markUnread.isPending}
+                          disabled={updateNotification.isPending}
                           onClick={() => {
-                            if (item.readAt) markUnread.mutate(item.id);
-                            else markRead.mutate(item.id);
+                            updateNotification.mutate({ id: item.id, state: item.readAt ? "unread" : "read" });
                           }}
                           size="compact"
                           type="button"
@@ -1285,11 +1279,11 @@ export function AppShell({
                       </div>
                     ))}
                   </div>
-                ) : (
+                ) : !notifications.error ? (
                   <p className="p-3 text-sm text-[var(--text-muted)]">
                     暂无通知。
                   </p>
-                )}
+                ) : null}
               </div>
             ) : null}
             {settingsOpen ? (
@@ -1339,7 +1333,11 @@ export function AppShell({
           className="app-main w-full px-4 py-6 md:px-7 md:py-8 xl:px-9"
           id="main-content"
         >
-          <Outlet />
+          {logout.error ? <div className="mb-4 rounded-xl bg-[var(--danger-soft)] p-4 text-sm text-[var(--danger)]" role="alert">
+            <p>{logout.error.message}</p>
+            <Button className="mt-2" disabled={logout.isPending} onClick={() => logout.mutate()} variant="secondary" size="compact">重试退出</Button>
+          </div> : null}
+          <WorkspaceErrorBoundary key={location.pathname}><Outlet /></WorkspaceErrorBoundary>
         </main>
       </div>
       {contextOpen ? (
@@ -1357,6 +1355,7 @@ export function AppShell({
           ref={contextPanelRef}
           role="dialog"
           aria-modal="true"
+          tabIndex={-1}
         >
           <div className="flex items-start justify-between gap-4">
             <div>
@@ -1422,6 +1421,10 @@ export function AppShell({
                             ? "本次对话已取消。"
                             : "正在根据最新授权事实生成回答…")}
                       {!item.report &&
+                      ["queued", "running"].includes(item.job.status) ? (
+                        <Button className="mt-2" disabled={cancelCopilot.isPending} onClick={() => cancelCopilot.mutate(item.job.id)} size="compact" variant="secondary">取消生成</Button>
+                      ) : null}
+                      {!item.report &&
                       ["failed", "cancelled"].includes(item.job.status) ? (
                         <button
                           className="mt-2 flex items-center gap-1 text-xs font-bold text-[var(--accent-strong)]"
@@ -1463,7 +1466,7 @@ export function AppShell({
               className="mt-3"
               onSubmit={(event) => {
                 event.preventDefault();
-                if (contextQuestion.trim().length >= 2) sendCopilot.mutate();
+                if (contextQuestion.trim().length >= 2 && !sendCopilot.isPending) sendCopilot.mutate({ question: contextQuestion, conversationId: pageCopilot.conversationId });
               }}
             >
               <textarea
@@ -1486,11 +1489,12 @@ export function AppShell({
               </Button>
             </form>
             {copilotError ? (
-              <p className="mt-3 text-sm leading-6 text-[var(--danger)]">
+              <div className="mt-3 text-sm leading-6 text-[var(--danger)]" role="alert">
                 {copilotError instanceof Error
                   ? copilotError.message
                   : "页面 AI 暂时不可用。"}
-              </p>
+                {copilotReports.error ? <Button className="mt-2" variant="secondary" size="compact" disabled={copilotReports.isFetching} onClick={() => void copilotReports.refetch()}>重新加载对话</Button> : null}
+              </div>
             ) : null}
             <button
               className="mt-4 flex items-center justify-center gap-1 text-xs font-bold text-[var(--accent-strong)]"

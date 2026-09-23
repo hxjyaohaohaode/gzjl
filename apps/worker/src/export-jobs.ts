@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import { DeleteObjectCommand, PutObjectCommand, type S3Client } from "@aws-sdk/client-s3";
 import { and, eq, gte, inArray, isNotNull, isNull, lt, lte, or, sql } from "drizzle-orm";
@@ -200,7 +200,7 @@ async function eventEnabled(db: Database, membershipId: string, category: string
     )
     .limit(1);
   if (!preference) return true;
-  if (preference.mutedUntil && preference.mutedUntil > new Date()) return false;
+  // Persist first; notification display and Push dispatch apply temporary mute.
   return preference.inAppEnabled || preference.pushEnabled;
 }
 
@@ -245,6 +245,17 @@ export function createExportJobRuntime(
   store: ExportObjectStore | null,
   diagnostics: ExportJobRuntimeDiagnostics = {},
 ) {
+  async function notify(value: typeof notifications.$inferInsert) {
+    try {
+      if (await eventEnabled(db, value.recipientMembershipId, value.category)) {
+        await db.insert(notifications).values(value).onConflictDoNothing();
+      }
+    } catch {
+      // Notification outages must not discard an already generated artifact.
+      console.warn("Export notification unavailable; job result preserved.");
+    }
+  }
+
   async function enqueue(jobId: string): Promise<void> {
     const [job] = await db
       .select({
@@ -272,10 +283,11 @@ export function createExportJobRuntime(
     await db
       .update(exportJobs)
       .set({
-        status: "queued",
+        status: sql`(case when ${exportJobs.attempt} >= ${exportJobs.maxAttempts} then 'failed' else 'queued' end)::job_status`,
         progress: 0,
         errorSummary: "export_lease_expired",
         startedAt: null,
+        completedAt: sql`case when ${exportJobs.attempt} >= ${exportJobs.maxAttempts} then now() else null end`,
       })
       .where(
         and(
@@ -301,11 +313,20 @@ export function createExportJobRuntime(
     for (const job of queued) await enqueue(job.id);
   }
 
-  async function updateProgress(jobId: string, progress: number) {
+  async function updateProgress(claimed: typeof exportJobs.$inferSelect, progress: number) {
     await db
       .update(exportJobs)
       .set({ progress })
-      .where(and(eq(exportJobs.id, jobId), eq(exportJobs.status, "running")));
+      .where(activeAttempt(claimed));
+  }
+
+  function activeAttempt(claimed: typeof exportJobs.$inferSelect) {
+    return and(
+      eq(exportJobs.id, claimed.id),
+      eq(exportJobs.status, "running"),
+      eq(exportJobs.attempt, claimed.attempt),
+      eq(exportJobs.startedAt, claimed.startedAt!),
+    );
   }
 
   async function process(jobId: string): Promise<void> {
@@ -444,11 +465,11 @@ export function createExportJobRuntime(
         for (const session of sessions) contentSessionIds.add(session.id);
       }
 
-      await updateProgress(claimed.id, 20);
+      await updateProgress(claimed, 20);
       const workFilter = and(
         eq(workSessions.organizationId, claimed.organizationId),
         policy.organizationWide ? undefined : or(...dataAccessConditions),
-        policy.exportOrganizationWide ? undefined : or(...exportAccessConditions),
+        policy.exportOrganizationWide ? undefined : (or(...exportAccessConditions) ?? sql`false`),
         gte(workSessions.startAt, new Date(scope.from)),
         lt(workSessions.startAt, new Date(scope.to)),
         lte(workSessions.createdAt, new Date(scope.snapshotAt)),
@@ -547,7 +568,7 @@ export function createExportJobRuntime(
         items,
       };
 
-      await updateProgress(claimed.id, 55);
+      await updateProgress(claimed, 55);
       let rendered;
       try {
         rendered = await renderWorkSessionExport(document, format);
@@ -555,8 +576,10 @@ export function createExportJobRuntime(
         throw new WorkerExportError("export_render_failed", false);
       }
       const digest = createHash("sha256").update(rendered.body).digest("hex");
-      const objectKey = `exports/${claimed.organizationId}/${claimed.requestedBy}/${claimed.id}/${rendered.fileName}`;
-      await updateProgress(claimed.id, 80);
+      // Each lease owns its object. A late worker must never overwrite or
+      // remove a newer worker's artifact, including after manual attempt reset.
+      const objectKey = `exports/${claimed.organizationId}/${claimed.requestedBy}/${claimed.id}/${randomUUID()}/${rendered.fileName}`;
+      await updateProgress(claimed, 80);
       try {
         await store.client.send(
           new PutObjectCommand({
@@ -583,11 +606,6 @@ export function createExportJobRuntime(
       }
       uploadedObjectKey = objectKey;
 
-      const notificationAllowed = await eventEnabled(
-        db,
-        claimed.requestedBy,
-        "export_ready",
-      );
       const expiresAt = new Date(Date.now() + EXPORT_RETENTION_MS);
       const completion = await db.transaction(async (tx) => {
         const [completed] = await tx
@@ -605,12 +623,7 @@ export function createExportJobRuntime(
             expiresAt,
             completedAt: new Date(),
           })
-          .where(
-            and(
-              eq(exportJobs.id, claimed.id),
-              eq(exportJobs.status, "running"),
-            ),
-          )
+          .where(activeAttempt(claimed))
           .returning({ id: exportJobs.id });
         if (!completed) return false;
         await tx.insert(outboxEvents).values({
@@ -636,24 +649,21 @@ export function createExportJobRuntime(
             expiresAt: expiresAt.toISOString(),
           },
         });
-        if (notificationAllowed) {
-          await tx
-            .insert(notifications)
-            .values({
-              organizationId: claimed.organizationId,
-              recipientMembershipId: claimed.requestedBy,
-              category: "export_ready",
-              severity: "info",
-              title: "后台导出已完成",
-              body: `${items.length.toLocaleString("zh-CN")} 条工作记录已生成，可以安全下载。`,
-              actionUrl: `/analytics?export=${claimed.id}`,
-              dedupeKey: `export-ready:${claimed.id}:${claimed.attempt}`,
-              validUntil: expiresAt,
-            })
-            .onConflictDoNothing();
-        }
         return true;
       });
+      if (completion) {
+        await notify({
+          organizationId: claimed.organizationId,
+          recipientMembershipId: claimed.requestedBy,
+          category: "export_ready",
+          severity: "info",
+          title: "后台导出已完成",
+          body: `${items.length.toLocaleString("zh-CN")} 条工作记录已生成，可以安全下载。`,
+          actionUrl: `/analytics?export=${claimed.id}`,
+          dedupeKey: `export-ready:${claimed.id}:${claimed.attempt}`,
+          validUntil: expiresAt,
+        });
+      }
       if (!completion) {
         await deleteObjectQuietly(store, objectKey);
       }
@@ -667,9 +677,6 @@ export function createExportJobRuntime(
           ? error
           : new WorkerExportError("export_generation_failed", false);
       const retryable = !normalized.permanent && claimed.attempt < claimed.maxAttempts;
-      const notificationAllowed =
-        !retryable &&
-        (await eventEnabled(db, claimed.requestedBy, "export_failed"));
       const failureRecorded = await db.transaction(async (tx) => {
         const [updated] = await tx
           .update(exportJobs)
@@ -680,12 +687,7 @@ export function createExportJobRuntime(
             startedAt: retryable ? null : claimed.startedAt,
             completedAt: retryable ? null : new Date(),
           })
-          .where(
-            and(
-              eq(exportJobs.id, claimed.id),
-              eq(exportJobs.status, "running"),
-            ),
-          )
+          .where(activeAttempt(claimed))
           .returning({ id: exportJobs.id });
         if (!updated || retryable) return Boolean(updated);
         await tx.insert(outboxEvents).values({
@@ -705,23 +707,20 @@ export function createExportJobRuntime(
           entityId: claimed.id,
           after: { errorCode: normalized.code, attempt: claimed.attempt },
         });
-        if (notificationAllowed) {
-          await tx
-            .insert(notifications)
-            .values({
-              organizationId: claimed.organizationId,
-              recipientMembershipId: claimed.requestedBy,
-              category: "export_failed",
-              severity: "warning",
-              title: "后台导出未完成",
-              body: messageForError(normalized.code),
-              actionUrl: `/analytics?export=${claimed.id}`,
-              dedupeKey: `export-failed:${claimed.id}:${claimed.attempt}`,
-            })
-            .onConflictDoNothing();
-        }
         return true;
       });
+      if (failureRecorded && !retryable) {
+        await notify({
+          organizationId: claimed.organizationId,
+          recipientMembershipId: claimed.requestedBy,
+          category: "export_failed",
+          severity: "warning",
+          title: "后台导出未完成",
+          body: messageForError(normalized.code),
+          actionUrl: `/analytics?export=${claimed.id}`,
+          dedupeKey: `export-failed:${claimed.id}:${claimed.attempt}`,
+        });
+      }
       if (!failureRecorded || !retryable) return;
       throw normalized;
     }

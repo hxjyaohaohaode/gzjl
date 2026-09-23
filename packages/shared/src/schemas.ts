@@ -1,7 +1,14 @@
 import { z } from "zod";
 
 export const uuidSchema = z.uuid();
-export const timezoneSchema = z.string().min(1).max(100);
+export const timezoneSchema = z.string().trim().min(1).max(100).refine((timezone) => {
+  try {
+    new Intl.DateTimeFormat("en", { timeZone: timezone });
+    return true;
+  } catch {
+    return false;
+  }
+}, "请选择有效的 IANA 时区，例如 Asia/Shanghai。");
 export const isoDateTimeSchema = z.iso.datetime({ offset: true });
 
 export const workSessionSources = ["manual", "timer", "import"] as const;

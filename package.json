@@ -17,7 +17,7 @@
     "test": "turbo test",
     "test:watch": "turbo test:watch --parallel",
     "test:e2e": "playwright test",
-    "test:live": "pnpm build && playwright test -c playwright.live.config.ts && playwright test -c playwright.engines.config.ts",
+    "test:live": "pnpm build && playwright test -c playwright.live.config.ts && playwright test -c playwright.wide.config.ts && playwright test -c playwright.engines.config.ts",
     "db:generate": "pnpm --filter @workbench/db db:generate",
     "db:migrate": "pnpm --filter @workbench/db db:migrate",
     "db:seed": "pnpm --filter @workbench/db db:seed",

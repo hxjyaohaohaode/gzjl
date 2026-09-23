@@ -639,9 +639,9 @@ export class EvidenceService {
     const [updated] = await this.db
       .update(attachments)
       .set({ status: "pending_upload", updatedAt: new Date() })
-      .where(and(eq(attachments.id, attachmentId), isNull(attachments.deletedAt)))
+      .where(and(eq(attachments.id, attachmentId), eq(attachments.version, attachment.version), eq(attachments.status, attachment.status), isNull(attachments.deletedAt)))
       .returning();
-    if (!updated) throw new EvidenceNotFoundError();
+    if (!updated) throw new EvidenceValidationError("文件状态已变化，请刷新证据列表后重试。");
     await this.db.insert(auditLogs).values({
       organizationId: actor.organizationId,
       actorMembershipId: actor.membershipId,
@@ -711,42 +711,44 @@ export class EvidenceService {
         await this.db
           .update(attachments)
           .set({ status: "quarantined", updatedAt: new Date() })
-          .where(eq(attachments.id, attachmentId));
+          .where(and(eq(attachments.id, attachmentId), eq(attachments.version, attachment.version), eq(attachments.status, "pending_upload"), isNull(attachments.deletedAt)));
       }
       throw error;
     }
-    const [updated] = await this.db
-      .update(attachments)
-      .set({ status: "available", updatedAt: new Date() })
-      .where(and(eq(attachments.id, attachmentId), eq(attachments.status, "pending_upload")))
-      .returning();
-    if (!updated) {
-      // Another device may have completed the same upload during verification.
-      // Return its committed status instead of our stale pending snapshot, and
-      // do not emit another completion audit/event for that upload.
-      const latest = await this.linkedAttachment(actor, attachmentId);
-      if (latest.attachment.status !== "available") {
-        throw new EvidenceValidationError("文件核验状态已变化，请刷新证据列表后重试。");
+    return this.db.transaction(async (tx) => {
+      const [updated] = await tx
+        .update(attachments)
+        .set({ status: "available", updatedAt: new Date() })
+        .where(and(eq(attachments.id, attachmentId), eq(attachments.version, attachment.version), eq(attachments.status, "pending_upload"), isNull(attachments.deletedAt)))
+        .returning();
+      if (!updated) {
+        // Another device may have completed the same upload during verification.
+        // Return its committed status instead of our stale pending snapshot, and
+        // do not emit another completion audit/event for that upload.
+        const [latest] = await tx.select().from(attachments).where(and(eq(attachments.id, attachmentId), eq(attachments.organizationId, actor.organizationId), isNull(attachments.deletedAt))).limit(1);
+        if (!latest || latest.version !== attachment.version || latest.status !== "available") {
+          throw new EvidenceValidationError("文件核验状态已变化，请刷新证据列表后重试。");
+        }
+        return { attachment: latest };
       }
-      return { attachment: latest.attachment };
-    }
-    await this.db.insert(auditLogs).values({
-      organizationId: actor.organizationId,
-      actorMembershipId: actor.membershipId,
-      action: "evidence.upload_completed",
-      entityType: "attachment",
-      entityId: attachmentId,
-      after: { sha256: attachment.sha256, sizeBytes: attachment.sizeBytes },
+      await tx.insert(auditLogs).values({
+        organizationId: actor.organizationId,
+        actorMembershipId: actor.membershipId,
+        action: "evidence.upload_completed",
+        entityType: "attachment",
+        entityId: attachmentId,
+        after: { sha256: attachment.sha256, sizeBytes: attachment.sizeBytes },
+      });
+      await tx.insert(outboxEvents).values({
+        organizationId: actor.organizationId,
+        eventType: "evidence.changed",
+        entityType: row.link.entityType,
+        entityId: row.link.entityId,
+        entityVersion: updated.version,
+        payload: { change: "upload_completed" },
+      });
+      return { attachment: updated };
     });
-    await this.db.insert(outboxEvents).values({
-      organizationId: actor.organizationId,
-      eventType: "evidence.changed",
-      entityType: "work_session",
-      entityId: row.link.entityId,
-      entityVersion: updated.version,
-      payload: { change: "upload_completed" },
-    });
-    return { attachment: updated };
   }
 
   async createReference(

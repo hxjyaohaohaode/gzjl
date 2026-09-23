@@ -4,7 +4,7 @@ import { createRoot } from "react-dom/client";
 import { BrowserRouter } from "react-router-dom";
 
 import { App } from "./app.js";
-import { startOfflineReplay } from "./offline.js";
+import { WorkspaceErrorBoundary } from "./error-boundary.js";
 import "./styles.css";
 
 const queryClient = new QueryClient({
@@ -19,7 +19,9 @@ const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
       staleTime: 30_000,
-      retry: 2,
+      // api() already bounds safe-read retries. Retrying again here multiplies
+      // delays and repeats permanent validation/authorization failures.
+      retry: false,
       refetchOnWindowFocus: false,
     },
   },
@@ -34,7 +36,7 @@ createRoot(rootElement).render(
   <StrictMode>
     <BrowserRouter>
       <QueryClientProvider client={queryClient}>
-        <App />
+        <WorkspaceErrorBoundary><App /></WorkspaceErrorBoundary>
       </QueryClientProvider>
     </BrowserRouter>
   </StrictMode>,
@@ -42,8 +44,8 @@ createRoot(rootElement).render(
 
 if ("serviceWorker" in navigator && import.meta.env.PROD) {
   window.addEventListener("load", () => {
-    void navigator.serviceWorker.register("/sw.js");
+    void navigator.serviceWorker.register("/sw.js").catch(() => {
+      // Installing the optional offline shell must not break the online app.
+    });
   });
 }
-
-startOfflineReplay();

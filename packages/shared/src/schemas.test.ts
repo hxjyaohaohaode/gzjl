@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { createWorkSessionSchema } from "./schemas.js";
+import { createWorkSessionSchema, timezoneSchema } from "./schemas.js";
 
 const primaryNodeId = "00000000-0000-4000-8000-000000000006";
 const auxiliaryNodeId = "00000000-0000-4000-8000-000000000007";
@@ -12,6 +12,11 @@ const baseInput = {
 };
 
 describe("createWorkSessionSchema project-node associations", () => {
+  it("rejects unsupported timezones before facts can poison calendar or payroll rendering", () => {
+    expect(timezoneSchema.parse(" Asia/Shanghai ")).toBe("Asia/Shanghai");
+    expect(timezoneSchema.parse("UTC")).toBe("UTC");
+    expect(createWorkSessionSchema.safeParse({ ...baseInput, timezone: "Invalid/Zone" }).success).toBe(false);
+  });
   it("accepts independent progress including zero and rejects unlinked, duplicate or conflicting reports", () => {
     const input = { ...baseInput, primaryProjectNodeId: primaryNodeId, projectNodeIds: [primaryNodeId, auxiliaryNodeId] };
     expect(createWorkSessionSchema.parse({ ...input, projectProgressUpdates: [{ projectNodeId: primaryNodeId, progress: 0 }, { projectNodeId: auxiliaryNodeId, progress: 100 }] }).projectProgressUpdates).toHaveLength(2);

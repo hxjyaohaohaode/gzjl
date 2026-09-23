@@ -22,6 +22,7 @@ import {
 } from "@workbench/db/schema";
 
 import type { AnalyticsActor, AnalyticsService } from "../analytics/service.js";
+import { canReadAiJob } from "../ai/access.js";
 
 export type SearchResultKind =
   | "work_session"
@@ -283,6 +284,8 @@ export class SearchService {
         title: aiReports.title,
         summary: aiReports.summary,
         generatedAt: aiReports.generatedAt,
+        scope: aiJobs.scope,
+        sourceSummary: aiJobs.sourceSummary,
       })
       .from(aiReports)
       .innerJoin(aiJobs, eq(aiJobs.id, aiReports.aiJobId))
@@ -349,7 +352,7 @@ export class SearchService {
         href: `/work#work-session-${item.sessionId}`,
         occurredAt: item.uploadedAt,
       })),
-      ...reports.map((item) => ({
+      ...reports.filter((item) => canReadAiJob(actor, item)).map((item) => ({
         id: item.id,
         kind: "ai_report" as const,
         title: item.title,

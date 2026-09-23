@@ -14,6 +14,7 @@ import {
 import { useRealtimeSync } from "./realtime.js";
 import { AppShell } from "./shell.js";
 import { setOrganizationTimezone } from "./timezone.js";
+import { startOfflineReplay } from "./offline.js";
 import {
   AiPage,
   AnalyticsPage,
@@ -38,9 +39,9 @@ import {
   WorkPage,
 } from "./pages.js";
 
-async function getMe(): Promise<Me | null> {
+async function getMe({ signal }: { signal: AbortSignal }): Promise<Me | null> {
   try {
-    const me = await api<Me>("/api/me");
+    const me = await api<Me>("/api/me", { signal });
     setOrganizationTimezone(me.user.timezone);
     return me;
   } catch (error) {
@@ -114,18 +115,9 @@ export function App() {
   const meQuery = useQuery({
     queryKey: ["me"],
     queryFn: getMe,
-    // A 401 is converted to `null` above. Other 4xx responses are not
-    // transient, whereas a network reset, 429, or a short server wake-up is.
-    // Retrying here prevents one brief Render/network interruption from
-    // turning into a permanent-looking full-screen error.
-    retry: (failureCount, error) =>
-      !(
-        error instanceof ApiError &&
-        error.status >= 400 &&
-        error.status < 500 &&
-        error.status !== 429
-      ) && failureCount < 3,
-    retryDelay: (attempt) => [1_000, 3_000, 6_000][attempt] ?? 8_000,
+    // A 401 becomes null. api() handles bounded transient read retries;
+    // retrying here again would multiply the login screen's waiting time.
+    retry: false,
   });
   useEffect(
     () =>
@@ -138,7 +130,19 @@ export function App() {
       }),
     [queryClient],
   );
-  const syncStatus = useRealtimeSync(Boolean(meQuery.data));
+  const membershipId = meQuery.data?.user.membershipId;
+  const syncStatus = useRealtimeSync(membershipId);
+  useEffect(() => {
+    if (membershipId) return startOfflineReplay(membershipId);
+  }, [membershipId]);
+  useEffect(() => {
+    const refresh = () => {
+      void queryClient.invalidateQueries({ queryKey: ["timer"] });
+      void queryClient.invalidateQueries({ queryKey: ["work-sessions"] });
+    };
+    window.addEventListener("workbench:timer-synced", refresh);
+    return () => window.removeEventListener("workbench:timer-synced", refresh);
+  }, [queryClient]);
   if (meQuery.isPending)
     return <AppConnectionState retryAttempt={meQuery.failureCount} />;
   if (meQuery.isError)
@@ -177,7 +181,7 @@ export function App() {
       <Route
         element={
           me ? (
-            <AppShell me={me} syncStatus={syncStatus} />
+            <AppShell key={me.user.membershipId} me={me} syncStatus={syncStatus} />
           ) : (
             <Navigate replace to="/login" />
           )

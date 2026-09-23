@@ -26,6 +26,7 @@ import {
   type CreateWorkSessionInput,
   workDurationAnomalyFlags,
 } from "@workbench/shared";
+import { lockPayrollInputs } from "../payroll/input-lock.js";
 
 export class WorkSessionConflictError extends Error {
   constructor(
@@ -74,6 +75,7 @@ type WorkRecordKind = "fact" | "plan";
 
 export interface WorkSessionListOptions {
   before?: Date | undefined;
+  beforeId?: string | undefined;
   from?: Date | undefined;
   to?: Date | undefined;
   recordKind?: WorkRecordKind | undefined;
@@ -143,7 +145,33 @@ function assertPlanWindow(startAt: Date, endAt: Date): void {
 }
 
 /** The subset shared by the root Drizzle client and a transaction client. */
-export type WorkExecutor = Pick<Database, "select" | "insert" | "update">;
+export type WorkExecutor = Pick<Database, "select" | "insert" | "update" | "execute">;
+
+async function lockWorkMember(db: WorkExecutor, actor: WorkActor): Promise<void> {
+  await lockPayrollInputs(db, actor.organizationId);
+  // Different drafts do not share a work_sessions row lock. Lock their owner
+  // before checking intervals so concurrent inserts/edits cannot both pass.
+  const [member] = await db.select({ id: orgMemberships.id }).from(orgMemberships).where(and(
+    eq(orgMemberships.id, actor.membershipId),
+    eq(orgMemberships.organizationId, actor.organizationId),
+    eq(orgMemberships.status, "active"),
+  )).for("update");
+  if (!member) throw new WorkSessionValidationError("成员已停用或不属于当前组织，请重新登录后核对。");
+}
+
+async function assertManualLookback(db: WorkExecutor, actor: WorkActor, startAt: Date): Promise<void> {
+  const now = new Date();
+  const [expectation] = await db.select({ lookbackDays: workExpectationProfiles.manualEntryLookbackDays })
+    .from(workExpectationProfiles).where(and(
+      eq(workExpectationProfiles.membershipId, actor.membershipId),
+      lt(workExpectationProfiles.effectiveFrom, now),
+      or(isNull(workExpectationProfiles.effectiveTo), gt(workExpectationProfiles.effectiveTo, now)),
+    )).orderBy(desc(workExpectationProfiles.effectiveFrom)).limit(1);
+  const lookbackDays = expectation?.lookbackDays ?? 7;
+  if (startAt < new Date(now.getTime() - lookbackDays * 86_400_000)) {
+    throw new WorkSessionValidationError(`手工补录仅允许追溯 ${lookbackDays} 天；更早记录需要提交更正申请。`);
+  }
+}
 
 export class WorkSessionService {
   constructor(private readonly db: Database) {}
@@ -405,6 +433,9 @@ export class WorkSessionService {
     input: CreateWorkSessionInput,
     requestMeta: { requestId?: string; userAgent?: string } = {},
   ) {
+    if (input.source !== "manual") {
+      throw new WorkSessionValidationError("手工录入只能使用手工来源；导入必须通过有权限的导入预览与确认流程。");
+    }
     return this.db.transaction((tx) =>
       this.createManualWithExecutor(tx, actor, input, requestMeta),
     );
@@ -463,6 +494,9 @@ export class WorkSessionService {
     }>,
     requestMeta: { requestId?: string; userAgent?: string } = {},
   ) {
+    if (records.some((record) => record.input.source !== "manual")) {
+      throw new WorkSessionValidationError("批量手工录入只能使用手工来源，不能伪装成计时或导入记录。");
+    }
     return this.db.transaction(async (tx) => {
       const created = [];
       for (const record of records) {
@@ -535,6 +569,11 @@ export class WorkSessionService {
         "导入目标成员不存在、已停用或不属于当前组织。",
       );
     }
+    // A sorted order also prevents two multi-member imports taking member
+    // locks in opposite order and deadlocking.
+    for (const membershipId of [...membershipIds].sort()) {
+      await lockWorkMember(db, { ...actor, membershipId });
+    }
     const created = [];
     for (const record of records) {
       created.push(
@@ -590,6 +629,7 @@ export class WorkSessionService {
     const anomalyFlags = workDurationAnomalyFlags(duration);
 
     return this.db.transaction(async (tx) => {
+      await lockWorkMember(tx, actor);
       const [current] = await tx
         .select()
         .from(workSessions)
@@ -830,6 +870,7 @@ export class WorkSessionService {
     options: { recordKind?: WorkRecordKind } = {},
   ) {
     const recordKind = options.recordKind ?? "fact";
+    await lockWorkMember(db, actor);
     if (input.source === "timer") {
       throw new WorkSessionValidationError(
         "计时来源必须由服务器计时状态机生成。",
@@ -1047,7 +1088,9 @@ export class WorkSessionService {
           options.recordKind
             ? eq(workSessions.recordKind, options.recordKind)
             : undefined,
-          options.before ? lt(workSessions.startAt, options.before) : undefined,
+          options.before ? (options.beforeId
+            ? or(lt(workSessions.startAt, options.before), and(eq(workSessions.startAt, options.before), lt(workSessions.id, options.beforeId)))
+            : lt(workSessions.startAt, options.before)) : undefined,
           options.from ? gt(workSessions.endAt, options.from) : undefined,
           options.to ? lt(workSessions.startAt, options.to) : undefined,
         ),
@@ -1108,11 +1151,21 @@ export class WorkSessionService {
         entry,
       ]);
     }
-    return sessions.map((session) => ({
-      ...session,
-      projectLinks: linksBySession.get(session.id) ?? [],
-      breaks: breaksBySession.get(session.id) ?? [],
-    }));
+    return sessions.map((session) => {
+      const sessionBreaks = breaksBySession.get(session.id) ?? [];
+      const startAt = options.from && options.from > session.startAt ? options.from : session.startAt;
+      const endAt = options.to && options.to < session.endAt ? options.to : session.endAt;
+      const periodNetSeconds = calculateWorkDuration({ startAt, endAt }, sessionBreaks.map((entry) => ({
+          startAt: entry.startAt > startAt ? entry.startAt : startAt,
+          endAt: entry.endAt < endAt ? entry.endAt : endAt,
+        })).filter((entry) => entry.startAt < entry.endAt)).netSeconds;
+      return {
+        ...session,
+        periodNetSeconds,
+        projectLinks: linksBySession.get(session.id) ?? [],
+        breaks: sessionBreaks,
+      };
+    });
   }
 
   /**
@@ -1157,6 +1210,7 @@ export class WorkSessionService {
     if (endAt <= startAt)
       throw new WorkSessionValidationError("结束时间必须晚于开始时间。");
     return this.db.transaction(async (tx) => {
+      await lockWorkMember(tx, actor);
       const [current] = await tx
         .select()
         .from(workSessions)
@@ -1175,6 +1229,9 @@ export class WorkSessionService {
         .for("update")
         .limit(1);
       if (!current) throw new WorkSessionVersionConflictError();
+      if (current.source !== "manual") {
+        throw new WorkSessionValidationError("只能改期手工草稿；计时和导入记录保留其原始事实链。");
+      }
       const recordKind: WorkRecordKind = isPlanRecord(current.recordKind)
         ? "plan"
         : "fact";
@@ -1183,6 +1240,7 @@ export class WorkSessionService {
       } else if (endAt > new Date(Date.now() + factualFutureGraceMs)) {
         throw new WorkSessionValidationError("结束时间不能晚于当前时间。");
       }
+      if (recordKind === "fact") await assertManualLookback(tx, actor, startAt);
       const originalDuration =
         current.endAt.getTime() - current.startAt.getTime();
       if (endAt.getTime() - startAt.getTime() !== originalDuration) {
@@ -1301,6 +1359,7 @@ export class WorkSessionService {
     expectedVersion: number,
   ) {
     return this.db.transaction(async (tx) => {
+      await lockWorkMember(tx, actor);
       const [current] = await tx
         .select()
         .from(workSessions)
@@ -1322,7 +1381,7 @@ export class WorkSessionService {
       if (!current) throw new WorkSessionVersionConflictError();
       if (
         current.endAt >
-        new Date(Date.now() + factualFutureGraceMs)
+        new Date()
       ) {
         throw new WorkSessionValidationError(
           "计划尚未结束，不能提前转成真实工时。请在实际完成后核对时间与结果再转换。",
@@ -1409,6 +1468,7 @@ export class WorkSessionService {
 
   async submit(actor: WorkActor, sessionId: string, expectedVersion: number) {
     return this.db.transaction(async (tx) => {
+      await lockPayrollInputs(tx, actor.organizationId);
       const evidence = await tx
         .select({
           id: attachments.id,
@@ -1543,6 +1603,7 @@ export class WorkSessionService {
     expectedVersion: number,
   ) {
     return this.db.transaction(async (tx) => {
+      await lockPayrollInputs(tx, actor.organizationId);
       const [current] = await tx
         .select()
         .from(workSessions)

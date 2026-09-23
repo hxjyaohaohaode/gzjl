@@ -29,8 +29,18 @@ function applicationServerKey(value: string): Uint8Array<ArrayBuffer> {
 }
 
 async function serviceWorkerRegistration(): Promise<ServiceWorkerRegistration> {
-  await navigator.serviceWorker.register("/sw.js");
-  return navigator.serviceWorker.ready;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      (async () => {
+        await navigator.serviceWorker.register("/sw.js");
+        return navigator.serviceWorker.ready;
+      })(),
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error("浏览器推送服务启动超时，请检查网络或刷新后重试。")), 10_000);
+      }),
+    ]);
+  } finally { clearTimeout(timer); }
 }
 
 export async function currentBrowserPushSubscription(): Promise<PushSubscription | null> {
@@ -95,16 +105,34 @@ export async function disableCurrentBrowserPush(): Promise<void> {
 /** Best effort: a failed API call must never trap a user in the current account. */
 export async function detachCurrentBrowserPushBeforeLogout(): Promise<void> {
   if (!pushBrowserSupported()) return;
-  const subscription = await currentBrowserPushSubscription().catch(() => null);
-  if (!subscription) return;
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  // Logout must not install a worker or wait indefinitely for optional Push.
+  // Abort prevents a delayed lookup from deleting a later account's subscription.
+  const cleanup = (async () => {
+    const registration = await navigator.serviceWorker.getRegistration();
+    if (!registration || controller.signal.aborted) return;
+    const subscription = await registration.pushManager.getSubscription();
+    if (!subscription || controller.signal.aborted) return;
+    // Stop delivery locally even if the server-side cleanup stalls.
+    await Promise.all([
+      subscription.unsubscribe().catch(() => false),
+      api("/api/push/subscriptions", {
+        method: "DELETE",
+        body: { endpoint: subscription.endpoint },
+        signal: controller.signal,
+        timeoutMs: 3_000,
+      }).catch(() => undefined),
+    ]);
+  })().catch(() => undefined);
   try {
-    await api("/api/push/subscriptions", {
-      method: "DELETE",
-      body: { endpoint: subscription.endpoint },
-    });
-  } catch {
-    // The provider will retire the now-unsubscribed endpoint on its next 410.
+    await Promise.race([
+      cleanup,
+      new Promise<void>((resolve) => {
+        timer = setTimeout(() => { controller.abort(); resolve(); }, 3_000);
+      }),
+    ]);
   } finally {
-    await subscription.unsubscribe().catch(() => false);
+    clearTimeout(timer);
   }
 }

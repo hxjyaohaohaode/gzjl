@@ -6,6 +6,7 @@ import {
   aiJobs,
   aiReports,
   aiReportSources,
+  auditLogs,
   orgMemberships,
   orgUnits,
   outboxEvents,
@@ -21,6 +22,7 @@ import { isAuthorized } from "../auth/authorization.js";
 import type { AnalyticsActor, AnalyticsService } from "../analytics/service.js";
 import type { PayrollService } from "../payroll/service.js";
 import type { AiConfigurationService } from "./configuration.js";
+import { aiPermissionSnapshot, canReadAiJob } from "./access.js";
 
 export const aiTaskTypes = [
   "daily_summary",
@@ -361,7 +363,8 @@ export class AiService {
     const conversationHistory = conversationRows
       .filter((entry) => {
         const jobScope = entry.job.scope as { conversationId?: unknown };
-        return (jobScope.conversationId || "primary") === conversationId;
+        return (jobScope.conversationId || "primary") === conversationId && canReadAiJob(actor, entry.job) &&
+          ((entry.job.scope as { scope?: string }).scope ?? "self") === scope;
       })
       .slice(0, 10)
       .reverse()
@@ -521,6 +524,7 @@ export class AiService {
           // identical (for example, empty) self summaries from reusing an
           // inaccessible job that the list/detail authorization would hide.
           requesterMembershipId: actor.membershipId,
+          permissionSnapshot: aiPermissionSnapshot(actor, scope),
           provider: {
             source: provider.source,
             baseUrl: provider.baseUrl,
@@ -553,20 +557,21 @@ export class AiService {
         .limit(1);
       if (existing) return existing;
       await this.configuration.assertQuota(actor.organizationId, tx);
-      const [job] = await tx.insert(aiJobs).values({ organizationId: actor.organizationId, requestedBy: actor.membershipId, scope: { scope, from, to, ...(question ? { question, conversationId, ...(pageContext ? { pageContext } : {}) } : {}) }, taskType, provider: "openai_compatible", model: provider.model, promptTemplateVersion: "structured-work-intelligence-v5-payroll", inputHash, sourceSummary, maxAttempts: provider.maxAttempts, maxOutputTokens: provider.maxOutputTokens }).returning();
+      const [job] = await tx.insert(aiJobs).values({ organizationId: actor.organizationId, requestedBy: actor.membershipId, scope: { scope, from, to, permissionSnapshot: aiPermissionSnapshot(actor, scope), ...(question ? { question, conversationId, ...(pageContext ? { pageContext } : {}) } : {}) }, taskType, provider: "openai_compatible", model: provider.model, promptTemplateVersion: "structured-work-intelligence-v5-payroll", inputHash, sourceSummary, maxAttempts: provider.maxAttempts, maxOutputTokens: provider.maxOutputTokens }).returning();
       if (!job) throw new Error("Failed to create AI job");
       await tx.insert(outboxEvents).values({ organizationId: actor.organizationId, eventType: "ai.job.queued", entityType: "ai_job", entityId: job.id, entityVersion: 1, payload: { jobId: job.id } });
       return job;
     });
   }
 
-  async list(actor: { organizationId: string; membershipId: string }) {
-    return this.db.select({ job: aiJobs, report: aiReports }).from(aiJobs).leftJoin(aiReports, eq(aiReports.aiJobId, aiJobs.id)).where(and(eq(aiJobs.organizationId, actor.organizationId), eq(aiJobs.requestedBy, actor.membershipId))).orderBy(desc(aiJobs.queuedAt)).limit(100);
+  async list(actor: AnalyticsActor) {
+    const items = await this.db.select({ job: aiJobs, report: aiReports }).from(aiJobs).leftJoin(aiReports, eq(aiReports.aiJobId, aiJobs.id)).where(and(eq(aiJobs.organizationId, actor.organizationId), eq(aiJobs.requestedBy, actor.membershipId))).orderBy(desc(aiJobs.queuedAt)).limit(100);
+    return items.filter((entry) => canReadAiJob(actor, entry.job));
   }
 
-  async detail(actor: { organizationId: string; membershipId: string }, reportId: string) {
+  async detail(actor: AnalyticsActor, reportId: string) {
     const [record] = await this.db.select({ job: aiJobs, report: aiReports }).from(aiReports).innerJoin(aiJobs, eq(aiJobs.id, aiReports.aiJobId)).where(and(eq(aiReports.id, reportId), eq(aiJobs.organizationId, actor.organizationId), eq(aiJobs.requestedBy, actor.membershipId))).limit(1);
-    if (!record) return null;
+    if (!record || !canReadAiJob(actor, record.job)) return null;
     const sources = await this.db.select().from(aiReportSources).where(eq(aiReportSources.aiReportId, reportId));
     return { ...record, sources };
   }
@@ -583,16 +588,27 @@ export class AiService {
     return updated;
   }
 
-  async retry(actor: { organizationId: string; membershipId: string }, jobId: string) {
+  async retry(actor: AnalyticsActor, jobId: string) {
     const [job] = await this.db.select().from(aiJobs).where(and(eq(aiJobs.id, jobId), eq(aiJobs.organizationId, actor.organizationId), eq(aiJobs.requestedBy, actor.membershipId))).limit(1);
     if (!job) return null;
     if (job.status !== "failed" && job.status !== "cancelled") {
       throw new AiJobConflictError("只有失败或已取消的任务可以重试。");
     }
-    const [updated] = await this.db.update(aiJobs).set({ status: "queued", attempt: 0, queuedAt: new Date(), startedAt: null, completedAt: null, cancelledAt: null, errorSummary: null }).where(and(eq(aiJobs.id, job.id), eq(aiJobs.status, job.status))).returning();
-    if (!updated) throw new AiJobConflictError("任务状态已经变化，请刷新后重试。");
-    await this.db.insert(outboxEvents).values({ organizationId: actor.organizationId, eventType: "ai.job.queued", entityType: "ai_job", entityId: job.id, entityVersion: job.attempt + 1, payload: { jobId: job.id, retry: true } });
-    return updated;
+    if (!canReadAiJob(actor, job)) {
+      throw new AiJobConflictError("当前权限已变化，请按现有权限重新发起分析。");
+    }
+    if (!await this.configuration.resolveEffective(actor.organizationId)) throw new AiUnavailableError();
+    return this.db.transaction(async (tx) => {
+      await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${actor.organizationId}))`);
+      await this.configuration.assertQuota(actor.organizationId, tx);
+      // Keep the original request date for quota accounting; each manual retry
+      // has a separate durable audit entry and consumes one additional request.
+      const [updated] = await tx.update(aiJobs).set({ status: "queued", attempt: 0, startedAt: null, completedAt: null, cancelledAt: null, errorSummary: null }).where(and(eq(aiJobs.id, job.id), eq(aiJobs.status, job.status))).returning();
+      if (!updated) throw new AiJobConflictError("任务状态已经变化，请刷新后重试。");
+      await tx.insert(auditLogs).values({ organizationId: actor.organizationId, actorMembershipId: actor.membershipId, action: "ai.job.manual_retry", entityType: "ai_job", entityId: job.id });
+      await tx.insert(outboxEvents).values({ organizationId: actor.organizationId, eventType: "ai.job.queued", entityType: "ai_job", entityId: job.id, entityVersion: job.attempt + 1, payload: { jobId: job.id, retry: true } });
+      return updated;
+    });
   }
 
   /**

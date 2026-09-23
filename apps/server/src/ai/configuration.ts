@@ -514,6 +514,11 @@ export class AiConfigurationService {
           gte(aiJobs.queuedAt, since),
         ),
       );
-    return Number(result?.value ?? 0);
+    const [retries] = await executor.select({ value: count() }).from(auditLogs).where(and(
+      eq(auditLogs.organizationId, organizationId),
+      eq(auditLogs.action, "ai.job.manual_retry"),
+      gte(auditLogs.createdAt, since),
+    ));
+    return Number(result?.value ?? 0) + Number(retries?.value ?? 0);
   }
 }

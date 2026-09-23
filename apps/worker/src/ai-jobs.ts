@@ -33,11 +33,23 @@ export async function recoverStaleAiJobs(db: Database, now = new Date()) {
 }
 
 export function createAiJobProcessor(db: Database, config: AiDeploymentConfig, notificationEventEnabled: (membershipId: string, category: string) => Promise<boolean>, providerFetch: typeof fetch = fetch) {
+  const notify = async (value: typeof notifications.$inferInsert) => {
+    try {
+      if (await notificationEventEnabled(value.recipientMembershipId, value.category)) {
+        await db.insert(notifications).values(value).onConflictDoNothing();
+      }
+    } catch {
+      // A preference/notification outage cannot roll back a paid report or
+      // cause another provider call. The job and realtime event are durable.
+      console.warn("AI job notification unavailable; job result preserved.");
+    }
+  };
   return async function processAiJob(jobId: string): Promise<void> {
     const [job] = await db.select().from(aiJobs).where(eq(aiJobs.id, jobId)).limit(1);
     if (!job || job.status !== "queued") return;
     const attempt = job.attempt + 1;
-    const [claimed] = await db.update(aiJobs).set({ status: "running", attempt, startedAt: new Date(), errorSummary: null }).where(and(eq(aiJobs.id, job.id), eq(aiJobs.status, "queued"))).returning({ id: aiJobs.id });
+    const startedAt = new Date();
+    const [claimed] = await db.update(aiJobs).set({ status: "running", attempt, startedAt, errorSummary: null }).where(and(eq(aiJobs.id, job.id), eq(aiJobs.status, "queued"))).returning({ id: aiJobs.id });
     if (!claimed) return;
     let maxAttempts = job.maxAttempts;
     try {
@@ -45,7 +57,7 @@ export function createAiJobProcessor(db: Database, config: AiDeploymentConfig, n
       if (!provider) throw new AiProviderResponseError("组织 AI 已停用或密钥不可用，请检查组织配置与 Worker 的加密密钥。");
       maxAttempts = provider.maxAttempts;
       // Take URL, key, model and options from the same current configuration.
-      const [active] = await db.update(aiJobs).set({ model: provider.model, maxOutputTokens: provider.maxOutputTokens, maxAttempts }).where(and(eq(aiJobs.id, job.id), eq(aiJobs.status, "running"), eq(aiJobs.attempt, attempt))).returning({ id: aiJobs.id });
+      const [active] = await db.update(aiJobs).set({ model: provider.model, maxOutputTokens: provider.maxOutputTokens, maxAttempts }).where(and(eq(aiJobs.id, job.id), eq(aiJobs.status, "running"), eq(aiJobs.attempt, attempt), eq(aiJobs.startedAt, startedAt))).returning({ id: aiJobs.id });
       if (!active) return;
       const payload = await requestAiChatCompletion(provider, [
         { role: "system", content: buildAiSystemPrompt(job.taskType) },
@@ -53,19 +65,20 @@ export function createAiJobProcessor(db: Database, config: AiDeploymentConfig, n
       ], providerFetch);
       const output = parseAiJson(payload.content);
       const sourceSummary = job.sourceSummary as { sources?: Array<{ entityType: string; entityId: string; entityVersion?: string; label: string }> };
-      await db.transaction(async (tx) => {
+      const completed = await db.transaction(async (tx) => {
         // Completion and cancellation race on the same conditional update. If
         // cancellation won while the provider request was in flight, discard
         // the paid response instead of resurrecting the cancelled job.
-        const [completedJob] = await tx.update(aiJobs).set({ status: "completed", completedAt: new Date(), errorSummary: null, inputTokens: payload.usage?.prompt_tokens ?? null, outputTokens: payload.usage?.completion_tokens ?? null, providerRequestId: payload.id ?? null }).where(and(eq(aiJobs.id, job.id), eq(aiJobs.status, "running"), eq(aiJobs.attempt, attempt))).returning({ id: aiJobs.id });
-        if (!completedJob) return;
+        const [completedJob] = await tx.update(aiJobs).set({ status: "completed", completedAt: new Date(), errorSummary: null, inputTokens: payload.usage?.prompt_tokens ?? null, outputTokens: payload.usage?.completion_tokens ?? null, providerRequestId: payload.id ?? null }).where(and(eq(aiJobs.id, job.id), eq(aiJobs.status, "running"), eq(aiJobs.attempt, attempt), eq(aiJobs.startedAt, startedAt))).returning({ id: aiJobs.id });
+        if (!completedJob) return null;
         const [report] = await tx.insert(aiReports).values({ aiJobId: job.id, title: output.title, summary: output.summary, structuredOutput: output, sourceCount: sourceSummary.sources?.length ?? 0 }).onConflictDoNothing().returning();
         if (report && sourceSummary.sources?.length) {
           await tx.insert(aiReportSources).values(sourceSummary.sources.map((source) => ({ aiReportId: report.id, entityType: source.entityType, entityId: source.entityId, entityVersion: source.entityVersion, label: source.label }))).onConflictDoNothing();
         }
         await tx.insert(outboxEvents).values({ organizationId: job.organizationId, eventType: "ai.report.completed", entityType: "ai_job", entityId: job.id, entityVersion: attempt, payload: { jobId: job.id, reportId: report?.id ?? null } });
-        if (await notificationEventEnabled(job.requestedBy, "ai_report_ready")) await tx.insert(notifications).values({ organizationId: job.organizationId, recipientMembershipId: job.requestedBy, category: "ai_report_ready", severity: "info", title: "AI 工作洞察已生成", body: output.title, actionUrl: report ? `/ai?report=${report.id}` : "/ai", dedupeKey: `ai-report:${job.id}` }).onConflictDoNothing();
+        return { reportId: report?.id };
       });
+      if (completed) await notify({ organizationId: job.organizationId, recipientMembershipId: job.requestedBy, category: "ai_report_ready", severity: "info", title: "AI 工作洞察已生成", body: output.title, actionUrl: completed.reportId ? `/ai?report=${completed.reportId}` : "/ai", dedupeKey: `ai-report:${job.id}` });
     } catch (error) {
       const finalFailure = attempt >= maxAttempts || (error instanceof AiProviderResponseError && !error.retryable);
       const errorSummary = (() => {
@@ -85,7 +98,7 @@ export function createAiJobProcessor(db: Database, config: AiDeploymentConfig, n
         return "AI 供应商暂时不可用，请检查组织配置或稍后重试。";
       })();
       const failureRecorded = await db.transaction(async (tx) => {
-        const [updatedJob] = await tx.update(aiJobs).set({ status: finalFailure ? "failed" : "queued", errorSummary, completedAt: finalFailure ? new Date() : null }).where(and(eq(aiJobs.id, job.id), eq(aiJobs.status, "running"), eq(aiJobs.attempt, attempt))).returning({ id: aiJobs.id });
+        const [updatedJob] = await tx.update(aiJobs).set({ status: finalFailure ? "failed" : "queued", errorSummary, completedAt: finalFailure ? new Date() : null }).where(and(eq(aiJobs.id, job.id), eq(aiJobs.status, "running"), eq(aiJobs.attempt, attempt), eq(aiJobs.startedAt, startedAt))).returning({ id: aiJobs.id });
         if (!updatedJob) return false;
         if (finalFailure) {
           await tx.insert(outboxEvents).values({ organizationId: job.organizationId, eventType: "ai.report.failed", entityType: "ai_job", entityId: job.id, entityVersion: attempt, payload: { jobId: job.id } });
@@ -96,7 +109,7 @@ export function createAiJobProcessor(db: Database, config: AiDeploymentConfig, n
       // failure that pg-boss should retry or notify about.
       if (!failureRecorded) return;
       if (finalFailure) {
-        if (await notificationEventEnabled(job.requestedBy, "ai_report_failed")) await db.insert(notifications).values({ organizationId: job.organizationId, recipientMembershipId: job.requestedBy, category: "ai_report_failed", severity: "warning", title: "AI 报告生成失败", body: "事实数据未受影响，可以稍后重试生成报告。", actionUrl: "/ai", dedupeKey: `ai-report-failed:${job.id}` }).onConflictDoNothing();
+        await notify({ organizationId: job.organizationId, recipientMembershipId: job.requestedBy, category: "ai_report_failed", severity: "warning", title: "AI 报告生成失败", body: "事实数据未受影响，可以稍后重试生成报告。", actionUrl: "/ai", dedupeKey: `ai-report-failed:${job.id}` });
       }
       // Queue logs must never serialize an upstream error's credential-bearing cause.
       // eslint-disable-next-line preserve-caught-error

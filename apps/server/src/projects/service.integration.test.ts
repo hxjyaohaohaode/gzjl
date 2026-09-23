@@ -82,6 +82,22 @@ async function createFixture() {
 }
 
 describe("project node derived work-line transaction", () => {
+  it("does not restore or roll back a child into a deleted parent", async () => {
+    const { actor, service, project, branch, root } = await createFixture();
+    const parent = await service.createNode(actor, project.id, { branchId: branch.id, parentId: root.id, type: "task", title: "将删除的父节点", progress: 0, sortOrder: 1 });
+    const child = await service.createNode(actor, project.id, { branchId: branch.id, parentId: parent.id, type: "task", title: "历史子节点", progress: 0, sortOrder: 1 });
+    const moved = await service.moveNode(actor, project.id, child.id, child.version, root.id, 1);
+    await service.deleteNode(actor, project.id, parent.id, parent.version);
+    await expect(service.rollbackNode(actor, project.id, child.id, 1, moved.version)).rejects.toThrow("父节点");
+    await service.restoreNode(actor, project.id, parent.id);
+    const rolledBack = await service.rollbackNode(actor, project.id, child.id, 1, moved.version);
+    await service.deleteNode(actor, project.id, child.id, rolledBack.version);
+    const latestParent = (await service.tree(actor, project.id, true)).nodes.find((node) => node.id === parent.id)!;
+    await service.deleteNode(actor, project.id, parent.id, latestParent.version);
+    await expect(service.restoreNode(actor, project.id, child.id)).rejects.toThrow("先恢复父节点");
+    await service.restoreNode(actor, project.id, parent.id);
+    expect((await service.restoreNode(actor, project.id, child.id)).parentId).toBe(parent.id);
+  });
   it("lets an employee join and claim without replacing collaborators or another responsible member", async () => {
     const { db, actor, service, project, root } = await createFixture();
     const [user] = await db.insert(users).values({ displayName: "主动认领员工", status: "active" }).returning();

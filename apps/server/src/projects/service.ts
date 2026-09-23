@@ -1699,6 +1699,7 @@ export class ProjectService {
     changes: UpdateBranchInput,
   ) {
     return this.db.transaction(async (tx) => {
+      await tx.select({ id: projects.id }).from(projects).where(and(eq(projects.id, projectId), eq(projects.organizationId, actor.organizationId))).for("update");
       const [before] = await tx
         .select()
         .from(projectBranches)
@@ -2216,6 +2217,7 @@ export class ProjectService {
       );
     }
     return this.db.transaction(async (tx) => {
+      await tx.select({ id: projects.id }).from(projects).where(and(eq(projects.id, projectId), eq(projects.organizationId, actor.organizationId))).for("update");
       const [branch] = await tx
         .select({ id: projectBranches.id })
         .from(projectBranches)
@@ -2403,6 +2405,7 @@ export class ProjectService {
     sortOrder: number,
   ) {
     return this.db.transaction(async (tx) => {
+      await tx.select({ id: projects.id }).from(projects).where(and(eq(projects.id, projectId), eq(projects.organizationId, actor.organizationId))).for("update");
       const [node] = await tx
         .select()
         .from(projectNodes)
@@ -2431,9 +2434,11 @@ export class ProjectService {
         throw new ProjectTreeValidationError("目标父节点不在当前分支中。");
       }
       let cursor = parentId;
+      const visited = new Set<string>();
       while (cursor) {
-        if (cursor === nodeId)
+        if (cursor === nodeId || visited.has(cursor))
           throw new ProjectTreeValidationError("移动会造成项目树循环。");
+        visited.add(cursor);
         cursor = parentById.get(cursor) ?? null;
       }
       const [updated] = await tx
@@ -2489,6 +2494,7 @@ export class ProjectService {
     expectedVersion: number,
   ) {
     return this.db.transaction(async (tx) => {
+      await tx.select({ id: projects.id }).from(projects).where(and(eq(projects.id, projectId), eq(projects.organizationId, actor.organizationId))).for("update");
       const [versionRecord] = await tx
         .select({ snapshot: projectNodeVersions.snapshot })
         .from(projectNodeVersions)
@@ -2501,6 +2507,13 @@ export class ProjectService {
         .limit(1);
       if (!versionRecord) throw new ProjectNotFoundError();
       const snapshot = versionRecord.snapshot as ProjectNodeVersionSnapshot;
+      if (snapshot.parentId) {
+        const [parent] = await tx.select({ id: projectNodes.id }).from(projectNodes).where(and(
+          eq(projectNodes.id, snapshot.parentId), eq(projectNodes.projectId, projectId),
+          eq(projectNodes.branchId, snapshot.branchId), isNull(projectNodes.deletedAt),
+        )).limit(1);
+        if (!parent) throw new ProjectTreeValidationError("历史版本的父节点已删除或不在当前工作线，请先恢复父节点后再回滚。");
+      }
       const [updated] = await tx
         .update(projectNodes)
         .set({
@@ -2624,6 +2637,7 @@ export class ProjectService {
     expectedVersion: number,
   ) {
     return this.db.transaction(async (tx) => {
+      await tx.select({ id: projects.id }).from(projects).where(and(eq(projects.id, projectId), eq(projects.organizationId, actor.organizationId))).for("update");
       const descendants = await tx
         .select({ id: projectNodes.id })
         .from(projectNodes)
@@ -2663,7 +2677,12 @@ export class ProjectService {
         snapshot: deleted,
         deletedBy: actor.membershipId,
         restoreUntil: new Date(Date.now() + 30 * 86_400_000),
+      }).onConflictDoUpdate({
+        target: [recycleBinEntries.entityType, recycleBinEntries.entityId],
+        set: { snapshot: deleted, deletedBy: actor.membershipId, deletedAt: new Date(),
+          restoreUntil: new Date(Date.now() + 30 * 86_400_000), restoredAt: null, restoredBy: null },
       });
+      await this.recordNodeVersion(tx, deleted, "删除节点并移入回收站", actor.membershipId);
       await tx.insert(projectActivityLog).values({
         projectId,
         actorMembershipId: actor.membershipId,
@@ -2684,6 +2703,7 @@ export class ProjectService {
 
   async restoreNode(actor: ProjectActor, projectId: string, nodeId: string) {
     return this.db.transaction(async (tx) => {
+      await tx.select({ id: projects.id }).from(projects).where(and(eq(projects.id, projectId), eq(projects.organizationId, actor.organizationId))).for("update");
       const [entry] = await tx
         .select()
         .from(recycleBinEntries)
@@ -2699,9 +2719,18 @@ export class ProjectService {
       if (!entry || (entry.restoreUntil && entry.restoreUntil < new Date())) {
         throw new ProjectNotFoundError();
       }
+      const [current] = await tx.select().from(projectNodes).where(and(eq(projectNodes.id, nodeId), eq(projectNodes.projectId, projectId))).for("update").limit(1);
+      if (!current) throw new ProjectNotFoundError();
+      if (current.parentId) {
+        const [parent] = await tx.select({ id: projectNodes.id }).from(projectNodes).where(and(
+          eq(projectNodes.id, current.parentId), eq(projectNodes.projectId, projectId),
+          eq(projectNodes.branchId, current.branchId), isNull(projectNodes.deletedAt),
+        )).limit(1);
+        if (!parent) throw new ProjectTreeValidationError("请先恢复父节点，再恢复其子节点。");
+      }
       const [restored] = await tx
         .update(projectNodes)
-        .set({ deletedAt: null, updatedAt: new Date() })
+        .set({ deletedAt: null, version: current.version + 1, updatedAt: new Date() })
         .where(
           and(
             eq(projectNodes.id, nodeId),
@@ -2710,6 +2739,7 @@ export class ProjectService {
         )
         .returning();
       if (!restored) throw new ProjectNotFoundError();
+      await this.recordNodeVersion(tx, restored, "从回收站恢复节点", actor.membershipId);
       await tx
         .update(recycleBinEntries)
         .set({ restoredAt: new Date(), restoredBy: actor.membershipId })

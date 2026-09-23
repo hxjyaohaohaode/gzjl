@@ -20,12 +20,13 @@ import {
   UserRound,
   UsersRound,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Badge, Button, Card, cn } from "@workbench/ui";
 
 import { api, ApiError, type Me } from "./api.js";
+import { useVersionedDraft } from "./versioned-draft.js";
 import {
   ErrorMessage,
   fieldClass,
@@ -1355,27 +1356,32 @@ function UnitInspector({
   onClose: () => void;
 }) {
   const queryClient = useQueryClient();
-  const [form, setForm] = useState({
+  const draft = useVersionedDraft(unit.version, {
     name: unit.name,
     description: unit.description ?? "",
     parentId: unit.parentId ?? "",
     leaderMembershipId: unit.leaderMembershipId ?? "",
   });
+  const form = draft.value;
+  const setForm = draft.setValue;
   const refresh = () =>
     queryClient.invalidateQueries({ queryKey: ["organization"] });
   const update = useMutation({
     mutationFn: () =>
-      api(`/api/organization/units/${unit.id}`, {
+      api<{ unit: OrganizationUnit }>(`/api/organization/units/${unit.id}`, {
         method: "PATCH",
         body: {
-          expectedVersion: unit.version,
+          expectedVersion: draft.version,
           name: form.name,
           description: form.description.trim() || null,
           parentId: form.parentId || null,
           leaderMembershipId: form.leaderMembershipId || null,
         },
       }),
-    onSuccess: refresh,
+    onSuccess: async ({ unit: savedUnit }) => {
+      draft.saved(savedUnit.version, { name: savedUnit.name, description: savedUnit.description ?? "", parentId: savedUnit.parentId ?? "", leaderMembershipId: savedUnit.leaderMembershipId ?? "" });
+      await refresh();
+    },
   });
   const archive = useMutation({
     mutationFn: () =>
@@ -1424,7 +1430,10 @@ function UnitInspector({
           <p className="organization-inspector-description">
             移动单元会先校验环路；归档前需先处理子单元与在岗成员。
           </p>
-          <div className="mt-3 grid gap-3">
+          {draft.conflict ? <p role="alert" className="mt-3 text-sm">该单元已在其他操作中更新。你的草稿仍已保留，请先核对最新版本。
+            <Button size="compact" variant="secondary" onClick={() => { if (window.confirm("放弃当前未保存的单元修改，并加载最新版本？")) draft.acceptLatest(); }}>放弃草稿并加载最新</Button>
+          </p> : null}
+          <fieldset className="mt-3 grid gap-3" disabled={update.isPending || archive.isPending}>
             <Field label="单元名称">
               <input
                 className={fieldClass}
@@ -1486,7 +1495,7 @@ function UnitInspector({
               />
             </Field>
             <Button
-              disabled={update.isPending || !form.name.trim()}
+              disabled={update.isPending || draft.conflict || !form.name.trim()}
               onClick={() => update.mutate()}
               variant="secondary"
             >
@@ -1508,7 +1517,7 @@ function UnitInspector({
             >
               归档该单元
             </Button>
-          </div>
+          </fieldset>
         </section>
         <ErrorMessage error={update.error ?? archive.error} />
       </div>
@@ -1724,6 +1733,7 @@ function OrganizationSidebar({
             }}
           >
             <input
+              aria-label="新组织单元名称"
               className={fieldClass}
               onChange={(event) => setNewUnitName(event.target.value)}
               placeholder={
@@ -1772,6 +1782,7 @@ function OrganizationSidebar({
             }}
           >
             <input
+              aria-label="新专业身份名称"
               className={fieldClass}
               maxLength={120}
               onChange={(event) => setIdentityName(event.target.value)}
@@ -1780,6 +1791,7 @@ function OrganizationSidebar({
               value={identityName}
             />
             <input
+              aria-label="专业身份说明（可选）"
               className={fieldClass}
               maxLength={2000}
               onChange={(event) => setIdentityDescription(event.target.value)}
@@ -1900,6 +1912,7 @@ function OrganizationSidebar({
             }}
           >
             <input
+              aria-label="邀请成员姓名"
               className={fieldClass}
               onChange={(event) =>
                 setInvite({ ...invite, displayName: event.target.value })
@@ -1988,6 +2001,7 @@ function OrganizationSidebar({
                   : "邮件和短信均未配置；默认手工链接可立即使用，不会尝试伪造投递。"}
             </p>
             <input
+              aria-label="邀请成员岗位（可选）"
               className={fieldClass}
               onChange={(event) =>
                 setInvite({ ...invite, positionTitle: event.target.value })
@@ -1996,6 +2010,7 @@ function OrganizationSidebar({
               value={invite.positionTitle}
             />
             <select
+              aria-label="邀请成员所属组织单元"
               className={fieldClass}
               onChange={(event) =>
                 setInvite({ ...invite, orgUnitId: event.target.value })
@@ -2123,14 +2138,18 @@ export function OrganizationPage({ me }: { me: Me }) {
   const [tab, setTab] = useState<OrganizationTab>("tree");
   const [selectedUnitId, setSelectedUnitId] = useState<string | null>(null);
   const [selectedMemberId, setSelectedMemberId] = useState<string | null>(null);
+  const openedMemberLink = useRef<string | null>(null);
   const overview = organization.data;
   useEffect(() => {
     const memberId = searchParams.get("member");
+    if (!memberId) openedMemberLink.current = null;
     if (
       memberId &&
+      openedMemberLink.current !== memberId &&
       overview?.members.some((member) => member.membership.id === memberId)
     ) {
       const frame = window.requestAnimationFrame(() => {
+        openedMemberLink.current = memberId;
         setSelectedMemberId(memberId);
         setSelectedUnitId(null);
         setTab("members");
@@ -2181,7 +2200,7 @@ export function OrganizationPage({ me }: { me: Me }) {
     />
   ) : selectedUnit ? (
     <UnitInspector
-      key={`${selectedUnit.id}-${selectedUnit.version}`}
+      key={selectedUnit.id}
       onClose={closeInspector}
       overview={overview!}
       unit={selectedUnit}
@@ -2481,7 +2500,8 @@ export function OrganizationPage({ me }: { me: Me }) {
           {selectedInspector}
         </div>
       ) : null}
-      <ErrorMessage error={organization.error ?? projects.error} />
+      <ErrorMessage error={organization.error} onRetry={() => void organization.refetch()} retrying={organization.isFetching} />
+      <ErrorMessage error={projects.error} onRetry={() => void projects.refetch()} retrying={projects.isFetching} />
     </>
   );
 }

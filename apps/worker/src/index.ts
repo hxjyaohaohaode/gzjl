@@ -30,6 +30,7 @@ import {
 import { createExportJobRuntime } from "./export-jobs.js";
 import { createAiJobProcessor, recoverStaleAiJobs } from "./ai-jobs.js";
 import { createS3CompatibleClient } from "./s3-compatible-client.js";
+import { currentPushEligibility } from "./push-eligibility.js";
 import {
   isPermanentWebPushFailure,
   isWithinQuietHours,
@@ -135,7 +136,7 @@ if (pushReady) {
 async function notificationEventEnabled(membershipId: string, category: string): Promise<boolean> {
   const [preference] = await database.db.select().from(notificationPreferences).where(and(eq(notificationPreferences.membershipId, membershipId), eq(notificationPreferences.category, category))).limit(1);
   if (!preference) return true;
-  if (preference.mutedUntil && preference.mutedUntil > new Date()) return false;
+  // Muting delays display/delivery; keep the event so it is not lost forever.
   return preference.inAppEnabled || preference.pushEnabled;
 }
 
@@ -407,6 +408,9 @@ async function schedulePushDeliveries(): Promise<void> {
       .where(
         and(
           inArray(notifications.recipientMembershipId, membershipIds),
+          isNull(notifications.readAt),
+          isNull(notifications.handledAt),
+          isNull(notifications.ignoredAt),
           gte(notifications.createdAt, new Date(now.getTime() - 7 * 86_400_000)),
           or(
             isNull(notifications.validUntil),
@@ -494,6 +498,17 @@ async function dispatchPushDeliveries(): Promise<void> {
     .limit(50);
 
   for (const candidate of candidates) {
+    const eligibility = await currentPushEligibility(database.db, candidate.notification.id, candidate.subscription.id);
+    if (eligibility.decision === "defer") {
+      await database.db.update(notificationDeliveries).set({ nextAttemptAt: new Date(Date.now() + 60_000), updatedAt: new Date() })
+        .where(and(eq(notificationDeliveries.id, candidate.delivery.id), eq(notificationDeliveries.status, candidate.delivery.status)));
+      continue;
+    }
+    if (eligibility.decision === "cancel") {
+      await database.db.update(notificationDeliveries).set({ status: "cancelled", errorSummary: "push_no_longer_eligible", updatedAt: new Date() })
+        .where(and(eq(notificationDeliveries.id, candidate.delivery.id), eq(notificationDeliveries.status, candidate.delivery.status)));
+      continue;
+    }
     const [claimed] = await database.db
       .update(notificationDeliveries)
       .set({
@@ -518,18 +533,18 @@ async function dispatchPushDeliveries(): Promise<void> {
       await webPush.sendNotification(
         {
           endpoint: decryptScopedSecret(
-            candidate.subscription.endpointCiphertext,
+            eligibility.subscription.endpointCiphertext,
             encryptionKey,
             "push.endpoint",
           ),
           keys: {
             p256dh: decryptScopedSecret(
-              candidate.subscription.p256dhCiphertext,
+              eligibility.subscription.p256dhCiphertext,
               encryptionKey,
               "push.p256dh",
             ),
             auth: decryptScopedSecret(
-              candidate.subscription.authCiphertext,
+              eligibility.subscription.authCiphertext,
               encryptionKey,
               "push.auth",
             ),
@@ -543,6 +558,7 @@ async function dispatchPushDeliveries(): Promise<void> {
           tag: candidate.notification.dedupeKey,
         }),
         {
+          timeout: 30_000,
           TTL: Math.max(
             60,
             Math.min(
@@ -574,12 +590,14 @@ async function dispatchPushDeliveries(): Promise<void> {
             and(
               eq(notificationDeliveries.id, candidate.delivery.id),
               eq(notificationDeliveries.status, "running"),
+              eq(notificationDeliveries.attempts, claimed.attempts),
+              eq(notificationDeliveries.lastAttemptAt, now),
             ),
           );
         await tx
           .update(pushSubscriptions)
           .set({ lastSuccessAt: new Date() })
-          .where(eq(pushSubscriptions.id, candidate.subscription.id));
+          .where(and(eq(pushSubscriptions.id, candidate.subscription.id), eq(pushSubscriptions.endpointCiphertext, eligibility.subscription.endpointCiphertext)));
       });
     } catch (error) {
       const status = webPushStatusCode(error);
@@ -591,7 +609,7 @@ async function dispatchPushDeliveries(): Promise<void> {
           await tx
             .update(pushSubscriptions)
             .set({ disabledAt: new Date() })
-            .where(eq(pushSubscriptions.id, candidate.subscription.id));
+            .where(and(eq(pushSubscriptions.id, candidate.subscription.id), eq(pushSubscriptions.endpointCiphertext, eligibility.subscription.endpointCiphertext)));
           await tx
             .update(notificationDeliveries)
             .set({
@@ -599,7 +617,7 @@ async function dispatchPushDeliveries(): Promise<void> {
               errorSummary,
               updatedAt: new Date(),
             })
-            .where(eq(notificationDeliveries.id, candidate.delivery.id));
+            .where(and(eq(notificationDeliveries.id, candidate.delivery.id), eq(notificationDeliveries.status, "running"), eq(notificationDeliveries.attempts, claimed.attempts), eq(notificationDeliveries.lastAttemptAt, now)));
         });
         continue;
       }
@@ -613,7 +631,7 @@ async function dispatchPushDeliveries(): Promise<void> {
           ),
           updatedAt: new Date(),
         })
-        .where(eq(notificationDeliveries.id, candidate.delivery.id));
+        .where(and(eq(notificationDeliveries.id, candidate.delivery.id), eq(notificationDeliveries.status, "running"), eq(notificationDeliveries.attempts, claimed.attempts), eq(notificationDeliveries.lastAttemptAt, now)));
     }
   }
 }

@@ -1,7 +1,7 @@
 import { aiGenerationOptionsSchema, type AiGenerationOptions } from "@workbench/shared";
 import { WorkProgressReporter } from "./work-progress-reporter.js";
 import { ReimbursementPanel } from "./reimbursement-panel.js";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { EChartsCoreOption } from "echarts/core";
 import {
   AlertCircle,
@@ -44,10 +44,11 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
   type InputHTMLAttributes,
   type ReactNode,
 } from "react";
-import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { Link, useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { Badge, Button, Card, CardContent, CardHeader } from "@workbench/ui";
 
 import {
@@ -59,8 +60,13 @@ import {
   type Me,
 } from "./api.js";
 import { readableForeground } from "./color.js";
+import { escapeChartText } from "./chart-options.js";
+import { fetchExportFile } from "./export-download.js";
+import { endCurrentSession } from "./session.js";
+import { clearSubmittedWorkEditorBackup, flushWorkEditorBackup, hasWorkEditorBackupContent, readWorkEditorBackup, sameWorkEditorBackup, WORK_EDITOR_SUBMITTED_EVENT, type WorkEditorBackup, type WorkEditorSubmittedEvent } from "./work-editor-backup.js";
+import { getWorkEntryActionTime } from "./work-entry-clock.js";
 import { completeEvidenceUpload, putEvidenceFile, type EvidenceUploadReceipt } from "./evidence-upload.js";
-import { sendQueueableTimerEvent } from "./offline.js";
+import { discardQueuedTimerEvents, getOfflineTimerStatus, queuedTimerEventsForReview, replayOfflineTimerEvents, sendQueueableTimerEvent, subscribeOfflineTimerStatus } from "./offline.js";
 import {
   getOrganizationTimezone,
   toZonedInputValue,
@@ -68,7 +74,6 @@ import {
 } from "./timezone.js";
 import {
   currentBrowserPushSubscription,
-  detachCurrentBrowserPushBeforeLogout,
   disableCurrentBrowserPush,
   enableCurrentBrowserPush,
   pushBrowserSupported,
@@ -256,7 +261,7 @@ export function EmptyState({
   );
 }
 
-export function ErrorMessage({ error }: { error: unknown }) {
+export function ErrorMessage({ error, onRetry, retrying = false }: { error: unknown; onRetry?: (() => void) | undefined; retrying?: boolean }) {
   if (!error) return null;
   return (
     <div
@@ -264,16 +269,17 @@ export function ErrorMessage({ error }: { error: unknown }) {
       role="alert"
     >
       <AlertCircle className="mt-0.5 shrink-0" size={17} />
-      <span>
+      <span className="min-w-0 flex-1 break-words">
         {error instanceof Error ? error.message : "操作失败，请重试。"}
       </span>
+      {onRetry ? <Button variant="secondary" size="compact" disabled={retrying} onClick={onRetry}>{retrying ? "正在重试…" : "重新加载"}</Button> : null}
     </div>
   );
 }
 
 export function LoadingBlock() {
   return (
-    <div className="flex min-h-48 flex-col items-center justify-center gap-3 text-sm text-[var(--text-muted)]">
+    <div role="status" aria-live="polite" className="flex min-h-48 flex-col items-center justify-center gap-3 text-sm text-[var(--text-muted)]">
       <span className="grid size-9 place-items-center rounded-xl bg-[var(--surface-subtle)] text-[var(--accent-strong)]">
         <LoaderCircle className="animate-spin" size={17} />
       </span>
@@ -347,6 +353,8 @@ function formatWorkAnomaly(flag: string): string {
       return "净工时不足 1 分钟，需复核";
     case "gross_duration_over_16_hours":
       return "总时段超过 16 小时，需复核";
+    case "overlapping_work_requires_review":
+      return "时段重叠，需核对";
     default:
       return "该记录需要人工复核";
   }
@@ -428,7 +436,7 @@ export function LoginPage() {
     queryClient.removeQueries({
       predicate: (query) => query.queryKey[0] !== "me",
     });
-    await queryClient.invalidateQueries({ queryKey: ["me"] });
+    await queryClient.resetQueries({ queryKey: ["me"], exact: true });
     notifySessionChanged();
     navigate("/", { replace: true });
   };
@@ -2209,18 +2217,7 @@ function ExistingSessionHandoff({
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const logout = useMutation({
-    mutationFn: async () => {
-      await detachCurrentBrowserPushBeforeLogout();
-      return api<void>("/api/auth/logout", { method: "POST" });
-    },
-    onSuccess: () => {
-      resetCsrfToken();
-      queryClient.removeQueries({
-        predicate: (query) => query.queryKey[0] !== "me",
-      });
-      queryClient.setQueryData(["me"], null);
-      notifySessionChanged();
-    },
+    mutationFn: () => endCurrentSession(queryClient),
   });
   if (!currentSession) return null;
   return (
@@ -2955,7 +2952,6 @@ interface LocalManualPrefill {
   projectProgressUpdates?: Record<string, string>;
 }
 
-const manualPrefillStorageKey = "workbench:manual-work-prefill:v1";
 interface TimerState {
   id: string;
   status: "running" | "paused" | "on_break";
@@ -3236,21 +3232,28 @@ function evidenceUploadStateLabel(state: EvidenceUploadState): string {
   }
 }
 
-function currentOrganizationWeekRange(): { from: string; to: string } {
+function currentOrganizationWeekRange(at = new Date()): { from: string; to: string } {
   const timezone = getOrganizationTimezone();
-  const today = toZonedInputValue(new Date(), timezone).slice(0, 10);
+  const today = toZonedInputValue(at, timezone).slice(0, 10);
   const calendarDate = new Date(`${today}T00:00:00.000Z`);
   const daysSinceMonday = (calendarDate.getUTCDay() + 6) % 7;
   calendarDate.setUTCDate(calendarDate.getUTCDate() - daysSinceMonday);
   const monday = calendarDate.toISOString().slice(0, 10);
   return {
     from: zonedInputToDate(`${monday}T00:00:00`, timezone).toISOString(),
-    to: new Date().toISOString(),
+    to: at.toISOString(),
   };
 }
 
 export function HomePage({ me }: { me: Me }) {
-  const currentWeek = useMemo(() => currentOrganizationWeekRange(), []);
+  const [homeClock, setHomeClock] = useState(() => Date.now());
+  useEffect(() => {
+    const refresh = () => setHomeClock(Date.now());
+    const timer = window.setInterval(refresh, 60_000);
+    window.addEventListener("focus", refresh);
+    return () => { window.clearInterval(timer); window.removeEventListener("focus", refresh); };
+  }, []);
+  const currentWeek = useMemo(() => currentOrganizationWeekRange(new Date(homeClock)), [homeClock]);
   const work = useQuery({
     queryKey: ["work-sessions", "home", "fact", 5],
     queryFn: () =>
@@ -3267,9 +3270,10 @@ export function HomePage({ me }: { me: Me }) {
       me.user.membershipId,
     ],
     queryFn: () => {
+      const range = currentOrganizationWeekRange();
       const query = new URLSearchParams({
-        from: currentWeek.from,
-        to: currentWeek.to,
+        from: range.from,
+        to: range.to,
         memberIds: me.user.membershipId,
       });
       return api<{ totals: { totalSeconds: number } }>(
@@ -3332,7 +3336,7 @@ export function HomePage({ me }: { me: Me }) {
             <CardContent>
               {timer.isPending ? (
                 <LoadingBlock />
-              ) : activeTimer ? (
+              ) : timer.isError ? (<ErrorMessage error={timer.error} onRetry={() => void timer.refetch()} retrying={timer.isFetching} />) : activeTimer ? (
                 <div className="flex flex-col gap-6 sm:flex-row sm:items-end sm:justify-between">
                   <div>
                     <p className="text-2xl font-extrabold tracking-[-0.04em]">
@@ -3380,11 +3384,12 @@ export function HomePage({ me }: { me: Me }) {
                   本周已记录工时
                 </p>
                 <p className="text-2xl font-extrabold tracking-[-0.04em] tabular-nums">
-                  {weeklyWork.isPending
+                  {weeklyWork.isPending || weeklyWork.isError
                     ? "—"
                     : formatDuration(weeklyWork.data?.totals.totalSeconds ?? 0)}
                 </p>
                 <p className="mt-1 text-xs text-[var(--text-muted)]">周一至现在 · 仅本人事实记录</p>
+                <ErrorMessage error={weeklyWork.error} onRetry={() => void weeklyWork.refetch()} retrying={weeklyWork.isFetching} />
               </CardContent>
             </Card>
             <Card className="home-stat-card">
@@ -3393,7 +3398,7 @@ export function HomePage({ me }: { me: Me }) {
                   最近 5 条待审核
                 </p>
                 <p className="text-2xl font-extrabold tracking-[-0.04em] tabular-nums">
-                  {pendingCount}
+                  {work.isPending || work.isError ? "—" : pendingCount}
                   <span className="ml-1 text-sm font-semibold text-[var(--text-muted)]">
                     条
                   </span>
@@ -3418,6 +3423,8 @@ export function HomePage({ me }: { me: Me }) {
             <CardContent className="pt-5">
               {work.isPending ? (
                 <LoadingBlock />
+              ) : work.isError ? (
+                <ErrorMessage error={work.error} onRetry={() => void work.refetch()} retrying={work.isFetching} />
               ) : factualWork.length ? (
                 <div className="divide-y divide-[var(--border)]">
                   {factualWork.map((item) => (
@@ -4902,32 +4909,79 @@ function TimerProjectAssociation({
 
 export function WorkPage() {
   const queryClient = useQueryClient();
+  const membershipId = queryClient.getQueryData<Me>(["me"])?.user.membershipId;
+  const manualPrefillStorageKey = `workbench:manual-work-prefill:v2:${membershipId}`;
+  const [recoveredBackup] = useState(() => readWorkEditorBackup(membershipId, getOrganizationTimezone()));
+  const editorOwner = useRef<object>({});
+  const editorMounted = useRef(false);
+  useEffect(() => {
+    editorMounted.current = true;
+    return () => { editorMounted.current = false; };
+  }, []);
+  const latestEditorBackup = useRef<WorkEditorBackup | null | undefined>(undefined);
+  const ownsEditorBackup = useRef(Boolean(recoveredBackup));
+  const [backupUnavailable, setBackupUnavailable] = useState(false);
+  const offlineTimer = useSyncExternalStore(subscribeOfflineTimerStatus, getOfflineTimerStatus);
+  const queuedReview = useQuery({
+    queryKey: ["offline-timer-review", membershipId, offlineTimer.count],
+    queryFn: queuedTimerEventsForReview,
+    enabled: offlineTimer.count > 0 && Boolean(offlineTimer.error),
+    staleTime: 0,
+  });
+  const discardOffline = useMutation({
+    mutationFn: (ids: string[]) => discardQueuedTimerEvents(ids),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["timer"] });
+      await queryClient.invalidateQueries({ queryKey: ["work-sessions"] });
+      setSaveMessage("已放弃所选本机待同步操作，服务器已保存的记录保持不变；请核对当前计时状态。");
+    },
+  });
   const [entryNow, setEntryNow] = useState(() => Date.now());
   useEffect(() => {
     const timer = window.setInterval(() => setEntryNow(Date.now()), 60_000);
     return () => window.clearInterval(timer);
   }, []);
-  const [showForm, setShowForm] = useState(false);
+  const [showForm, setShowForm] = useState(Boolean(recoveredBackup));
   const now = new Date();
-  const [manual, setManual] = useState<ManualWorkDraft>({
+  const [initialManualTimes, setInitialManualTimes] = useState(() => recoveredBackup?.initialTimes ?? {
+    startAt: recoveredBackup?.manual.startAt ?? localInput(new Date(now.getTime() - 60 * 60_000)),
+    endAt: recoveredBackup?.manual.endAt ?? localInput(now),
+  });
+  const [manual, setManual] = useState<ManualWorkDraft>(recoveredBackup?.manual ?? {
     content: "",
     result: "",
     blockers: "",
     nextStep: "",
-    startAt: localInput(new Date(now.getTime() - 60 * 60_000)),
-    endAt: localInput(now),
+    startAt: initialManualTimes.startAt,
+    endAt: initialManualTimes.endAt,
     visibility: "management_only",
     parallelWork: false,
   });
-  const [primaryEvidence, setPrimaryEvidence] = useState<PendingWorkEvidence>({
-    url: "",
-    text: "",
+  const [unselectedEvidenceFiles, setUnselectedEvidenceFiles] = useState<Record<string, string[]>>(() => ({
+    primary: recoveredBackup?.evidence.fileNames ?? [],
+    ...Object.fromEntries((recoveredBackup?.segments ?? []).map((segment) => [segment.id, segment.evidence.fileNames])),
+  }));
+  const [primaryEvidence, setPrimaryEvidenceState] = useState<PendingWorkEvidence>({
+    url: recoveredBackup?.evidence.url ?? "",
+    text: recoveredBackup?.evidence.text ?? "",
     files: [],
   });
+  const setPrimaryEvidence = (value: PendingWorkEvidence) => {
+    setPrimaryEvidenceState(value);
+    setUnselectedEvidenceFiles((current) => ({ ...current, primary: (current.primary ?? []).filter((name) => !value.files.some((file) => file.name === name)) }));
+  };
   const [additionalSegments, setAdditionalSegments] = useState<
     AdditionalWorkSegment[]
-  >([]);
+  >(recoveredBackup?.segments.map((segment) => ({ ...segment, evidence: { url: segment.evidence.url, text: segment.evidence.text, files: [] } })) ?? []);
+  const manualEndTime = safeLocalInputDate(manual.endAt).getTime();
+  const nextSegmentStartTime = safeLocalInputDate(additionalSegments.at(-1)?.endAt ?? manual.endAt).getTime();
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
+  useEffect(() => {
+    const synced = () => setSaveMessage((message) => message?.startsWith("计时操作已保存在本机")
+      ? getOfflineTimerStatus().count === 0 ? "计时操作已同步，正在核对服务器状态。" : message : message);
+    window.addEventListener("workbench:timer-synced", synced);
+    return () => window.removeEventListener("workbench:timer-synced", synced);
+  }, []);
   const [failedEvidence, setFailedEvidence] = useState<FailedWorkEvidence[]>([]);
   const retryEvidence = useMutation({
     mutationFn: async () => {
@@ -4946,7 +5000,7 @@ export function WorkPage() {
   });
   const [manualBreaks, setManualBreaks] = useState<
     Array<{ id: string; startAt: string; endAt: string }>
-  >([]);
+  >(recoveredBackup?.breaks ?? []);
   const [editingSession, setEditingSession] = useState<WorkSession | null>(
     null,
   );
@@ -4954,7 +5008,10 @@ export function WorkPage() {
   const [correctionSession, setCorrectionSession] =
     useState<WorkSession | null>(null);
   const [correctionReason, setCorrectionReason] = useState("");
-  const [prefillMessage, setPrefillMessage] = useState<string | null>(null);
+  const [prefillMessage, setPrefillMessage] = useState<string | null>(() => {
+    if (!recoveredBackup) return null;
+    return "已恢复此标签页尚未保存的录入，请核对时间后再保存。";
+  });
   const [timerContent, setTimerContent] = useState("");
   const [timerLinkedProjectId, setTimerLinkedProjectId] = useState("");
   const [timerPrimaryProjectNodeId, setTimerPrimaryProjectNodeId] =
@@ -4962,12 +5019,13 @@ export function WorkPage() {
   const [timerLinkedProjectNodes, setTimerLinkedProjectNodes] = useState<
     LinkedProjectNode[]
   >([]);
-  const [linkedProjectId, setLinkedProjectId] = useState("");
-  const [primaryProjectNodeId, setPrimaryProjectNodeId] = useState("");
+  const [linkedProjectId, setLinkedProjectId] = useState(recoveredBackup?.linkedProjectId ?? "");
+  const [primaryProjectNodeId, setPrimaryProjectNodeId] = useState(recoveredBackup?.primaryProjectNodeId ?? "");
   const [linkedProjectNodes, setLinkedProjectNodes] = useState<
     LinkedProjectNode[]
-  >([]);
-  const [projectProgressUpdates, setProjectProgressUpdates] = useState<Record<string, string>>({});
+  >(recoveredBackup?.linkedProjectNodes ?? []);
+  const [projectProgressUpdates, setProjectProgressUpdates] = useState<Record<string, string>>(recoveredBackup?.projectProgressUpdates ?? {});
+  const suspendedNewEntry = useRef<{ backup: WorkEditorBackup; primaryEvidence: PendingWorkEvidence; segments: AdditionalWorkSegment[]; unselectedFiles: Record<string, string[]>; showForm: boolean; message: string | null } | null>(null);
   const [projectNodeSearch, setProjectNodeSearch] = useState("");
   const [recommendationQuery, setRecommendationQuery] = useState("");
   useEffect(() => {
@@ -4982,11 +5040,45 @@ export function WorkPage() {
     }, 280);
     return () => window.clearTimeout(debounceTimer);
   }, [manual.content, manual.result, projectNodeSearch]);
-  const work = useQuery({
+  const workPages = useInfiniteQuery({
     queryKey: ["work-sessions", "work-editor", "all", 100],
-    queryFn: () =>
-      api<{ items: WorkSession[] }>("/api/work-sessions?limit=100"),
+    initialPageParam: "",
+    queryFn: ({ pageParam, signal }) => api<{ items: WorkSession[]; nextCursor?: string | null }>(`/api/work-sessions?limit=100${pageParam ? `&before=${encodeURIComponent(pageParam)}` : ""}`, { signal }),
+    getNextPageParam: (last, _pages, _lastParam, allParams) => last.nextCursor && !allParams.includes(last.nextCursor) ? last.nextCursor : undefined,
   });
+  const workData = useMemo(() => workPages.data ? { items: [...new Map(workPages.data.pages.flatMap((page) => page.items).map((item) => [item.id, item])).values()] } : undefined, [workPages.data]);
+  const work = { ...workPages, isError: workPages.isError && !workData, data: workData };
+  const newEntryBackup = useMemo<WorkEditorBackup>(() => {
+    const evidenceBackup = (value: PendingWorkEvidence, id: string) => ({ url: value.url, text: value.text, fileNames: [...new Set([...(unselectedEvidenceFiles[id] ?? []), ...value.files.map((file) => file.name)])] });
+    return {
+      version: 1, timezone: getOrganizationTimezone(), savedAt: new Date().toISOString(), manual,
+      initialTimes: initialManualTimes,
+      breaks: manualBreaks, evidence: evidenceBackup(primaryEvidence, "primary"),
+      segments: additionalSegments.map((segment) => ({ ...segment, evidence: evidenceBackup(segment.evidence, segment.id) })),
+      linkedProjectId, primaryProjectNodeId, linkedProjectNodes, projectProgressUpdates,
+    };
+  }, [manual, initialManualTimes, manualBreaks, primaryEvidence, additionalSegments, linkedProjectId, primaryProjectNodeId, linkedProjectNodes, projectProgressUpdates, unselectedEvidenceFiles]);
+  const missingEvidenceFiles = [
+    ...(unselectedEvidenceFiles.primary ?? []),
+    ...additionalSegments.flatMap((segment) => unselectedEvidenceFiles[segment.id] ?? []),
+  ];
+  useEffect(() => {
+    if (editingSession || correctionSession) { latestEditorBackup.current = undefined; return; }
+    const snapshot = hasWorkEditorBackupContent(newEntryBackup) ? newEntryBackup : null;
+    latestEditorBackup.current = snapshot;
+    const timer = window.setTimeout(() => {
+      const saved = flushWorkEditorBackup(membershipId, snapshot, ownsEditorBackup.current);
+      if (saved === undefined) return;
+      if (saved) ownsEditorBackup.current = Boolean(snapshot);
+      setBackupUnavailable(!saved);
+    }, 400);
+    return () => window.clearTimeout(timer);
+  }, [membershipId, newEntryBackup, editingSession, correctionSession]);
+  useEffect(() => {
+    const flush = () => { flushWorkEditorBackup(membershipId, latestEditorBackup.current, ownsEditorBackup.current); };
+    window.addEventListener("pagehide", flush);
+    return () => { window.removeEventListener("pagehide", flush); flush(); };
+  }, [membershipId]);
   const corrections = useQuery({
     queryKey: ["work-corrections-mine"],
     queryFn: () =>
@@ -5100,8 +5192,41 @@ export function WorkPage() {
     );
     setLinkedProjectId(node.projectId);
   };
+  const preserveNewEntry = () => {
+    if (editingSession || correctionSession) return;
+    suspendedNewEntry.current = { backup: newEntryBackup, primaryEvidence, segments: additionalSegments, unselectedFiles: unselectedEvidenceFiles, showForm, message: prefillMessage };
+    const snapshot = hasWorkEditorBackupContent(newEntryBackup) ? newEntryBackup : null;
+    const saved = flushWorkEditorBackup(membershipId, snapshot, ownsEditorBackup.current);
+    if (saved === true) ownsEditorBackup.current = Boolean(snapshot);
+    if (saved === false) setBackupUnavailable(true);
+  };
   const resetManualEditor = () => {
+    const suspended = suspendedNewEntry.current;
+    suspendedNewEntry.current = null;
+    if (suspended) {
+      const backup = suspended.backup;
+      setEditingSession(null);
+      setCorrectionSession(null);
+      setCorrectionReason("");
+      setManual(backup.manual);
+      setInitialManualTimes(backup.initialTimes ?? { startAt: backup.manual.startAt, endAt: backup.manual.endAt });
+      setManualBreaks(backup.breaks);
+      setPrimaryEvidenceState(suspended.primaryEvidence);
+      setAdditionalSegments(suspended.segments);
+      setUnselectedEvidenceFiles(suspended.unselectedFiles);
+      setLinkedProjectId(backup.linkedProjectId);
+      setPrimaryProjectNodeId(backup.primaryProjectNodeId);
+      setLinkedProjectNodes(backup.linkedProjectNodes);
+      setProjectProgressUpdates(backup.projectProgressUpdates);
+      setProjectNodeSearch("");
+      setPrefillMessage(suspended.message);
+      setShowForm(suspended.showForm);
+      latestEditorBackup.current = hasWorkEditorBackupContent(backup) ? backup : null;
+      return;
+    }
     const resetAt = new Date();
+    const resetTimes = { startAt: localInput(new Date(resetAt.getTime() - 60 * 60_000)), endAt: localInput(resetAt) };
+    setInitialManualTimes(resetTimes);
     setEditingSession(null);
     setCorrectionSession(null);
     setCorrectionReason("");
@@ -5110,13 +5235,13 @@ export function WorkPage() {
       result: "",
       blockers: "",
       nextStep: "",
-      startAt: localInput(new Date(resetAt.getTime() - 60 * 60_000)),
-      endAt: localInput(resetAt),
+      ...resetTimes,
       visibility: "management_only",
       parallelWork: false,
     });
     setManualBreaks([]);
     setPrimaryEvidence({ url: "", text: "", files: [] });
+    setUnselectedEvidenceFiles({});
     setAdditionalSegments([]);
     setLinkedProjectId("");
     setPrimaryProjectNodeId("");
@@ -5124,7 +5249,28 @@ export function WorkPage() {
     setProjectProgressUpdates({});
     setProjectNodeSearch("");
     setPrefillMessage(null);
+    setShowForm(false);
   };
+  useEffect(() => {
+    const completed = (event: Event) => {
+      const detail = (event as CustomEvent<WorkEditorSubmittedEvent>).detail;
+      if (!detail || detail.membershipId !== membershipId || detail.editor === editorOwner.current) return;
+      // A reopened editor must not resurrect a submitted snapshot on pagehide.
+      // A newer edited snapshot is intentionally untouched, even before debounce.
+      if (suspendedNewEntry.current && sameWorkEditorBackup(suspendedNewEntry.current.backup, detail.backup)) {
+        suspendedNewEntry.current = null;
+        ownsEditorBackup.current = false;
+      }
+      const current = latestEditorBackup.current;
+      if (!current || !sameWorkEditorBackup(current, detail.backup)) return;
+      latestEditorBackup.current = null;
+      ownsEditorBackup.current = false;
+      resetManualEditor();
+      setSaveMessage("此前提交的录入已保存，请在工作记录中核对。");
+    };
+    window.addEventListener(WORK_EDITOR_SUBMITTED_EVENT, completed);
+    return () => window.removeEventListener(WORK_EDITOR_SUBMITTED_EVENT, completed);
+  });
   const refresh = async () => {
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ["work-sessions"] }),
@@ -5141,6 +5287,7 @@ export function WorkPage() {
   };
   const create = useMutation({
     mutationFn: async (recordKind: "fact" | "plan") => {
+      const submittedAt = getWorkEntryActionTime();
       if (linkedProjectId && !primaryProjectNodeId) {
         throw new Error("已选择项目，请再选择一个主项目节点，工时才能归集到项目；也可清空关联项目后保存。");
       }
@@ -5148,13 +5295,13 @@ export function WorkPage() {
         const evidenceMissingFor: string[] = [];
         const primaryIsFact =
           recordKind === "fact" &&
-          zonedInputToDate(manual.endAt).getTime() <= Date.now() + 5 * 60_000;
+          zonedInputToDate(manual.endAt).getTime() <= submittedAt + 5 * 60_000;
         if (primaryIsFact && !hasPendingWorkEvidence(primaryEvidence)) {
           evidenceMissingFor.push("第 1 段");
         }
         additionalSegments.forEach((segment, index) => {
           const isFact =
-            zonedInputToDate(segment.endAt).getTime() <= Date.now() + 5 * 60_000;
+            zonedInputToDate(segment.endAt).getTime() <= submittedAt + 5 * 60_000;
           if (isFact && !hasPendingWorkEvidence(segment.evidence)) {
             evidenceMissingFor.push(`第 ${index + 2} 段`);
           }
@@ -5207,14 +5354,14 @@ export function WorkPage() {
           method: "POST",
           body: { ...body, reason: correctionReason.trim() },
         });
-        return { savedCount: 1, evidenceFailures: [] as FailedWorkEvidence[] };
+        return { savedCount: 1, evidenceFailures: [] as FailedWorkEvidence[], submittedBackup: null };
       }
       if (editingSession) {
         await api("/api/work-sessions/" + editingSession.id, {
           method: "PATCH",
           body: { ...body, expectedVersion: editingSession.version },
         });
-        return { savedCount: 1, evidenceFailures: [] as FailedWorkEvidence[] };
+        return { savedCount: 1, evidenceFailures: [] as FailedWorkEvidence[], submittedBackup: null };
       }
 
       const allSegments = [
@@ -5242,7 +5389,7 @@ export function WorkPage() {
       const entries = allSegments.map((segment) => ({
         recordKind:
           segment.requestedKind === "plan" ||
-          new Date(segment.input.endAt).getTime() > Date.now() + 5 * 60_000
+          new Date(segment.input.endAt).getTime() > submittedAt + 5 * 60_000
             ? ("plan" as const)
             : ("fact" as const),
         input: segment.input,
@@ -5276,32 +5423,44 @@ export function WorkPage() {
           )),
         );
       }
-      return { savedCount: sessions.length, evidenceFailures };
+      return { savedCount: sessions.length, evidenceFailures, submittedBackup: newEntryBackup };
     },
     onSuccess: async (result) => {
+      if (result.submittedBackup) {
+        clearSubmittedWorkEditorBackup(membershipId, result.submittedBackup);
+        window.dispatchEvent(new CustomEvent<WorkEditorSubmittedEvent>(WORK_EDITOR_SUBMITTED_EVENT, { detail: { membershipId, backup: result.submittedBackup, editor: editorOwner.current } }));
+      }
+      if (!editorMounted.current) { await refresh(); return; }
       setFailedEvidence((current) => [...current, ...result.evidenceFailures]);
+      if (editingSession || correctionSession) {
+        setConflictSessionId(null);
+        resetManualEditor();
+        setSaveMessage("已保存当前修改，其他尚未保存的新录入仍已保留。");
+        await refresh();
+        return;
+      }
+      latestEditorBackup.current = null;
+      ownsEditorBackup.current = false;
       setConflictSessionId(null);
       setShowForm(false);
       setEditingSession(null);
       setCorrectionSession(null);
       setCorrectionReason("");
-      try {
-        window.localStorage.removeItem(manualPrefillStorageKey);
-      } catch {
-        // The factual record has been saved; inability to clear an optional
-        // browser-only prefill must not make the successful write look failed.
-      }
+      // Explicit local prefills belong to the user until they choose Delete.
       setPrefillMessage(null);
+      setInitialManualTimes({ startAt: manual.startAt, endAt: manual.endAt });
       setManual((current) => ({
         ...current,
         content: "",
         result: "",
         blockers: "",
         nextStep: "",
+        visibility: "management_only",
         parallelWork: false,
       }));
       setManualBreaks([]);
       setPrimaryEvidence({ url: "", text: "", files: [] });
+      setUnselectedEvidenceFiles({});
       setAdditionalSegments([]);
       setLinkedProjectId("");
       setPrimaryProjectNodeId("");
@@ -5324,7 +5483,7 @@ export function WorkPage() {
   });
   const startTimer = useMutation({
     mutationFn: () =>
-      sendQueueableTimerEvent("/api/timer/start", {
+      sendQueueableTimerEvent<{ timer: TimerState }>("/api/timer/start", {
         eventId: crypto.randomUUID(),
         occurredAt: new Date().toISOString(),
         content: timerContent,
@@ -5333,7 +5492,11 @@ export function WorkPage() {
         primaryProjectNodeId: timerPrimaryProjectNodeId || null,
         projectNodeIds: timerLinkedProjectNodes.map((node) => node.id),
       }),
-    onSuccess: async () => {
+    onSuccess: async (response) => {
+      if ("queuedOffline" in response) {
+        setSaveMessage("计时操作已保存在本机，等待同步。当前仍显示服务器上次确认的状态。");
+        return;
+      }
       setTimerContent("");
       setTimerLinkedProjectId("");
       setTimerPrimaryProjectNodeId("");
@@ -5349,12 +5512,18 @@ export function WorkPage() {
       timerId: string;
       eventType: string;
     }) =>
-      sendQueueableTimerEvent(`/api/timer/${timerId}/events`, {
+      sendQueueableTimerEvent<{ timer: TimerState }>(`/api/timer/${timerId}/events`, {
         eventId: crypto.randomUUID(),
         eventType,
         occurredAt: new Date().toISOString(),
       }),
-    onSuccess: refresh,
+    onSuccess: async (response) => {
+      if ("queuedOffline" in response) {
+        setSaveMessage("计时操作已保存在本机，等待同步。请先同步再进行下一步计时操作。");
+        return;
+      }
+      await refresh();
+    },
   });
   const submit = useMutation({
     mutationFn: (item: WorkSession) =>
@@ -5384,6 +5553,7 @@ export function WorkPage() {
     onSuccess: refresh,
   });
   const openDraftEditor = (item: WorkSession) => {
+    preserveNewEntry();
     setConflictSessionId(null);
     setEditingSession(item);
     setCorrectionSession(null);
@@ -5439,6 +5609,7 @@ export function WorkPage() {
     });
   }, [work.data]);
   const openCorrectionEditor = (item: WorkSession) => {
+    preserveNewEntry();
     setEditingSession(null);
     setCorrectionSession(item);
     setCorrectionReason("");
@@ -5620,6 +5791,7 @@ export function WorkPage() {
         description="记录真实工作区间、休息、结果与项目归属；提交后进入版本化审核链。"
         actions={
           <Button
+            disabled={create.isPending}
             onClick={() => {
               if (
                 showForm &&
@@ -5632,8 +5804,10 @@ export function WorkPage() {
               ) {
                 return;
               }
-              if (showForm && (editingSession || correctionSession))
+              if (showForm && (editingSession || correctionSession)) {
                 resetManualEditor();
+                return;
+              }
               setShowForm((value) => !value);
             }}
             variant={showForm ? "secondary" : "primary"}
@@ -5650,6 +5824,29 @@ export function WorkPage() {
           <button aria-label="关闭保存结果" onClick={() => setSaveMessage(null)} type="button">×</button>
         </div>
       ) : null}
+      {offlineTimer.count > 0 || offlineTimer.error ? (
+        <div className="offline-timer-status" role="status">
+          <div><strong>{offlineTimer.count} 项计时操作待同步</strong>
+            <p>操作保留在当前浏览器，仅原账号可同步。同步前显示上次确认的计时状态。</p>
+            {offlineTimer.error ? <p className="text-[var(--danger)]">{offlineTimer.error}</p> : null}
+            {offlineTimer.error && offlineTimer.count > 0 ? <details className="mt-3">
+              <summary className="cursor-pointer py-2">查看并处理待同步操作</summary>
+              {queuedReview.data?.map((item) => <p key={item.id}>
+                {formatDateTime(String(item.body.occurredAt ?? item.queuedAt))} · {({ start: "开始计时", pause: "暂停", resume: "继续", break_start: "开始休息", break_end: "结束休息", stop: "结束计时" } as Record<string, string>)[String(item.body.eventType ?? "start")] ?? "计时操作"}
+                {typeof item.body.content === "string" ? ` · ${item.body.content}` : ""}
+              </p>)}
+              <p>如果已在其他设备处理，请先核对服务器状态，再放弃这里列出的本机操作。放弃后可手工补录，服务器已保存的记录不会撤销。</p>
+              <Button className="mt-2" variant="secondary" disabled={offlineTimer.syncing || discardOffline.isPending || !queuedReview.data?.length}
+                onClick={() => {
+                  const items = queuedReview.data ?? [];
+                  if (window.confirm(`确定放弃上方 ${items.length} 项本机待同步操作？此操作不能恢复；服务器上已经保存的记录不会被撤销，请先核对。`)) discardOffline.mutate(items.map((item) => item.id));
+                }}>放弃这些本机操作</Button>
+              <ErrorMessage error={queuedReview.error ?? discardOffline.error} />
+            </details> : null}
+          </div>
+          <Button disabled={offlineTimer.syncing} onClick={() => void replayOfflineTimerEvents()} variant="secondary">{offlineTimer.syncing ? "正在同步…" : "重试同步"}</Button>
+        </div>
+      ) : null}
       {failedEvidence.length ? (
         <Card className="mb-5"><CardContent>
           <p className="font-bold">证据待完成，工作记录已保存</p>
@@ -5661,7 +5858,7 @@ export function WorkPage() {
       {showForm ? (
         <Card className="work-editor mb-5">
           <div className="work-editor-grid">
-            <div className="work-editor-form">
+            <fieldset className="work-editor-form min-w-0" disabled={create.isPending} aria-busy={create.isPending}>
               <div className="work-editor-heading mb-6 flex items-start justify-between gap-4">
                 <div className="min-w-0">
                   <p className="app-section-label">工作记录编辑器</p>
@@ -5729,11 +5926,18 @@ export function WorkPage() {
                   {prefillMessage}
                 </p>
               ) : null}
+              {!editingSession && !correctionSession && missingEvidenceFiles.length ? <div className="mb-4 text-xs leading-5 text-[var(--text-muted)]" role="status">
+                以下文件需要重新选择：{missingEvidenceFiles.join("、")}。
+                <button className="ml-2 font-bold text-[var(--accent-strong)]" type="button" onClick={() => setUnselectedEvidenceFiles({})}>移除待补附件提醒</button>
+              </div> : null}
+              <p className="mb-4 text-xs leading-5 text-[var(--text-muted)]" role="status">
+                {backupUnavailable ? "此浏览器无法自动暂存录入，请及时保存云端草稿。" : !editingSession && !correctionSession ? "新录入会在当前标签页自动暂存，刷新或返回可恢复文字、时间和关联；附件文件需重新选择。关闭标签页前请保存云端草稿或本机预填写。" : "修改与更正需主动保存；切换页面前请核对是否已提交。"}
+              </p>
               <form
                 className="grid gap-4 md:grid-cols-2"
                 onSubmit={(event) => {
                   event.preventDefault();
-                  create.mutate(editingPlan ? "plan" : "fact");
+                  if (!create.isPending) create.mutate(editingPlan ? "plan" : "fact");
                 }}
               >
                 <Field label="开始时间">
@@ -5792,7 +5996,12 @@ export function WorkPage() {
                 </div>
                 {!editingSession && !correctionSession ? (
                   <div className="md:col-span-2">
-                    {zonedInputToDate(manual.endAt).getTime() <= entryNow + 5 * 60_000 ? (
+                    {!Number.isFinite(manualEndTime) ? (
+                      <>
+                        <p className="work-plan-evidence-note" role="status">请填写有效的结束时间；不完整或在组织时区中不存在的时间不会被当作计划或真实工时。</p>
+                        {hasPendingWorkEvidence(primaryEvidence) ? <DirectEvidenceFields fileUploadsAvailable={evidenceCapabilities.data?.fileUploads.available === true} onChange={setPrimaryEvidence} value={primaryEvidence} /> : null}
+                      </>
+                    ) : manualEndTime <= entryNow + 5 * 60_000 ? (
                       <DirectEvidenceFields
                         fileUploadsAvailable={
                           evidenceCapabilities.data?.fileUploads.available === true
@@ -5812,11 +6021,10 @@ export function WorkPage() {
                           <span>每段单独保存时间、内容、结果与证据；任一段校验失败时整批不写入。</span>
                         </div>
                         <Button
-                          disabled={additionalSegments.length >= 23}
+                          disabled={additionalSegments.length >= 23 || !Number.isFinite(nextSegmentStartTime)}
                           onClick={() => {
-                            const previousEnd =
-                              additionalSegments.at(-1)?.endAt || manual.endAt;
-                            const start = new Date(previousEnd);
+                            if (!Number.isFinite(nextSegmentStartTime)) return;
+                            const start = new Date(nextSegmentStartTime);
                             const proposedEnd = new Date(start.getTime() + 60 * 60_000);
                             setAdditionalSegments((current) => [
                               ...current,
@@ -5838,9 +6046,14 @@ export function WorkPage() {
                         </Button>
                       </div>
                       {additionalSegments.map((segment, index) => {
-                        const planned =
-                          zonedInputToDate(segment.endAt).getTime() > entryNow + 5 * 60_000;
-                        const updateSegment = (update: Partial<AdditionalWorkSegment>) =>
+                        const endTime = safeLocalInputDate(segment.endAt).getTime();
+                        const validEndTime = Number.isFinite(endTime);
+                        const planned = endTime > entryNow + 5 * 60_000;
+                        const updateSegment = (update: Partial<AdditionalWorkSegment>) => {
+                          if (update.evidence) {
+                            const selectedNames = update.evidence.files.map((file) => file.name);
+                            setUnselectedEvidenceFiles((current) => ({ ...current, [segment.id]: (current[segment.id] ?? []).filter((name) => !selectedNames.includes(name)) }));
+                          }
                           setAdditionalSegments((current) =>
                             current.map((candidate) =>
                               candidate.id === segment.id
@@ -5848,13 +6061,14 @@ export function WorkPage() {
                                 : candidate,
                             ),
                           );
+                        };
                         return (
                           <article className="work-segment-card" key={segment.id}>
                             <div className="work-segment-card-head">
                               <div>
                                 <strong>第 {index + 2} 段</strong>
-                                <Badge tone={planned ? "info" : "positive"}>
-                                  {planned ? "尚未结束 · 计划" : "已完成 · 工时"}
+                                <Badge tone={!validEndTime ? "warning" : planned ? "info" : "positive"}>
+                                  {!validEndTime ? "时间待完善" : planned ? "尚未结束 · 计划" : "已完成 · 工时"}
                                 </Badge>
                               </div>
                               <button
@@ -5912,7 +6126,12 @@ export function WorkPage() {
                                 </Field>
                               </div>
                             </div>
-                            {planned ? (
+                            {!validEndTime ? (
+                              <>
+                                <p className="work-plan-evidence-note" role="status">请填写本段有效的结束时间后继续。</p>
+                                {hasPendingWorkEvidence(segment.evidence) ? <DirectEvidenceFields fileUploadsAvailable={evidenceCapabilities.data?.fileUploads.available === true} onChange={(evidence) => updateSegment({ evidence })} value={segment.evidence} /> : null}
+                              </>
+                            ) : planned ? (
                               <div className="work-plan-evidence-note">
                                 本段将在结束前保持私人计划，不进入分析、审批或薪资；结束后可转换并补证据。
                               </div>
@@ -6114,7 +6333,8 @@ export function WorkPage() {
                     type="search"
                     value={projectNodeSearch}
                   />
-                  {recommendationQuery.length < 2 ? (
+                  <div className="work-project-recommendation-region">
+                    {recommendationQuery.length < 2 ? (
                     <p className="work-project-recommender-empty">
                       填写上方工作内容后，这里会自动出现相关项目节点；也可以直接输入搜索。
                     </p>
@@ -6155,7 +6375,8 @@ export function WorkPage() {
                       暂未找到匹配节点，可以更换关键词或从下方项目中浏览。
                     </p>
                   )}
-                  <ErrorMessage error={recommendedNodes.error} />
+                    <ErrorMessage error={recommendedNodes.error} />
+                  </div>
                 </div>
                 <Field
                   hint="可不关联；选定项目后，可将一条工作同时关联至多条任务节点。"
@@ -6185,7 +6406,7 @@ export function WorkPage() {
                       }
                       label="从当前项目添加节点"
                     >
-                      <div className="max-h-44 space-y-1 overflow-y-auto rounded-xl bg-[var(--surface-subtle)] p-2">
+                      <div className="h-44 space-y-1 overflow-y-auto rounded-xl bg-[var(--surface-subtle)] p-2">
                         {linkedProjectTree.isPending ? (
                           <p className="px-2 py-3 text-sm text-[var(--text-muted)]">
                             正在读取节点…
@@ -6392,7 +6613,7 @@ export function WorkPage() {
                   />
                 </div>
               </form>
-            </div>
+            </fieldset>
             <aside className="work-editor-preview">
               <WorkDayTimeline
                 breaks={manualBreaks}
@@ -6427,7 +6648,7 @@ export function WorkPage() {
           <CardContent>
             {timer.isPending ? (
               <LoadingBlock />
-            ) : activeTimer ? (
+            ) : timer.isError ? (<ErrorMessage error={timer.error} onRetry={() => void timer.refetch()} retrying={timer.isFetching} />) : activeTimer ? (
               <div>
                 <p className="text-lg font-bold">
                   {activeTimer.metadata.content || "未命名工作"}
@@ -6449,7 +6670,7 @@ export function WorkPage() {
                 <div className="mt-5 grid grid-cols-2 gap-2">
                   {activeTimer.status === "running" ? (
                     <Button
-                      disabled={transition.isPending}
+                      disabled={transition.isPending || offlineTimer.count > 0}
                       onClick={() =>
                         transition.mutate({
                           timerId: activeTimer.id,
@@ -6463,7 +6684,7 @@ export function WorkPage() {
                     </Button>
                   ) : activeTimer.status === "paused" ? (
                     <Button
-                      disabled={transition.isPending}
+                      disabled={transition.isPending || offlineTimer.count > 0}
                       onClick={() =>
                         transition.mutate({
                           timerId: activeTimer.id,
@@ -6476,7 +6697,7 @@ export function WorkPage() {
                     </Button>
                   ) : (
                     <Button
-                      disabled={transition.isPending}
+                      disabled={transition.isPending || offlineTimer.count > 0}
                       onClick={() =>
                         transition.mutate({
                           timerId: activeTimer.id,
@@ -6490,7 +6711,7 @@ export function WorkPage() {
                   )}
                   {activeTimer.status !== "on_break" ? (
                     <Button
-                      disabled={transition.isPending}
+                      disabled={transition.isPending || offlineTimer.count > 0}
                       onClick={() =>
                         transition.mutate({
                           timerId: activeTimer.id,
@@ -6505,7 +6726,7 @@ export function WorkPage() {
                   ) : null}
                   <Button
                     className="col-span-2"
-                    disabled={transition.isPending}
+                    disabled={transition.isPending || offlineTimer.count > 0}
                     onClick={() =>
                       transition.mutate({
                         timerId: activeTimer.id,
@@ -6527,9 +6748,10 @@ export function WorkPage() {
                 className="space-y-4"
                 onSubmit={(event) => {
                   event.preventDefault();
-                  startTimer.mutate();
+                  if (!startTimer.isPending && offlineTimer.count === 0) startTimer.mutate();
                 }}
               >
+                <fieldset className="space-y-4" disabled={startTimer.isPending || offlineTimer.count > 0} aria-busy={startTimer.isPending}>
                 <Field
                   hint="开始后可暂停、休息或结束；每一次状态变化都会记录。"
                   label="准备做什么"
@@ -6554,7 +6776,7 @@ export function WorkPage() {
                 <Button
                   className="w-full"
                   disabled={
-                    startTimer.isPending ||
+                    startTimer.isPending || offlineTimer.count > 0 ||
                     (timerLinkedProjectNodes.length > 0 &&
                       !timerPrimaryProjectNodeId)
                   }
@@ -6564,6 +6786,7 @@ export function WorkPage() {
                   开始计时
                 </Button>
                 <ErrorMessage error={startTimer.error ?? projects.error} />
+                </fieldset>
               </form>
             )}
           </CardContent>
@@ -6586,6 +6809,8 @@ export function WorkPage() {
           <CardContent>
             {work.isPending ? (
               <LoadingBlock />
+            ) : work.isError ? (
+              <ErrorMessage error={work.error} onRetry={() => void work.refetch()} retrying={work.isFetching} />
             ) : work.data?.items.length ? (
               <div className="divide-y divide-[var(--border)]">
                 {work.data.items.map((item) => {
@@ -6709,6 +6934,13 @@ export function WorkPage() {
               />
             )}
             <ErrorMessage error={withdraw.error ?? realizePlan.error} />
+            {workPages.hasNextPage ? <div className="mt-4 flex flex-wrap items-center gap-3">
+              <span className="text-sm text-[var(--text-muted)]">已加载 {work.data?.items.length ?? 0} 条记录，还有更早的记录。</span>
+              <Button variant="secondary" disabled={workPages.isFetchingNextPage} onClick={() => void workPages.fetchNextPage()}>
+                {workPages.isFetchingNextPage ? "正在加载历史记录…" : "加载更早的记录"}
+              </Button>
+            </div> : null}
+            {workPages.isFetchNextPageError ? <ErrorMessage error={workPages.error} onRetry={() => void workPages.fetchNextPage()} retrying={workPages.isFetchingNextPage} /> : null}
           </CardContent>
         </Card>
       </div>
@@ -6900,6 +7132,8 @@ export function ProjectsPage({ me }: { me: Me }) {
         <Card>
           <LoadingBlock />
         </Card>
+      ) : projects.isError ? (
+        <Card><CardContent><ErrorMessage error={projects.error} onRetry={() => void projects.refetch()} retrying={projects.isFetching} /></CardContent></Card>
       ) : projects.data?.items.length ? (
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
           {projects.data.items.map((project) => {
@@ -7323,6 +7557,8 @@ function readCorrectionProposal(snapshot: unknown): {
 
 export function ApprovalsPage() {
   const queryClient = useQueryClient();
+  const me = queryClient.getQueryData<Me>(["me"]);
+  const canAdjustPayroll = me?.permissions.some((grant) => grant.permission === "payroll.settle" && grant.scopeKind === "organization") ?? false;
   const [expandedApprovalId, setExpandedApprovalId] = useState<string | null>(null);
   const [returnReasons, setReturnReasons] = useState<Record<string, string>>({});
   const [correctionInputs, setCorrectionInputs] = useState<
@@ -7345,12 +7581,16 @@ export function ApprovalsPage() {
         method: "POST",
         body: {
           decision,
-          ...(decision === "returned" ? { reason: reason?.trim() } : {}),
+          ...(reason?.trim() ? { reason: reason.trim() } : {}),
         },
       }),
-    onSuccess: async () => {
-      setExpandedApprovalId(null);
-      setReturnReasons({});
+    onSuccess: async (_result, { id }) => {
+      setExpandedApprovalId((current) => current === id ? null : current);
+      setReturnReasons((current) => {
+        const next = { ...current };
+        delete next[id];
+        return next;
+      });
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["approvals"] }),
         queryClient.invalidateQueries({ queryKey: ["work-sessions"] }),
@@ -7384,7 +7624,7 @@ export function ApprovalsPage() {
             ...(current.reviewNote.trim()
               ? { reviewNote: current.reviewNote.trim() }
               : {}),
-            ...(decision === "approved" && current.amount.trim()
+            ...(decision === "approved" && canAdjustPayroll && current.amount.trim()
               ? {
                   adjustmentAmount: current.amount.trim(),
                 }
@@ -7413,6 +7653,8 @@ export function ApprovalsPage() {
         <Card>
           <LoadingBlock />
         </Card>
+      ) : approvals.isError ? (
+        <Card><CardContent><ErrorMessage error={approvals.error} onRetry={() => void approvals.refetch()} retrying={approvals.isFetching} /></CardContent></Card>
       ) : approvals.data?.items.length ? (
         <div className="space-y-4">
           {approvals.data.items.map((item) => (
@@ -7459,6 +7701,7 @@ export function ApprovalsPage() {
                         结果：{item.session.result}
                       </p>
                     ) : null}
+                    {item.request.anomalyFlags.includes("overlapping_work_requires_review") ? <p className="mt-2 text-sm text-[var(--warning)]">此记录与其他工作时段重叠。批准前请填写核对说明；薪资按有效时间去重。</p> : null}
                   </div>
                   <div className="flex flex-wrap gap-2">
                     <Button
@@ -7498,13 +7741,18 @@ export function ApprovalsPage() {
                       退回修改
                     </Button>
                     <Button
-                      disabled={decide.isPending}
-                      onClick={() =>
+                      disabled={decide.isPending || (item.request.anomalyFlags.includes("overlapping_work_requires_review") && expandedApprovalId === item.request.id && (returnReasons[item.request.id]?.trim().length ?? 0) < 2)}
+                      onClick={() => {
+                        if (item.request.anomalyFlags.includes("overlapping_work_requires_review") && (returnReasons[item.request.id]?.trim().length ?? 0) < 2) {
+                          setExpandedApprovalId(item.request.id);
+                          return;
+                        }
                         decide.mutate({
                           id: item.request.id,
                           decision: "approved",
-                        })
-                      }
+                          ...(returnReasons[item.request.id] ? { reason: returnReasons[item.request.id] } : {}),
+                        });
+                      }}
                     >
                       <Check size={17} />
                       批准
@@ -7521,8 +7769,9 @@ export function ApprovalsPage() {
                     </dl>
                     <ReadOnlyEvidenceList sessionId={item.session.id} />
                     <label className="approval-return-reason">
-                      <span>退回原因</span>
+                      <span>{item.request.anomalyFlags.includes("overlapping_work_requires_review") ? "重叠核对说明 / 退回原因" : "退回原因"}</span>
                       <textarea
+                        disabled={decide.isPending}
                         maxLength={1_000}
                         onChange={(event) =>
                           setReturnReasons((current) => ({
@@ -7530,7 +7779,7 @@ export function ApprovalsPage() {
                             [item.request.id]: event.target.value,
                           }))
                         }
-                        placeholder="明确说明需要补充或修改的内容；退回后提交人可编辑并重新提交。"
+                        placeholder={item.request.anomalyFlags.includes("overlapping_work_requires_review") ? "批准前请说明已核对的重叠原因（至少 2 个字）；计薪按实际有效区间去重，不重复计算重叠时段。" : "明确说明需要补充或修改的内容；退回后提交人可编辑并重新提交。"}
                         value={returnReasons[item.request.id] ?? ""}
                       />
                     </label>
@@ -7621,7 +7870,9 @@ export function ApprovalsPage() {
                   <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
                     <Field
                       hint={
-                        item.nextOpenPeriod
+                        !canAdjustPayroll
+                          ? "当前授权可审核工作事实；薪资金额调整需要组织级薪资结算权限。"
+                          : item.nextOpenPeriod
                           ? `可选；填写后会进入“${item.nextOpenPeriod.name}”的下期调整，币种由该成员在该周期的有效薪资方案决定。`
                           : "当前找不到原周期后的开放薪资周期；留空可以仅确认申请。"
                       }
@@ -7629,7 +7880,7 @@ export function ApprovalsPage() {
                     >
                       <input
                         className={fieldClass}
-                        disabled={!item.nextOpenPeriod}
+                        disabled={!canAdjustPayroll || !item.nextOpenPeriod || decideCorrection.isPending}
                         inputMode="decimal"
                         maxLength={22}
                         onChange={(event) => setInput({ amount: event.target.value })}
@@ -7641,6 +7892,7 @@ export function ApprovalsPage() {
                       <input
                         className={fieldClass}
                         maxLength={2000}
+                        disabled={decideCorrection.isPending}
                         onChange={(event) => setInput({ reviewNote: event.target.value })}
                         placeholder="驳回时必填"
                         value={current.reviewNote}
@@ -7652,14 +7904,14 @@ export function ApprovalsPage() {
                       disabled={
                         decideCorrection.isPending ||
                         !proposal.content ||
-                        (Boolean(current.amount.trim()) && !item.nextOpenPeriod)
+                        (canAdjustPayroll && Boolean(current.amount.trim()) && !item.nextOpenPeriod)
                       }
                       onClick={() =>
                         decideCorrection.mutate({ item, decision: "approved" })
                       }
                     >
                       <Check size={17} />
-                      {current.amount.trim()
+                      {canAdjustPayroll && current.amount.trim()
                         ? "批准并写入下期调整"
                         : "批准并留存结论"}
                     </Button>
@@ -8499,27 +8751,27 @@ function PayrollManagementPanel() {
               待审核工时计入预估
             </label>
             <div className="grid gap-3 xl:col-span-4 md:grid-cols-2 xl:grid-cols-5">
-              <label className="rounded-xl bg-[var(--surface-subtle)] p-3 text-sm">
-                <span className="flex items-center gap-2 font-semibold"><input checked={planForm.weekdayEnabled} onChange={(event) => setPlanForm({ ...planForm, weekdayEnabled: event.target.checked })} type="checkbox" />工作日倍率</span>
-                <input className={`${fieldClass} mt-2`} disabled={!planForm.weekdayEnabled} min="0" onChange={(event) => setPlanForm({ ...planForm, weekdayMultiplier: event.target.value })} step="0.01" type="number" value={planForm.weekdayMultiplier} />
-              </label>
-              <label className="rounded-xl bg-[var(--surface-subtle)] p-3 text-sm">
-                <span className="flex items-center gap-2 font-semibold"><input checked={planForm.weekendEnabled} onChange={(event) => setPlanForm({ ...planForm, weekendEnabled: event.target.checked })} type="checkbox" />周末倍率</span>
-                <input className={`${fieldClass} mt-2`} disabled={!planForm.weekendEnabled} min="0" onChange={(event) => setPlanForm({ ...planForm, weekendMultiplier: event.target.value })} step="0.01" type="number" value={planForm.weekendMultiplier} />
-              </label>
-              <label className="rounded-xl bg-[var(--surface-subtle)] p-3 text-sm">
-                <span className="flex items-center gap-2 font-semibold"><input checked={planForm.holidayEnabled} onChange={(event) => setPlanForm({ ...planForm, holidayEnabled: event.target.checked })} type="checkbox" />节假日倍率</span>
-                <input className={`${fieldClass} mt-2`} disabled={!planForm.holidayEnabled} min="0" onChange={(event) => setPlanForm({ ...planForm, holidayMultiplier: event.target.value })} step="0.01" type="number" value={planForm.holidayMultiplier} />
+              <div className="rounded-xl bg-[var(--surface-subtle)] p-3 text-sm">
+                <label className="flex items-center gap-2 font-semibold"><input checked={planForm.weekdayEnabled} onChange={(event) => setPlanForm({ ...planForm, weekdayEnabled: event.target.checked })} type="checkbox" />工作日倍率</label>
+                <input aria-label="工作日计薪倍数" className={`${fieldClass} mt-2`} disabled={!planForm.weekdayEnabled} min="0" onChange={(event) => setPlanForm({ ...planForm, weekdayMultiplier: event.target.value })} step="0.01" type="number" value={planForm.weekdayMultiplier} />
+              </div>
+              <div className="rounded-xl bg-[var(--surface-subtle)] p-3 text-sm">
+                <label className="flex items-center gap-2 font-semibold"><input checked={planForm.weekendEnabled} onChange={(event) => setPlanForm({ ...planForm, weekendEnabled: event.target.checked })} type="checkbox" />周末倍率</label>
+                <input aria-label="周末计薪倍数" className={`${fieldClass} mt-2`} disabled={!planForm.weekendEnabled} min="0" onChange={(event) => setPlanForm({ ...planForm, weekendMultiplier: event.target.value })} step="0.01" type="number" value={planForm.weekendMultiplier} />
+              </div>
+              <div className="rounded-xl bg-[var(--surface-subtle)] p-3 text-sm">
+                <label className="flex items-center gap-2 font-semibold"><input checked={planForm.holidayEnabled} onChange={(event) => setPlanForm({ ...planForm, holidayEnabled: event.target.checked })} type="checkbox" />节假日倍率</label>
+                <input aria-label="节假日计薪倍数" className={`${fieldClass} mt-2`} disabled={!planForm.holidayEnabled} min="0" onChange={(event) => setPlanForm({ ...planForm, holidayMultiplier: event.target.value })} step="0.01" type="number" value={planForm.holidayMultiplier} />
                 <input aria-label="节假日日期" className={`${fieldClass} mt-2`} disabled={!planForm.holidayEnabled} onChange={(event) => setPlanForm({ ...planForm, holidayDates: event.target.value })} placeholder="2026-10-01, 2026-10-02" value={planForm.holidayDates} />
-              </label>
-              <label className="rounded-xl bg-[var(--surface-subtle)] p-3 text-sm">
-                <span className="flex items-center gap-2 font-semibold"><input checked={planForm.nightEnabled} onChange={(event) => setPlanForm({ ...planForm, nightEnabled: event.target.checked })} type="checkbox" />夜间倍率（22:00–06:00）</span>
-                <input className={`${fieldClass} mt-2`} disabled={!planForm.nightEnabled} min="0" onChange={(event) => setPlanForm({ ...planForm, nightMultiplier: event.target.value })} step="0.01" type="number" value={planForm.nightMultiplier} />
-              </label>
-              <label className="rounded-xl bg-[var(--surface-subtle)] p-3 text-sm">
-                <span className="flex items-center gap-2 font-semibold"><input checked={planForm.overtimeEnabled} onChange={(event) => setPlanForm({ ...planForm, overtimeEnabled: event.target.checked })} type="checkbox" />超过 8 小时倍率</span>
-                <input className={`${fieldClass} mt-2`} disabled={!planForm.overtimeEnabled} min="0" onChange={(event) => setPlanForm({ ...planForm, overtimeMultiplier: event.target.value })} step="0.01" type="number" value={planForm.overtimeMultiplier} />
-              </label>
+              </div>
+              <div className="rounded-xl bg-[var(--surface-subtle)] p-3 text-sm">
+                <label className="flex items-center gap-2 font-semibold"><input checked={planForm.nightEnabled} onChange={(event) => setPlanForm({ ...planForm, nightEnabled: event.target.checked })} type="checkbox" />夜间倍率（22:00–06:00）</label>
+                <input aria-label="夜间计薪倍数" className={`${fieldClass} mt-2`} disabled={!planForm.nightEnabled} min="0" onChange={(event) => setPlanForm({ ...planForm, nightMultiplier: event.target.value })} step="0.01" type="number" value={planForm.nightMultiplier} />
+              </div>
+              <div className="rounded-xl bg-[var(--surface-subtle)] p-3 text-sm">
+                <label className="flex items-center gap-2 font-semibold"><input checked={planForm.overtimeEnabled} onChange={(event) => setPlanForm({ ...planForm, overtimeEnabled: event.target.checked })} type="checkbox" />超过 8 小时倍率</label>
+                <input aria-label="超过八小时计薪倍数" className={`${fieldClass} mt-2`} disabled={!planForm.overtimeEnabled} min="0" onChange={(event) => setPlanForm({ ...planForm, overtimeMultiplier: event.target.value })} step="0.01" type="number" value={planForm.overtimeMultiplier} />
+              </div>
               <div className="rounded-xl bg-[var(--accent-soft)] p-3 text-sm md:col-span-2 xl:col-span-5">
                 <label className="flex items-center gap-2 font-semibold">
                   <input
@@ -8855,8 +9107,9 @@ export function PayrollPage({ me }: { me: Me }) {
         textStyle: { color: chartPalette.text },
         formatter: (params: Array<{ data?: { actual?: number }; axisValue?: string }>) => {
           const point = params.find((item) => typeof item.data?.actual === "number");
-          return `${point?.axisValue ?? ""}<br/>${formatPayrollMoney(selected?.item.currency ?? "CNY", String(point?.data?.actual ?? 0))}`;
+          return `${escapeChartText(point?.axisValue)}<br/>${formatPayrollMoney(selected?.item.currency ?? "CNY", String(point?.data?.actual ?? 0))}`;
         },
+        valueFormatter: (value: string | number) => formatPayrollMoney(selected?.item.currency ?? "CNY", String(value)),
       },
       xAxis: { type: "category", data: labels, axisLabel: { width: 86, overflow: "truncate", rotate: 18, color: chartPalette.textSubtle }, axisLine: { lineStyle: { color: chartPalette.border } } },
       yAxis: { type: "value", axisLabel: { color: chartPalette.textSubtle }, splitLine: { lineStyle: { color: chartPalette.grid } } },
@@ -8943,6 +9196,7 @@ export function PayrollPage({ me }: { me: Me }) {
         {
           type: "bar",
           name: "已批准薪资",
+          tooltip: { valueFormatter: (value: string | number) => formatPayrollMoney(currency, String(value)) },
           yAxisIndex: 0,
           stack: "daily-pay",
           data: timeline.map((item) => Number(item.approvedAmount)),
@@ -8951,6 +9205,7 @@ export function PayrollPage({ me }: { me: Me }) {
         {
           type: "bar",
           name: "待审核预估",
+          tooltip: { valueFormatter: (value: string | number) => formatPayrollMoney(currency, String(value)) },
           yAxisIndex: 0,
           stack: "daily-pay",
           data: timeline.map((item) => Number(item.pendingAmount)),
@@ -8959,6 +9214,7 @@ export function PayrollPage({ me }: { me: Me }) {
         {
           type: "bar",
           name: "未来日薪预测",
+          tooltip: { valueFormatter: (value: string | number) => formatPayrollMoney(currency, String(value)) },
           yAxisIndex: 0,
           stack: "daily-pay",
           data: timeline.map((item) =>
@@ -8974,6 +9230,7 @@ export function PayrollPage({ me }: { me: Me }) {
         {
           type: "line",
           name: "每日有效工时",
+          tooltip: { valueFormatter: (value: string | number) => `${Number(value).toFixed(2)} 小时` },
           yAxisIndex: 1,
           smooth: 0.2,
           showSymbol: false,
@@ -8984,6 +9241,7 @@ export function PayrollPage({ me }: { me: Me }) {
         {
           type: "line",
           name: "周奖励工时",
+          tooltip: { valueFormatter: (value: string | number) => `${Number(value).toFixed(2)} 小时` },
           yAxisIndex: 1,
           symbol: "diamond",
           symbolSize: 8,
@@ -9065,6 +9323,7 @@ export function PayrollPage({ me }: { me: Me }) {
         {
           type: "line",
           name: "已发生累计",
+          tooltip: { valueFormatter: (value: string | number) => formatPayrollMoney(currency, String(value)) },
           smooth: 0.22,
           symbolSize: 5,
           data: timeline.map((item) => item.actualCumulativeAmount === null ? null : Number(item.actualCumulativeAmount)),
@@ -9100,6 +9359,7 @@ export function PayrollPage({ me }: { me: Me }) {
         {
           type: "line",
           name: "月末趋势预测",
+          tooltip: { valueFormatter: (value: string | number) => formatPayrollMoney(currency, String(value)) },
           smooth: 0.22,
           showSymbol: false,
           data: timeline.map((item, index) => item.forecast || index === lastActualIndex ? Number(item.projectedCumulativeAmount) : null),
@@ -9334,7 +9594,7 @@ export function PayrollPage({ me }: { me: Me }) {
             </CardContent>
           </Card>
         </div>
-      ) : !isPayrollManager ? (
+      ) : !isPayrollManager && !payroll.isError ? (
         <Card>
           <EmptyState
             description={payroll.data?.currentPlan ? "本月实时预估已在上方显示；结算后会生成不可重复计数的工资单。" : "管理员尚未为你配置薪资方案。"}
@@ -9344,7 +9604,8 @@ export function PayrollPage({ me }: { me: Me }) {
         </Card>
       ) : null}
       <div className="mt-4">
-        <ErrorMessage error={payroll.error ?? acknowledge.error} />
+        <ErrorMessage error={payroll.error} onRetry={() => void payroll.refetch()} retrying={payroll.isFetching} />
+        <ErrorMessage error={acknowledge.error} />
       </div>
     </>
   );
@@ -10080,7 +10341,7 @@ export function TeamPage() {
         </Card>
       )}
       <div className="mt-4">
-        <ErrorMessage error={activity.error} />
+        <ErrorMessage error={activity.error} onRetry={() => void activity.refetch()} retrying={activity.isFetching} />
       </div>
     </>
   );
@@ -10292,6 +10553,7 @@ function formatExportFileSize(bytes: number | null): string {
 
 function BackgroundExportPanel({ from, to }: { from: Date; to: Date }) {
   const queryClient = useQueryClient();
+  const [downloadMessage, setDownloadMessage] = useState("");
   const [format, setFormat] = useState<"csv" | "json" | "xlsx" | "pdf">("xlsx");
   const capabilities = useQuery({
     queryKey: ["export-capabilities"],
@@ -10350,6 +10612,7 @@ function BackgroundExportPanel({ from, to }: { from: Date; to: Date }) {
       document.body.append(anchor);
       anchor.click();
       anchor.remove();
+      setDownloadMessage("已发起下载，可在浏览器下载记录中查看。");
     },
   });
   const directExport = useMutation({
@@ -10359,17 +10622,12 @@ function BackgroundExportPanel({ from, to }: { from: Date; to: Date }) {
         to: to.toISOString(),
       });
       const fileName = `work-sessions.${effectiveFormat}`;
-      const response = await fetch(
+      if (effectiveFormat !== "csv" && effectiveFormat !== "json") throw new Error("请选择 CSV 或 JSON 直接导出。");
+      const blob = await fetchExportFile(
         `/api/exports/work-sessions.${effectiveFormat}?${query.toString()}`,
-        { credentials: "include" },
+        effectiveFormat,
       );
-      if (!response.ok) {
-        const failure = (await response.json().catch(() => null)) as {
-          message?: string;
-        } | null;
-        throw new Error(failure?.message ?? `直接导出失败（HTTP ${response.status}）。`);
-      }
-      return { blob: await response.blob(), fileName };
+      return { blob, fileName };
     },
     onSuccess: ({ blob, fileName }) => {
       const url = URL.createObjectURL(blob);
@@ -10379,7 +10637,8 @@ function BackgroundExportPanel({ from, to }: { from: Date; to: Date }) {
       document.body.append(anchor);
       anchor.click();
       anchor.remove();
-      window.setTimeout(() => URL.revokeObjectURL(url), 0);
+      window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+      setDownloadMessage("已生成导出文件，可在浏览器下载记录中查看。");
     },
   });
 
@@ -10391,6 +10650,8 @@ function BackgroundExportPanel({ from, to }: { from: Date; to: Date }) {
     directExport.error;
 
   const startExport = () => {
+    if (createExport.isPending || directExport.isPending) return;
+    setDownloadMessage("");
     if (storageReady) {
       createExport.mutate();
       return;
@@ -10437,6 +10698,8 @@ function BackgroundExportPanel({ from, to }: { from: Date; to: Date }) {
         </div>
       </CardHeader>
       <CardContent>
+        <p className="mb-3 text-xs leading-6 text-[var(--text-muted)]">导出所选时间范围内、当前权限可见的工时明细。项目、成员等图表筛选不应用于此文件。</p>
+        {downloadMessage ? <p className="mb-3 text-sm text-[var(--success)]" role="status">{downloadMessage}</p> : null}
         {capabilities.isPending || jobs.isPending ? <LoadingBlock /> : null}
         {capabilities.data && !capabilities.data.available ? (
           <div className="rounded-2xl bg-[var(--warning-soft)] px-4 py-3 text-sm text-[var(--warning)]">
@@ -10532,12 +10795,14 @@ function BackgroundExportPanel({ from, to }: { from: Date; to: Date }) {
               );
             })}
           </div>
-        ) : !jobs.isPending ? (
+        ) : !jobs.isPending && !jobs.isError ? (
           <p className="py-4 text-sm text-[var(--text-muted)]">
             选择格式后创建任务；文件生成完成会出现在这里，并保留 24 小时。
           </p>
         ) : null}
-        <ErrorMessage error={capabilities.error ?? jobs.error ?? mutationError} />
+        <ErrorMessage error={capabilities.error} onRetry={() => void capabilities.refetch()} retrying={capabilities.isFetching} />
+        <ErrorMessage error={jobs.error} onRetry={() => void jobs.refetch()} retrying={jobs.isFetching} />
+        <ErrorMessage error={mutationError} />
       </CardContent>
     </Card>
   );
@@ -10550,14 +10815,20 @@ export function AnalyticsPage({ me }: { me: Me }) {
   const [filters, setFilters] = useState<AnalyticsFilterState>(emptyAnalyticsFilters);
   const [filtersOpen, setFiltersOpen] = useState(false);
   const chartPalette = useChartPalette();
+  const [today, setToday] = useState(() => toZonedInputValue(new Date()).slice(0, 10));
+  useEffect(() => {
+    const update = () => setToday(toZonedInputValue(new Date()).slice(0, 10));
+    const timer = window.setInterval(update, 60_000);
+    window.addEventListener("focus", update);
+    return () => { window.clearInterval(timer); window.removeEventListener("focus", update); };
+  }, []);
   const to = useMemo(() => {
     const timezone = getOrganizationTimezone();
-    const localToday = toZonedInputValue(new Date(), timezone).slice(0, 10);
-    return zonedInputToDate(`${addDateKey(localToday, 1)}T00:00:00`, timezone);
-  }, []);
+    return zonedInputToDate(`${addDateKey(today, 1)}T00:00:00`, timezone);
+  }, [today]);
   const from = useMemo(
-    () => new Date(to.getTime() - days * 86_400_000),
-    [days, to],
+    () => zonedInputToDate(`${addDateKey(today, 1 - days)}T00:00:00`),
+    [days, today],
   );
   const analyticsUrl = useMemo(() => {
     const query = new URLSearchParams({
@@ -10574,8 +10845,8 @@ export function AnalyticsPage({ me }: { me: Me }) {
     return `/api/analytics/summary?${query.toString()}`;
   }, [filters, forecastDays, from, to]);
   const analytics = useQuery({
-    queryKey: ["analytics", me.user.membershipId, days, forecastDays, filters],
-    queryFn: () => api<AnalyticsSummary>(analyticsUrl),
+    queryKey: ["analytics", me.user.membershipId, days, forecastDays, filters, today],
+    queryFn: ({ signal }) => api<AnalyticsSummary>(analyticsUrl, { signal }),
     placeholderData: (previous) => previous,
     refetchOnWindowFocus: false,
     staleTime: 15_000,
@@ -10596,6 +10867,7 @@ export function AnalyticsPage({ me }: { me: Me }) {
         days,
         forecastDays,
         emptyAnalyticsFilters,
+        today,
       ],
       refetchType: "none",
     });
@@ -10719,7 +10991,7 @@ export function AnalyticsPage({ me }: { me: Me }) {
   }), [analytics.data?.byHour, chartPalette]);
   const approvalOption = useMemo<EChartsCoreOption>(() => ({
     animationDuration: 240,
-    tooltip: { trigger: "item", confine: true, backgroundColor: chartPalette.surface, borderColor: chartPalette.border, textStyle: { color: chartPalette.text }, formatter: (params: { name?: string; value?: number; percent?: number }) => `${params.name ?? ""}<br/>${formatDuration(Number(params.value ?? 0))} · ${params.percent ?? 0}%` },
+    tooltip: { trigger: "item", confine: true, backgroundColor: chartPalette.surface, borderColor: chartPalette.border, textStyle: { color: chartPalette.text }, valueFormatter: (value: string | number) => formatDuration(Number(value)), formatter: (params: { name?: string; value?: number; percent?: number }) => `${escapeChartText(params.name)}<br/>${formatDuration(Number(params.value ?? 0))} · ${params.percent ?? 0}%` },
     legend: { bottom: 0, textStyle: { color: chartPalette.textMuted } },
     series: [{ type: "pie", radius: ["45%", "70%"], center: ["50%", "44%"], avoidLabelOverlap: true, label: { show: false }, emphasis: { label: { show: true, fontWeight: "bold" } }, data: analytics.data?.byApproval.map((item) => ({ name: approvalLabels[item.status] ?? item.status, value: item.seconds, approvalState: item.status })) ?? [] }],
   }), [analytics.data?.byApproval, chartPalette]);
@@ -10727,7 +10999,7 @@ export function AnalyticsPage({ me }: { me: Me }) {
     const days = analytics.data?.byDay ?? [];
     const range = days.length ? [days[0]!.date, days.at(-1)!.date] : [];
     return {
-      tooltip: { confine: true, backgroundColor: chartPalette.surface, borderColor: chartPalette.border, textStyle: { color: chartPalette.text }, formatter: (params: { value?: [string, number] }) => `${params.value?.[0] ?? ""}<br/>${formatDuration(params.value?.[1] ?? 0)}` },
+      tooltip: { confine: true, backgroundColor: chartPalette.surface, borderColor: chartPalette.border, textStyle: { color: chartPalette.text }, valueFormatter: (value: string | number) => formatDuration(Number(value)), formatter: (params: { value?: [string, number] }) => `${escapeChartText(params.value?.[0])}<br/>${formatDuration(params.value?.[1] ?? 0)}` },
       visualMap: { min: 0, max: Math.max(...days.map((item) => item.seconds), 1), show: false, inRange: { color: [chartPalette.grid, hexWithAlpha(chartPalette.accent, 0.45), chartPalette.accent] } },
       calendar: { range, cellSize: ["auto", 18], splitLine: { show: false }, itemStyle: { color: chartPalette.grid, borderColor: chartPalette.surface, borderWidth: 3 }, dayLabel: { color: chartPalette.textSubtle }, monthLabel: { color: chartPalette.textMuted }, yearLabel: { show: false } },
       series: [{ type: "heatmap", coordinateSystem: "calendar", data: days.map((item) => [item.date, item.seconds]) }],
@@ -10818,6 +11090,7 @@ export function AnalyticsPage({ me }: { me: Me }) {
         {
           type: "line",
           name: "已发生事实",
+          tooltip: { valueFormatter: (value: string | number) => formatDuration(Number(value)) },
           smooth: true,
           data: [...observed.map((item) => item.seconds), ...predicted.map(() => null)],
           lineStyle: { color: chartPalette.accent, width: 3 },
@@ -10846,6 +11119,7 @@ export function AnalyticsPage({ me }: { me: Me }) {
         {
           type: "line",
           name: "程序预测",
+          tooltip: { valueFormatter: (value: string | number) => formatDuration(Number(value)) },
           smooth: true,
           symbol: "emptyCircle",
           data: [...predictionBridge, ...predicted.map((item) => item.seconds)],
@@ -10870,9 +11144,9 @@ export function AnalyticsPage({ me }: { me: Me }) {
         formatter: (params: { dataType?: string; data?: { label?: string; sourceLabel?: string; targetLabel?: string; value?: number }; value?: number; name?: string }) => {
           const seconds = Number(params.value ?? params.data?.value ?? 0);
           if (params.dataType === "edge") {
-            return `${params.data?.sourceLabel ?? ""} → ${params.data?.targetLabel ?? ""}<br/>${formatDuration(seconds)}`;
+            return `${escapeChartText(params.data?.sourceLabel)} → ${escapeChartText(params.data?.targetLabel)}<br/>${formatDuration(seconds)}`;
           }
-          return `${params.data?.label ?? params.name ?? ""}<br/>${formatDuration(seconds)}`;
+          return `${escapeChartText(params.data?.label ?? params.name)}<br/>${formatDuration(seconds)}`;
         },
       },
       series: [{
@@ -10967,8 +11241,8 @@ export function AnalyticsPage({ me }: { me: Me }) {
       borderColor: chartPalette.border,
       textStyle: { color: chartPalette.text },
       formatter: (items: Array<{ axisValue?: string; seriesName?: string; value?: number }>) => [
-        items[0]?.axisValue ?? "",
-        ...items.map((item) => `${item.seriesName ?? ""}：${item.seriesName === "净工时" ? formatDuration(Number(item.value ?? 0)) : `${Number(item.value ?? 0).toFixed(1)}%`}`),
+        escapeChartText(items[0]?.axisValue),
+        ...items.map((item) => `${escapeChartText(item.seriesName)}：${item.seriesName === "净工时" ? formatDuration(Number(item.value ?? 0)) : item.value === null || item.value === undefined ? "暂无进度" : `${Number(item.value).toFixed(1)}%`}`),
       ].join("<br/>"),
     },
     xAxis: { type: "category", data: analytics.data?.projectHealth.map((item) => item.projectName) ?? [], axisLabel: { width: 82, overflow: "truncate", color: chartPalette.textSubtle }, axisLine: { lineStyle: { color: chartPalette.border } } },
@@ -10978,8 +11252,8 @@ export function AnalyticsPage({ me }: { me: Me }) {
     ],
     dataZoom: [{ type: "inside", filterMode: "none" }],
     series: [
-      { type: "bar", name: "净工时", data: analytics.data?.projectHealth.map((item) => item.seconds) ?? [], itemStyle: { color: hexWithAlpha(chartPalette.accent, 0.56), borderRadius: [6, 6, 0, 0] } },
-      { type: "line", name: "节点加权进度", yAxisIndex: 1, data: analytics.data?.projectHealth.map((item) => item.progress) ?? [], lineStyle: { color: chartPalette.accent, width: 3 }, itemStyle: { color: chartPalette.accent } },
+      { type: "bar", name: "净工时", tooltip: { valueFormatter: (value: string | number) => formatDuration(Number(value)) }, data: analytics.data?.projectHealth.map((item) => item.seconds) ?? [], itemStyle: { color: hexWithAlpha(chartPalette.accent, 0.56), borderRadius: [6, 6, 0, 0] } },
+      { type: "line", name: "节点加权进度", tooltip: { valueFormatter: (value: string | number) => `${Number(value).toFixed(1)}%` }, yAxisIndex: 1, data: analytics.data?.projectHealth.map((item) => item.progress) ?? [], lineStyle: { color: chartPalette.accent, width: 3 }, itemStyle: { color: chartPalette.accent } },
     ],
   }), [analytics.data?.projectHealth, chartPalette]);
   const anomalyOption = useMemo<EChartsCoreOption>(() => ({
@@ -10987,7 +11261,7 @@ export function AnalyticsPage({ me }: { me: Me }) {
     grid: { left: 16, right: 14, top: 18, bottom: 28, containLabel: true },
     tooltip: { trigger: "axis", confine: true, axisPointer: { type: "shadow" }, backgroundColor: chartPalette.surface, borderColor: chartPalette.border, textStyle: { color: chartPalette.text } },
     xAxis: { type: "value", minInterval: 1, axisLabel: { color: chartPalette.textSubtle }, splitLine: { lineStyle: { color: chartPalette.grid } } },
-    yAxis: { type: "category", data: analytics.data?.anomalies.map((item) => item.category === "net_duration_under_60_seconds" ? "不足 1 分钟" : item.category === "gross_duration_over_16_hours" ? "超过 16 小时" : item.category) ?? [], axisLabel: { width: 136, overflow: "truncate", color: chartPalette.textMuted }, axisLine: { lineStyle: { color: chartPalette.border } } },
+    yAxis: { type: "category", data: analytics.data?.anomalies.map((item) => item.category === "net_duration_under_60_seconds" ? "不足 1 分钟" : item.category === "gross_duration_over_16_hours" ? "超过 16 小时" : item.category === "overlapping_work_requires_review" ? "重叠时段待核对" : item.category) ?? [], axisLabel: { width: 136, overflow: "truncate", color: chartPalette.textMuted }, axisLine: { lineStyle: { color: chartPalette.border } } },
     series: [{ type: "bar", name: "记录数", data: analytics.data?.anomalies.map((item) => item.count) ?? [], itemStyle: { color: chartPalette.warning, borderRadius: [0, 7, 7, 0] } }],
   }), [analytics.data?.anomalies, chartPalette]);
   const canExport = me.permissions.some(
@@ -11030,11 +11304,11 @@ export function AnalyticsPage({ me }: { me: Me }) {
           aria-label="分析联动筛选"
           className={`analytics-filter-bar mb-5 ${filtersOpen ? "is-open" : ""}`}
         >
-          <button className="analytics-filter-toggle" onClick={() => setFiltersOpen((open) => !open)} type="button">
+          <button className="analytics-filter-toggle" aria-expanded={filtersOpen} aria-controls="analytics-filter-controls" onClick={() => setFiltersOpen((open) => !open)} type="button">
             <span>筛选{activeFilterCount ? ` · ${activeFilterCount}` : ""}</span>
             <ChevronRight className={filtersOpen ? "rotate-90" : ""} size={16} />
           </button>
-          <div className="analytics-filter-controls">
+          <div className="analytics-filter-controls" id="analytics-filter-controls">
             <select aria-label="筛选项目" className={fieldClass} onChange={(event) => changeFilter("projectId", event.target.value)} value={filters.projectId}>
               <option value="">全部项目</option>
               {analytics.data.availableFilters.projects.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
@@ -11060,7 +11334,7 @@ export function AnalyticsPage({ me }: { me: Me }) {
               {analytics.data.availableFilters.sourceTypes.map((item) => <option key={item} value={item}>{sourceLabels[item] ?? item}</option>)}
             </select>
           </div>
-          {analytics.isFetching && !analytics.isPending ? <span className="sr-only" role="status">正在更新筛选结果</span> : null}
+          {analytics.isFetching && !analytics.isPending ? <span className="analytics-refresh-status" role="status">正在更新筛选结果，图表暂显示上次结果…</span> : null}
         </section>
       ) : null}
       {analytics.isPending ? (
@@ -11334,7 +11608,7 @@ export function AnalyticsPage({ me }: { me: Me }) {
         </>
       ) : null}
       <div className="mt-4">
-        <ErrorMessage error={analytics.error} />
+        <ErrorMessage error={analytics.error} onRetry={() => void analytics.refetch()} retrying={analytics.isFetching} />
       </div>
     </>
   );
@@ -11588,7 +11862,7 @@ function AiSettingsEditor({
       let message = "组织 AI 配置已保存，新请求将使用当前配置。";
       if (testAfterSave) {
         try {
-          const result = await api<{ check: AiProviderCheck }>("/api/ai/settings/check", { method: "POST", body: { password: form.password, ...(form.totpCode.trim() ? { totpCode: form.totpCode.trim() } : {}) } });
+          const result = await api<{ check: AiProviderCheck }>("/api/ai/settings/check", { method: "POST", timeoutMs: form.generationOptions.requestTimeoutMs + 15_000, body: { password: form.password, ...(form.totpCode.trim() ? { totpCode: form.totpCode.trim() } : {}) } });
           message = result.check.status === "succeeded" ? "配置已保存，连接测试成功。" : `配置已保存，连接测试失败：${result.check.errorSummary ?? "请查看连接记录。"}`;
         } catch (error) {
           message = `配置已保存，连接测试未完成：${error instanceof Error ? error.message : "请稍后重试。"}`;
@@ -11620,6 +11894,7 @@ function AiSettingsEditor({
     mutationFn: () =>
       api<{ check: AiProviderCheck }>("/api/ai/settings/check", {
         method: "POST",
+        timeoutMs: 315_000,
         body: {
           password: form.password,
           ...(form.totpCode.trim() ? { totpCode: form.totpCode.trim() } : {}),
@@ -11899,6 +12174,12 @@ export function AiPage({ me }: { me: Me }) {
   const queryClient = useQueryClient();
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
+  const location = useLocation();
+  const currentLocationKey = useRef<string | null>(location.key);
+  useEffect(() => {
+    currentLocationKey.current = location.key;
+    return () => { currentLocationKey.current = null; };
+  }, [location.key]);
   const requestedConversationId = searchParams.get("conversation") ?? "primary";
   const conversationId = /^[a-zA-Z0-9_-]{1,64}$/.test(requestedConversationId)
     ? requestedConversationId
@@ -11932,15 +12213,20 @@ export function AiPage({ me }: { me: Me }) {
   });
   const [scope, setScope] = useState<"self" | "team">("self");
   const [taskType, setTaskType] = useState<AiTaskType>("weekly_summary");
-  const [question, setQuestion] = useState("");
-  const [activeReportId, setActiveReportId] = useState<string | null>(() => searchParams.get("report"));
+  const [questionDrafts, setQuestionDrafts] = useState<Record<string, string>>({});
+  const question = questionDrafts[conversationId] ?? "";
+  const setQuestion = (value: string) => setQuestionDrafts((current) => ({ ...current, [conversationId]: value }));
+  const activeReportId = searchParams.get("report");
+  const setActiveReportId = (id: string) => {
+    const next = new URLSearchParams(searchParams);
+    next.set("report", id);
+    navigate({ search: `?${next.toString()}` });
+  };
   const [settingsOpen, setSettingsOpen] = useState(false);
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
-  // Keep one five-minute-aligned seven-day range for the lifetime of this
-  // screen. A double click, reconnect, or React Query retry then resolves to
-  // the same server-side job instead of paying for a nearly-identical prompt
-  // whose only difference is the current millisecond.
-  const reportRange = useMemo(() => {
+  // Same-bucket requests deduplicate; a tab left open overnight must still
+  // request a fresh range when the user next creates a report.
+  const reportRange = () => {
     const to = new Date();
     to.setSeconds(0, 0);
     to.setMinutes(Math.floor(to.getMinutes() / 5) * 5);
@@ -11949,36 +12235,42 @@ export function AiPage({ me }: { me: Me }) {
       from: new Date(to.getTime() - days * 86_400_000).toISOString(),
       to: to.toISOString(),
     };
-  }, [taskType]);
+  };
   const create = useMutation({
-    mutationFn: () =>
-      api("/api/ai/reports", {
+    mutationFn: async (origin: string) => {
+      const response = await api<{ job: { id: string } }>("/api/ai/reports", {
         method: "POST",
-        body: { taskType, scope, ...reportRange },
-      }),
-    onSuccess: async () => {
+        body: { taskType, scope, ...reportRange() },
+      });
+      return { ...response, origin };
+    },
+    onSuccess: async (response) => {
+      // A late creation must not change a conversation or page the user opened meanwhile.
+      if (response.job?.id && currentLocationKey.current === response.origin) setActiveReportId(response.job.id);
       await queryClient.invalidateQueries({ queryKey: ["ai-reports"] });
     },
   });
   const sendChat = useMutation({
-    mutationFn: () => {
+    mutationFn: (input: { question: string; conversationId: string }) => {
       const to = new Date();
       to.setSeconds(0, 0);
+      to.setMinutes(Math.floor(to.getMinutes() / 5) * 5);
       return api("/api/ai/reports", {
         method: "POST",
         body: {
           taskType: "assistant_chat",
           scope,
-          question: question.trim(),
-          conversationId,
+          question: input.question.trim(),
+          conversationId: input.conversationId,
           ...(pageContext ? { pageContext } : {}),
           from: new Date(to.getTime() - 31 * 86_400_000).toISOString(),
           to: to.toISOString(),
         },
       });
     },
-    onSuccess: async () => {
-      setQuestion("");
+    onSuccess: async (_response, input) => {
+      setQuestionDrafts((current) => current[input.conversationId] === input.question
+        ? { ...current, [input.conversationId]: "" } : current);
       await queryClient.invalidateQueries({ queryKey: ["ai-reports"] });
     },
   });
@@ -12035,12 +12327,10 @@ export function AiPage({ me }: { me: Me }) {
     next.set("conversation", id);
     next.delete("report");
     navigate({ search: `?${next.toString()}` });
-    setActiveReportId(null);
   };
   const newConversation = () => {
     const suffix = crypto.randomUUID().replaceAll("-", "").slice(0, 12);
     openConversation(`chat_${Date.now().toString(36)}_${suffix}`);
-    setQuestion("");
   };
   const chatItems = allItems
     .filter(
@@ -12055,7 +12345,7 @@ export function AiPage({ me }: { me: Me }) {
   useEffect(() => {
     const container = chatScrollRef.current;
     if (!container) return;
-    container.scrollTo({ top: container.scrollHeight, behavior: "smooth" });
+    container.scrollTo({ top: container.scrollHeight, behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "instant" : "smooth" });
   }, [chatUpdateKey]);
   const selected =
     reportItems.find((item) => item.job.id === activeReportId || item.report?.id === activeReportId) ??
@@ -12105,6 +12395,8 @@ export function AiPage({ me }: { me: Me }) {
         <Card>
           <LoadingBlock />
         </Card>
+      ) : reports.isError && !reports.data ? (
+        <Card><CardContent><ErrorMessage error={reports.error} onRetry={() => void reports.refetch()} retrying={reports.isFetching} /></CardContent></Card>
       ) : (
         <div className="ai-workspace">
           <aside className="ai-history">
@@ -12223,7 +12515,7 @@ export function AiPage({ me }: { me: Me }) {
                   className="mt-4 flex flex-col gap-3"
                   onSubmit={(event) => {
                     event.preventDefault();
-                    if (question.trim().length >= 2) sendChat.mutate();
+                    if (question.trim().length >= 2 && !sendChat.isPending) sendChat.mutate({ question, conversationId });
                   }}
                 >
                   <textarea
@@ -12290,7 +12582,7 @@ export function AiPage({ me }: { me: Me }) {
                 <div className="mt-4 flex flex-wrap items-center gap-3">
                   <Button
                     disabled={create.isPending}
-                    onClick={() => create.mutate()}
+                    onClick={() => create.mutate(location.key)}
                   >
                     {create.isPending ? "正在提交任务…" : "生成所选洞察"}
                     <ArrowUpRight size={16} />
@@ -12394,7 +12686,7 @@ export function AiPage({ me }: { me: Me }) {
                             本报告没有可展示的实体来源；请仅将摘要作为辅助说明。
                           </p>
                         )}
-                        <ErrorMessage error={selectedDetail.error} />
+                        <ErrorMessage error={selectedDetail.error} onRetry={() => void selectedDetail.refetch()} retrying={selectedDetail.isFetching} />
                       </section>
                     </>
                   ) : (
@@ -12438,7 +12730,7 @@ export function AiPage({ me }: { me: Me }) {
               <Card className="ai-report-card mt-5">
                 <EmptyState
                   action={
-                    <Button onClick={() => create.mutate()}>
+                    <Button disabled={create.isPending} onClick={() => create.mutate(location.key)}>
                       <Bot size={17} />
                       生成第一份报告
                     </Button>
@@ -12453,7 +12745,8 @@ export function AiPage({ me }: { me: Me }) {
         </div>
       )}
       <div className="mt-4">
-        <ErrorMessage error={reports.error ?? create.error ?? sendChat.error ?? cancel.error ?? retry.error} />
+        <ErrorMessage error={create.error ?? sendChat.error ?? cancel.error ?? retry.error} />
+        {reports.data ? <ErrorMessage error={reports.error} onRetry={() => void reports.refetch()} retrying={reports.isFetching} /> : null}
       </div>
     </>
   );

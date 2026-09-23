@@ -8,6 +8,9 @@ import { join } from "node:path";
 // local calendar date than a developer machine in Shanghai.
 const e2eTimezone = "Asia/Shanghai";
 process.env.TZ = e2eTimezone;
+const e2ePort = Number(process.env.PLAYWRIGHT_PORT ?? 5173);
+if (!Number.isInteger(e2ePort) || e2ePort < 1024 || e2ePort > 65535) throw new Error("PLAYWRIGHT_PORT must be a valid non-privileged port");
+const e2eWebMode = process.env.PLAYWRIGHT_PREVIEW === "true" ? "preview" : "dev";
 
 // CI always installs the Playwright-pinned browser. On a Windows developer machine,
 // an already-installed Playwright Chromium is a safe fallback when a CDN is blocked.
@@ -41,7 +44,7 @@ export default defineConfig({
     timeout: process.env.CI ? 10_000 : 5_000,
   },
   use: {
-    baseURL: "http://127.0.0.1:5173",
+    baseURL: `http://127.0.0.1:${e2ePort}`,
     timezoneId: e2eTimezone,
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
@@ -51,8 +54,8 @@ export default defineConfig({
     { name: "mobile-chromium", use: { ...devices["Pixel 7"], ...localLaunch } },
   ],
   webServer: {
-    command: "pnpm --filter @workbench/web dev",
-    url: "http://127.0.0.1:5173",
+    command: `pnpm --filter @workbench/web ${e2eWebMode} --port ${e2ePort}`,
+    url: `http://127.0.0.1:${e2ePort}`,
     // A stale Vite process can disappear midway through a parallel run. Reuse
     // only when a developer explicitly opts in, not as the default test path.
     reuseExistingServer: process.env.PLAYWRIGHT_REUSE_SERVER === "true",

@@ -83,6 +83,17 @@ afterEach(async () => {
 });
 
 describe("organization invitation lifecycle", () => {
+  it("moves organizational units within one transaction, rejects cycles and requires parents before archiving", async () => {
+    const { service, actor } = await createService();
+    const first = await service.createUnit(actor, { name: "第一部门", parentId: null });
+    const second = await service.createUnit(actor, { name: "第二部门", parentId: null });
+    const moved = await service.updateUnit(actor, second.id, 1, { parentId: first.id, leaderMembershipId: actor.membershipId });
+    expect(moved.parentId).toBe(first.id);
+    await expect(service.updateUnit(actor, first.id, 1, { parentId: second.id })).rejects.toThrow("循环");
+    await expect(service.archiveUnit(actor, first.id, 1)).rejects.toThrow("子组织单元");
+    await service.archiveUnit(actor, second.id, moved.version);
+    await expect(service.createUnit(actor, { name: "新子部门", parentId: second.id })).rejects.toThrow("已归档");
+  });
   it("accepts a newly issued link immediately and consumes it exactly once", async () => {
     const { service, actor } = await createService();
     const invitation = await service.invite(actor, {

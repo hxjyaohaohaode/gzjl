@@ -248,6 +248,12 @@ export async function registerAiRoutes(
           ? reply.code(202).send({ job })
           : reply.code(404).send({ error: "ai_job_not_found", message: "任务不存在。" });
       } catch (error) {
+        if (error instanceof AiQuotaExceededError) {
+          return reply.code(429).send({ error: "ai_quota_exceeded", message: error.message });
+        }
+        if (error instanceof AiUnavailableError) {
+          return reply.code(503).send({ error: "ai_unavailable", message: error.message });
+        }
         if (error instanceof AiJobConflictError) {
           return reply.code(409).send({ error: "ai_job_conflict", message: error.message });
         }

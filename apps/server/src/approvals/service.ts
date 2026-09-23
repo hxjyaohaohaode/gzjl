@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, isNull } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, ne, or } from "drizzle-orm";
 import type { Database } from "@workbench/db";
 import {
   attachmentLinks,
@@ -14,6 +14,8 @@ import {
   workSessionVersions,
 } from "@workbench/db/schema";
 import type { PermissionGrant } from "@workbench/shared";
+import { workReviewScope } from "../work/review-scope.js";
+import { lockPayrollInputs } from "../payroll/input-lock.js";
 
 export interface ApprovalActor {
   organizationId: string;
@@ -90,10 +92,14 @@ export class ApprovalService {
           eq(approvalRequests.organizationId, actor.organizationId),
           eq(approvalRequests.status, "pending"),
           eq(workSessions.recordKind, "fact"),
+          isNull(workSessions.deletedAt),
+          ne(approvalRequests.requestedBy, actor.membershipId),
+          or(isNull(approvalRequests.assignedReviewerId), eq(approvalRequests.assignedReviewerId, actor.membershipId)),
+          workReviewScope(actor.grants),
         ),
       )
       .orderBy(desc(approvalRequests.priority), desc(approvalRequests.requestedAt))
-      .limit(Math.min(limit * 3, 300));
+      .limit(limit);
 
     const visible = [];
     for (const candidate of candidates) {
@@ -161,6 +167,10 @@ export class ApprovalService {
     if (decision === "returned" && (!reason || reason.trim().length < 2)) {
       throw new ApprovalConflictError("退回时必须填写明确原因。")
     }
+    if (decision === "approved" && Array.isArray(reviewable.session.anomalyFlags) &&
+        reviewable.session.anomalyFlags.includes("overlapping_work_requires_review") && (!reason || reason.trim().length < 2)) {
+      throw new ApprovalConflictError("该计时记录与其他工作时段重叠，请填写核对说明后再批准；重叠秒数不会重复计薪。");
+    }
     if (decision === "approved") {
       const [reviewableEvidence] = await this.db
         .select({ id: attachments.id })
@@ -185,6 +195,7 @@ export class ApprovalService {
     }
 
     return this.db.transaction(async (tx) => {
+      await lockPayrollInputs(tx, actor.organizationId);
       const [breaks, projectLinks] = await Promise.all([
         tx
           .select()
@@ -290,6 +301,7 @@ export class ApprovalService {
     const reviewable = await this.loadReviewable(actor, requestId);
     if (reviewable.request.status !== "pending") throw new ApprovalConflictError();
     return this.db.transaction(async (tx) => {
+      await lockPayrollInputs(tx, actor.organizationId);
       const [breaks, projectLinks] = await Promise.all([
         tx
           .select()

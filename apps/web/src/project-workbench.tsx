@@ -31,7 +31,7 @@ import {
   UserPlus,
   UsersRound,
 } from "lucide-react";
-import { lazy, Suspense, useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useState, type SetStateAction } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import {
   calculateDerivedProjectProgress,
@@ -42,6 +42,8 @@ import {
 import { Badge, Button, Card, CardContent, cn } from "@workbench/ui";
 
 import { api, type Me } from "./api.js";
+import { getOrganizationTimezone, toZonedInputValue, zonedInputToDate } from "./timezone.js";
+import { useVersionedDraft } from "./versioned-draft.js";
 import {
   EmptyState,
   ErrorMessage,
@@ -262,15 +264,14 @@ function formatDate(value: string | null): string {
     ? new Intl.DateTimeFormat("zh-CN", {
         month: "short",
         day: "numeric",
+        timeZone: getOrganizationTimezone(),
       }).format(new Date(value))
     : "未排期";
 }
 
 function toDateTimeLocalInput(value: string | null): string {
   if (!value) return "";
-  const date = new Date(value);
-  const pad = (part: number) => String(part).padStart(2, "0");
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  return toZonedInputValue(new Date(value)).slice(0, 16);
 }
 
 function formatProjectWorkTime(value: string | null | undefined): string {
@@ -280,6 +281,7 @@ function formatProjectWorkTime(value: string | null | undefined): string {
     day: "numeric",
     hour: "2-digit",
     minute: "2-digit",
+    timeZone: getOrganizationTimezone(),
   }).format(new Date(value));
 }
 
@@ -568,13 +570,8 @@ function Timeline({
         ),
       )
     : startMs + 6 * DAY_MS;
-  const start = new Date(startMs);
   const end = new Date(endMs);
-  const naturalRangeStart = new Date(
-    start.getFullYear(),
-    start.getMonth(),
-    start.getDate(),
-  );
+  const naturalRangeStart = zonedInputToDate(`${toZonedInputValue(new Date(startMs)).slice(0, 10)}T00:00`);
   const naturalRangeEnd = new Date(
     Math.max(end.getTime(), naturalRangeStart.getTime() + 6 * DAY_MS),
   );
@@ -634,6 +631,7 @@ function Timeline({
               {new Intl.DateTimeFormat("zh-CN", {
                 month: "numeric",
                 day: "numeric",
+                timeZone: getOrganizationTimezone(),
               }).format(day)}
             </span>
           ))}
@@ -1283,7 +1281,7 @@ function NodeInspectorContent({
   onOpenRecycle?: () => void;
 }) {
   const queryClient = useQueryClient();
-  const [form, setForm] = useState({
+  const contentDraft = useVersionedDraft(node.version, {
     title: node.title,
     description: node.description ?? "",
     status: node.status,
@@ -1294,16 +1292,22 @@ function NodeInspectorContent({
     dueAt: toDateTimeLocalInput(node.dueAt),
     changeSummary: "更新项目节点",
   });
-  const [assignedMembershipIds, setAssignedMembershipIds] = useState(
-    assignees.map((assignee) => assignee.membershipId),
-  );
-  const [responsibleMembershipId, setResponsibleMembershipId] = useState(
-    assignees.find((assignee) => assignee.isResponsible)?.membershipId ?? "",
-  );
-  const [move, setMove] = useState({
+  const form = contentDraft.value;
+  const setForm = contentDraft.setValue;
+  const assigneeDraft = useVersionedDraft(node.version, {
+    ids: assignees.map((assignee) => assignee.membershipId),
+    responsible: assignees.find((assignee) => assignee.isResponsible)?.membershipId ?? "",
+  });
+  const assignedMembershipIds = assigneeDraft.value.ids;
+  const setAssignedMembershipIds = (ids: SetStateAction<string[]>) => assigneeDraft.setValue((current) => ({ ...current, ids: typeof ids === "function" ? ids(current.ids) : ids }));
+  const responsibleMembershipId = assigneeDraft.value.responsible;
+  const setResponsibleMembershipId = (responsible: string) => assigneeDraft.setValue((current) => ({ ...current, responsible }));
+  const moveDraft = useVersionedDraft(node.version, {
     parentId: node.parentId ?? "",
     sortOrder: String(node.sortOrder),
   });
+  const move = moveDraft.value;
+  const setMove = moveDraft.setValue;
   const [relation, setRelation] = useState<{
     targetNodeIds: string[];
     type: ProjectEdgeType;
@@ -1349,10 +1353,10 @@ function NodeInspectorContent({
   });
   const update = useMutation({
     mutationFn: () =>
-      api(`/api/projects/${projectId}/nodes/${node.id}`, {
+      api<{ node: ProjectNode }>(`/api/projects/${projectId}/nodes/${node.id}`, {
         method: "PATCH",
         body: {
-          expectedVersion: node.version,
+          expectedVersion: contentDraft.version,
           title: form.title,
           description: form.description.trim() || null,
           status: form.status,
@@ -1360,38 +1364,41 @@ function NodeInspectorContent({
             form.progressMode === "manual" ? Number(form.progress) : undefined,
           progressMode: form.progressMode,
           weight: Number(form.weight),
-          startAt: form.startAt ? new Date(form.startAt).toISOString() : null,
-          dueAt: form.dueAt ? new Date(form.dueAt).toISOString() : null,
+          startAt: form.startAt ? zonedInputToDate(form.startAt).toISOString() : null,
+          dueAt: form.dueAt ? zonedInputToDate(form.dueAt).toISOString() : null,
           changeSummary: form.changeSummary,
         },
       }),
-    onSuccess: refresh,
+    onSuccess: async ({ node: savedNode }) => {
+      contentDraft.saved(savedNode.version, { ...form, title: savedNode.title, description: savedNode.description ?? "", status: savedNode.status, progress: String(savedNode.progress), progressMode: savedNode.progressMode ?? "manual", weight: String(savedNode.weight ?? "1"), startAt: toDateTimeLocalInput(savedNode.startAt), dueAt: toDateTimeLocalInput(savedNode.dueAt) });
+      await refresh();
+    },
   });
   const updateAssignees = useMutation({
     mutationFn: () =>
-      api(`/api/projects/${projectId}/nodes/${node.id}/assignees`, {
+      api<{ node: ProjectNode }>(`/api/projects/${projectId}/nodes/${node.id}/assignees`, {
         method: "PUT",
         body: {
-          expectedVersion: node.version,
+          expectedVersion: assigneeDraft.version,
           assignments: assignedMembershipIds.map((membershipId) => ({
             membershipId,
             isResponsible: responsibleMembershipId === membershipId,
           })),
         },
       }),
-    onSuccess: refresh,
+    onSuccess: async ({ node: savedNode }) => { assigneeDraft.saved(savedNode.version, assigneeDraft.value); await refresh(); },
   });
   const moveNode = useMutation({
     mutationFn: () =>
-      api(`/api/projects/${projectId}/nodes/${node.id}/move`, {
+      api<{ node: ProjectNode }>(`/api/projects/${projectId}/nodes/${node.id}/move`, {
         method: "POST",
         body: {
-          expectedVersion: node.version,
+          expectedVersion: moveDraft.version,
           parentId: move.parentId || null,
           sortOrder: Number(move.sortOrder),
         },
       }),
-    onSuccess: refresh,
+    onSuccess: async ({ node: savedNode }) => { moveDraft.saved(savedNode.version, { parentId: savedNode.parentId ?? "", sortOrder: String(savedNode.sortOrder) }); await refresh(); },
   });
   const remove = useMutation({
     mutationFn: () =>
@@ -1559,7 +1566,13 @@ function NodeInspectorContent({
           </Button>
         </div>
       </div>
-      <div className="project-node-inspector-scroll">
+      <fieldset className="project-node-inspector-scroll" style={{ minWidth: 0 }} disabled={update.isPending || updateAssignees.isPending || moveNode.isPending || remove.isPending || rollback.isPending || claim.isPending || createRelation.isPending || deleteRelation.isPending}>
+        {contentDraft.conflict || assigneeDraft.conflict || moveDraft.conflict ? <div role="alert" className="mb-3 text-sm">
+          <p>该节点已有较新版本。正在编辑的草稿仍已保留，保存前请核对最新内容。</p>
+          {([
+            ["内容", contentDraft], ["负责人", assigneeDraft], ["位置", moveDraft],
+          ] as const).map(([label, draft]) => draft.conflict ? <Button key={label} size="compact" variant="secondary" onClick={() => { if (window.confirm(`放弃未保存的${label}修改，并加载最新版本？`)) draft.acceptLatest(); }}>重新加载{label}</Button> : null)}
+        </div> : null}
         <section>
           <div className="project-node-readout">
             <Badge tone={statusTone(node.status)}>
@@ -1691,7 +1704,7 @@ function NodeInspectorContent({
                 </p>
               )}
               <Button
-                disabled={updateAssignees.isPending || projectMembers.isPending}
+                disabled={updateAssignees.isPending || projectMembers.isPending || assigneeDraft.conflict}
                 onClick={() => updateAssignees.mutate()}
                 size="compact"
                 variant="secondary"
@@ -1747,7 +1760,7 @@ function NodeInspectorContent({
           <>
             <section className="project-inspector-section">
               <p className="app-section-label">内容与状态</p>
-              <div className="mt-3 grid gap-3">
+              <form className="mt-3 grid gap-3" onSubmit={(event) => { event.preventDefault(); if (!update.isPending && !contentDraft.conflict) update.mutate(); }}>
                 <Field label="标题">
                   <input
                     className={fieldClass}
@@ -1823,6 +1836,8 @@ function NodeInspectorContent({
                       disabled={form.progressMode !== "manual"}
                       max="100"
                       min="0"
+                      required
+                      step="0.01"
                       onChange={(event) =>
                         setForm({ ...form, progress: event.target.value })
                       }
@@ -1837,6 +1852,8 @@ function NodeInspectorContent({
                     <input
                       className={fieldClass}
                       min="0"
+                      max="1000000"
+                      required
                       onChange={(event) =>
                         setForm({ ...form, weight: event.target.value })
                       }
@@ -1860,6 +1877,7 @@ function NodeInspectorContent({
                   <Field label="截止时间">
                     <input
                       className={fieldClass}
+                      min={form.startAt || undefined}
                       onChange={(event) =>
                         setForm({ ...form, dueAt: event.target.value })
                       }
@@ -1886,16 +1904,17 @@ function NodeInspectorContent({
                 <Button
                   disabled={
                     update.isPending ||
+                    contentDraft.conflict ||
                     !form.title.trim() ||
                     !form.changeSummary.trim()
                   }
-                  onClick={() => update.mutate()}
+                  type="submit"
                   variant="secondary"
                 >
                   <Save size={16} />
                   保存节点版本
                 </Button>
-              </div>
+              </form>
             </section>
             <section className="project-inspector-section">
               <p className="app-section-label">节点关联</p>
@@ -2092,7 +2111,7 @@ function NodeInspectorContent({
                   />
                 </Field>
                 <Button
-                  disabled={moveNode.isPending}
+                  disabled={moveNode.isPending || moveDraft.conflict || !move.sortOrder.trim() || !Number.isInteger(Number(move.sortOrder)) || Number(move.sortOrder) < 0}
                   onClick={() => moveNode.mutate()}
                   size="compact"
                   variant="secondary"
@@ -2140,7 +2159,7 @@ function NodeInspectorContent({
             linkedWork.error
           }
         />
-      </div>
+      </fieldset>
     </aside>
   );
 }
@@ -2170,7 +2189,7 @@ function NodeInspector({
     <NodeInspectorContent
       membershipId={membershipId}
       canManage={canManage}
-      key={`${node.id}-${node.version}`}
+      key={node.id}
       node={node}
       nodes={nodes}
       assignees={assignees}
@@ -2294,10 +2313,10 @@ export function ProjectDetailPage({ me }: { me: Me }) {
           progressMode: nodeForm.progressMode,
           weight: Number(nodeForm.weight),
           startAt: nodeForm.startAt
-            ? new Date(nodeForm.startAt).toISOString()
+            ? zonedInputToDate(nodeForm.startAt).toISOString()
             : undefined,
           dueAt: nodeForm.dueAt
-            ? new Date(nodeForm.dueAt).toISOString()
+            ? zonedInputToDate(nodeForm.dueAt).toISOString()
             : undefined,
           sortOrder: tree.data?.nodes.length ?? 0,
         },
@@ -2592,6 +2611,7 @@ export function ProjectDetailPage({ me }: { me: Me }) {
           description={tree.error?.message ?? "项目不存在或没有访问权限。"}
           icon={<AlertCircle />}
           title="无法打开项目"
+          action={<Button disabled={tree.isFetching} onClick={() => void tree.refetch()} variant="secondary">重新加载项目</Button>}
         />
       </Card>
     );
@@ -2781,9 +2801,10 @@ export function ProjectDetailPage({ me }: { me: Me }) {
                   className="project-create-grid"
                   onSubmit={(event) => {
                     event.preventDefault();
-                    createNode.mutate();
+                    if (!createNode.isPending) createNode.mutate();
                   }}
                 >
+                  <fieldset className="contents" disabled={createNode.isPending}>
                   <Field label="节点标题">
                     <input
                       className={fieldClass}
@@ -2978,6 +2999,7 @@ export function ProjectDetailPage({ me }: { me: Me }) {
                       {createNode.isPending ? "正在创建…" : "创建版本化节点"}
                     </Button>
                   </div>
+                  </fieldset>
                 </form>
                 <ErrorMessage error={createNode.error} />
               </CardContent>

@@ -8,6 +8,16 @@ import {
 } from "./work-time.js";
 
 describe("calculateWorkDuration", () => {
+  it("rounds total effective milliseconds once and assigns rounding to the break total", () => {
+    const result = calculateWorkDuration({ startAt: new Date("2026-09-22T08:00:00.100Z"), endAt: new Date("2026-09-22T08:00:10.100Z") },
+      [{ startAt: new Date("2026-09-22T08:00:04.700Z"), endAt: new Date("2026-09-22T08:00:05.500Z") }]);
+    expect(result).toEqual({ grossSeconds: 10, breakSeconds: 1, netSeconds: 9 });
+    const split = calculateWorkDuration({ startAt: new Date("2026-09-22T08:00:00.100Z"), endAt: new Date("2026-09-22T08:00:10.100Z") }, [
+      { startAt: new Date("2026-09-22T08:00:04.700Z"), endAt: new Date("2026-09-22T08:00:05.000Z") },
+      { startAt: new Date("2026-09-22T08:00:05.000Z"), endAt: new Date("2026-09-22T08:00:05.500Z") },
+    ]);
+    expect(split).toEqual(result);
+  });
   it("subtracts multiple legal breaks without changing gross duration", () => {
     const result = calculateWorkDuration(
       {

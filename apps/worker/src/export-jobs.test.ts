@@ -4,14 +4,15 @@ import { resolve } from "node:path";
 import { DeleteObjectCommand, PutObjectCommand, type S3Client } from "@aws-sdk/client-s3";
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import type { PgBoss } from "pg-boss";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Database } from "@workbench/db";
 import {
   auditLogs,
   exports as exportJobs,
   notifications,
+  notificationPreferences,
   organizations,
   orgMemberships,
   users,
@@ -138,6 +139,85 @@ afterEach(async () => {
 });
 
 describe("export worker lifecycle", () => {
+  it("keeps completion notifications during a temporary mute for delivery after unmuting", async () => {
+    const { db, job } = await createFixture();
+    await db.insert(notificationPreferences).values({ membershipId: job.requestedBy, category: "export_ready", inAppEnabled: true, mutedUntil: new Date(Date.now() + 60_000) });
+    const client = { send: async () => ({}) } as unknown as S3Client;
+    await createExportJobRuntime(db, {} as PgBoss, { client, bucket: "test" }).process(job.id);
+    expect(await db.select().from(notifications)).toHaveLength(1);
+  });
+  it.each(["exportProjectIds", "exportOrgUnitIds"])("keeps an empty authorized %s scope empty", async (scopeKey) => {
+    const { db, job } = await createFixture();
+    await db.update(exportJobs).set({ fieldPolicySnapshot: {
+      ...(job.fieldPolicySnapshot as Record<string, unknown>),
+      exportOrganizationWide: false,
+      [scopeKey]: ["00000000-0000-4000-8000-000000000099"],
+    } }).where(eq(exportJobs.id, job.id));
+    let payload: { rowCount: number; items: unknown[] } | undefined;
+    const client = { send: async (command: PutObjectCommand) => {
+      payload = JSON.parse((command.input.Body as Buffer).toString("utf8"));
+      return {};
+    } } as unknown as S3Client;
+    await createExportJobRuntime(db, {} as PgBoss, { client, bucket: "test" }).process(job.id);
+    expect(payload).toMatchObject({ rowCount: 0, items: [] });
+  });
+
+  it("preserves a completed export when notification storage fails", async () => {
+    const { db, job } = await createFixture();
+    await db.execute(sql`create function reject_notification() returns trigger language plpgsql as $$ begin raise exception 'notification unavailable'; end $$`);
+    await db.execute(sql`create trigger reject_notification before insert on notifications for each row execute function reject_notification()`);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const send = vi.fn(async (command: PutObjectCommand | DeleteObjectCommand) => {
+      expect(command).toBeInstanceOf(PutObjectCommand);
+      return {};
+    });
+    try {
+      const runtime = createExportJobRuntime(db, {} as PgBoss, { client: { send } as unknown as S3Client, bucket: "test" });
+      await runtime.process(job.id);
+      await runtime.process(job.id);
+      expect((await db.select().from(exportJobs).where(eq(exportJobs.id, job.id)))[0]).toMatchObject({ status: "completed", attempt: 1 });
+      expect(send).toHaveBeenCalledTimes(1);
+      expect(send.mock.calls[0]?.[0]).not.toBeInstanceOf(DeleteObjectCommand);
+      expect(warn).toHaveBeenCalledWith("Export notification unavailable; job result preserved.");
+    } finally { warn.mockRestore(); }
+  });
+
+  it("does not let an expired worker replace or delete a newer artifact", async () => {
+    const { db, job } = await createFixture();
+    let start!: () => void;
+    let finish!: () => void;
+    const started = new Promise<void>((resolve) => { start = resolve; });
+    const blocked = new Promise<void>((resolve) => { finish = resolve; });
+    const sent: Array<PutObjectCommand | DeleteObjectCommand> = [];
+    let first = true;
+    const client = { send: async (command: PutObjectCommand | DeleteObjectCommand) => {
+      sent.push(command);
+      if (command instanceof PutObjectCommand && first) { first = false; start(); await blocked; }
+      return {};
+    } } as unknown as S3Client;
+    const runtime = createExportJobRuntime(db, {} as PgBoss, { client, bucket: "test" });
+    const staleRun = runtime.process(job.id);
+    await started;
+    await db.update(exportJobs).set({ startedAt: new Date(Date.now() - 16 * 60_000) }).where(eq(exportJobs.id, job.id));
+    await runtime.recoverExpiredLeases();
+    await runtime.process(job.id);
+    const completed = (await db.select().from(exportJobs).where(eq(exportJobs.id, job.id)))[0]!;
+    finish();
+    await staleRun;
+    expect(completed).toMatchObject({ status: "completed", attempt: 2 });
+    expect((await db.select().from(exportJobs).where(eq(exportJobs.id, job.id)))[0]?.objectKey).toBe(completed.objectKey);
+    const uploads = sent.filter((command) => command instanceof PutObjectCommand);
+    expect(uploads[0]!.input.Key).not.toBe(uploads[1]!.input.Key);
+    expect(sent.filter((command) => command instanceof DeleteObjectCommand).map((command) => command.input.Key)).toEqual([uploads[0]!.input.Key]);
+    expect(await db.select().from(notifications)).toHaveLength(1);
+  });
+
+  it("stops automatic recovery after the final interrupted lease", async () => {
+    const { db, job } = await createFixture();
+    await db.update(exportJobs).set({ status: "running", attempt: job.maxAttempts, startedAt: new Date(Date.now() - 16 * 60_000) }).where(eq(exportJobs.id, job.id));
+    await createExportJobRuntime(db, {} as PgBoss, null).recoverExpiredLeases();
+    expect((await db.select().from(exportJobs).where(eq(exportJobs.id, job.id)))[0]).toMatchObject({ status: "failed", errorSummary: "export_lease_expired", completedAt: expect.any(Date) });
+  });
   it("renders authorized facts, redacts sensitive fields, uploads, notifies, and expires", async () => {
     const { db, job } = await createFixture();
     const sent: Array<PutObjectCommand | DeleteObjectCommand> = [];

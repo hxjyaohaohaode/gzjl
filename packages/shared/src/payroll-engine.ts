@@ -29,6 +29,119 @@ export interface PayableInterval {
   startAt: Date;
   endAt: Date;
   approvalStatus: "approved" | "pending_review";
+  /** Allocated full seconds; factual boundaries remain millisecond-accurate. */
+  payableSeconds?: number;
+  firstPayableAt?: Date;
+}
+
+/** A person's second is payable once even when several factual records
+ * describe it. Approved coverage wins over estimates; stable source ordering
+ * keeps the financial trace deterministic without deleting original facts. */
+export function mergePayableIntervals(input: readonly PayableInterval[]): PayableInterval[] {
+  const events = new Map<number, { starts: number[]; ends: number[] }>();
+  const eventAt = (time: number) => {
+    const event = events.get(time) ?? { starts: [], ends: [] };
+    events.set(time, event);
+    return event;
+  };
+  input.forEach((interval, index) => {
+    if (!Number.isFinite(interval.startAt.getTime()) || !Number.isFinite(interval.endAt.getTime()) || interval.endAt <= interval.startAt)
+      throw new RangeError("Payroll intervals must have a positive duration");
+    eventAt(interval.startAt.getTime()).starts.push(index);
+    eventAt(interval.endAt.getTime()).ends.push(index);
+  });
+  const priority = (left: number, right: number) => {
+    const a = input[left]!; const b = input[right]!;
+    return Number(a.approvalStatus !== "approved") - Number(b.approvalStatus !== "approved") ||
+      a.startAt.getTime() - b.startAt.getTime() || a.sourceId.localeCompare(b.sourceId) || left - right;
+  };
+  const heap: number[] = []; const active = new Set<number>();
+  const push = (index: number) => {
+    heap.push(index); let cursor = heap.length - 1;
+    while (cursor > 0) {
+      const parent = Math.floor((cursor - 1) / 2);
+      if (priority(heap[parent]!, heap[cursor]!) <= 0) break;
+      [heap[parent], heap[cursor]] = [heap[cursor]!, heap[parent]!]; cursor = parent;
+    }
+  };
+  const removeTop = () => {
+    const last = heap.pop(); if (!heap.length || last === undefined) return;
+    heap[0] = last; let cursor = 0;
+    while (cursor * 2 + 1 < heap.length) {
+      let next = cursor * 2 + 1;
+      if (next + 1 < heap.length && priority(heap[next + 1]!, heap[next]!) < 0) next += 1;
+      if (priority(heap[cursor]!, heap[next]!) <= 0) break;
+      [heap[cursor], heap[next]] = [heap[next]!, heap[cursor]!]; cursor = next;
+    }
+  };
+  const times = [...events.keys()].sort((a, b) => a - b); const merged: PayableInterval[] = [];
+  times.forEach((time, offset) => {
+    const event = events.get(time)!;
+    event.ends.forEach((index) => active.delete(index));
+    event.starts.forEach((index) => { active.add(index); push(index); });
+    while (heap.length && !active.has(heap[0]!)) removeTop();
+    const end = times[offset + 1]; const winner = heap.length ? input[heap[0]!] : undefined;
+    if (end === undefined || !winner) return;
+    const previous = merged.at(-1);
+    if (previous?.endAt.getTime() === time && previous.sourceId === winner.sourceId && previous.approvalStatus === winner.approvalStatus) {
+      previous.endAt = new Date(end);
+    } else merged.push({ ...winner, startAt: new Date(time), endAt: new Date(end) });
+  });
+  return merged;
+}
+
+/** Whole seconds belong to the source covering their start. The clock runs
+ * only during effective work: breaks pause it, and source/status changes do
+ * not reset it. Preserve factual boundaries even when one allocated second
+ * spans two work fragments separated by a break. */
+export function wholeSecondPayableIntervals(input: readonly PayableInterval[]): PayableInterval[] {
+  const ordered = [...input].sort((left, right) => left.startAt.getTime() - right.startAt.getTime());
+  if (ordered.every((entry, index) => Number.isInteger(entry.payableSeconds) && entry.payableSeconds! >= 0 &&
+    entry.firstPayableAt && (index === 0 || ordered[index - 1]!.endAt <= entry.startAt))) {
+    return ordered.map((entry) => ({ ...entry }));
+  }
+  const merged = mergePayableIntervals(input);
+  const result: PayableInterval[] = [];
+  const duration = (entry: PayableInterval) => entry.endAt.getTime() - entry.startAt.getTime();
+  const approvedBudget = Math.floor(merged.filter((entry) => entry.approvalStatus === "approved").reduce((sum, entry) => sum + duration(entry), 0) / 1_000);
+  const totalBudget = Math.floor(merged.reduce((sum, entry) => sum + duration(entry), 0) / 1_000);
+  const elapsedByStatus = { approved: 0, pending_review: 0 };
+  for (const interval of merged) {
+    // Pending facts cannot lower already approved seconds or shift confirmed
+    // pay into estimates. Confirmed coverage owns its independent full budget;
+    // pending coverage receives only the remaining union budget.
+    const budget = interval.approvalStatus === "approved" ? approvedBudget : totalBudget - approvedBudget;
+    const elapsedMs = elapsedByStatus[interval.approvalStatus];
+    const start = Math.min(budget, Math.ceil(elapsedMs / 1_000));
+    const endMs = elapsedMs + duration(interval);
+    const end = Math.min(budget, Math.ceil(endMs / 1_000));
+    result.push({ ...interval, payableSeconds: end - start,
+      firstPayableAt: new Date(interval.startAt.getTime() + start * 1_000 - elapsedMs) });
+    elapsedByStatus[interval.approvalStatus] = endMs;
+  }
+  return result;
+}
+
+export function payableIntervalSeconds(interval: PayableInterval): number {
+  return interval.payableSeconds ?? Math.floor((interval.endAt.getTime() - interval.startAt.getTime()) / 1_000);
+}
+
+/** Divide already allocated seconds between rate windows by their start;
+ * applying a new rate must not reset the person's fractional-second clock. */
+export function clipWholeSecondPayableIntervals(
+  intervals: readonly PayableInterval[], startsAt: Date, endsAt: Date,
+): PayableInterval[] {
+  return wholeSecondPayableIntervals(intervals).flatMap((interval) => {
+    const origin = (interval.firstPayableAt ?? interval.startAt).getTime();
+    const budget = payableIntervalSeconds(interval);
+    const start = Math.min(budget, Math.max(0, Math.ceil((startsAt.getTime() - origin) / 1_000)));
+    const end = Math.min(budget, Math.max(0, Math.ceil((endsAt.getTime() - origin) / 1_000)));
+    return end > start ? [{ ...interval,
+      startAt: interval.startAt < startsAt ? startsAt : interval.startAt,
+      endAt: interval.endAt > endsAt ? endsAt : interval.endAt,
+      firstPayableAt: new Date(origin + start * 1_000), payableSeconds: end - start,
+    }] : [];
+  });
 }
 
 export interface PayrollComponentResult {
@@ -227,6 +340,42 @@ function weekStartDate(date: string): string {
   return value.toISOString().slice(0, 10);
 }
 
+function* payableMinuteSegments(interval: PayableInterval) {
+  let cursor = (interval.firstPayableAt ?? interval.startAt).getTime();
+  let remaining = payableIntervalSeconds(interval);
+  while (remaining > 0) {
+    const boundary = Math.floor(cursor / 60_000) * 60_000 + 60_000;
+    const seconds = Math.min(remaining, Math.ceil((boundary - cursor) / 1_000));
+    yield { startAt: new Date(cursor), seconds };
+    remaining -= seconds;
+    cursor += seconds * 1_000;
+  }
+}
+
+function dailyContextCounter(intervals: readonly PayableInterval[], timezone: string) {
+  const byDate = new Map<string, Array<{ start: number; seconds: number; before: number }>>();
+  for (const interval of intervals) {
+    for (const segment of payableMinuteSegments(interval)) {
+      const date = localParts(segment.startAt, timezone).date;
+      const entries = byDate.get(date) ?? [];
+      const previous = entries.at(-1);
+      entries.push({ start: segment.startAt.getTime(), seconds: segment.seconds, before: previous ? previous.before + previous.seconds : 0 });
+      byDate.set(date, entries);
+    }
+  }
+  return (at: Date, date: string) => {
+    const entries = byDate.get(date) ?? [];
+    let low = 0; let high = entries.length;
+    while (low < high) {
+      const middle = Math.floor((low + high) / 2);
+      if (entries[middle]!.start <= at.getTime()) low = middle + 1;
+      else high = middle;
+    }
+    const entry = entries[low - 1];
+    return entry ? entry.before + Math.min(entry.seconds, Math.max(0, Math.floor((at.getTime() - entry.start) / 1_000))) : 0;
+  };
+}
+
 function weeklyThresholdCrossings(
   intervals: readonly PayableInterval[],
   timezone: string,
@@ -241,16 +390,7 @@ function weeklyThresholdCrossings(
     if (interval.endAt <= interval.startAt) {
       throw new RangeError("Payroll intervals must have a positive duration");
     }
-    let cursor = new Date(interval.startAt);
-    while (cursor < interval.endAt) {
-      const nextMinute = new Date(
-        Math.min(
-          interval.endAt.getTime(),
-          Math.floor(cursor.getTime() / 60_000) * 60_000 + 60_000,
-        ),
-      );
-      const seconds = Math.ceil((nextMinute.getTime() - cursor.getTime()) / 1_000);
-      if (seconds <= 0) break;
+    for (const { startAt: cursor, seconds } of payableMinuteSegments(interval)) {
       const parts = localParts(cursor, timezone);
       const week = weekStartDate(parts.date);
       const cumulative = cumulativeByWeek.get(week) ?? 0;
@@ -275,7 +415,6 @@ function weeklyThresholdCrossings(
         });
       }
       cumulativeByWeek.set(week, cumulative + seconds);
-      cursor = nextMinute;
     }
   }
   return crossings;
@@ -285,6 +424,7 @@ export function calculateHourlyPayroll(input: {
   hourlyRate: string;
   timezone: string;
   intervals: readonly PayableInterval[];
+  dailyContextIntervals?: readonly PayableInterval[];
   weeklyContextIntervals?: readonly PayableInterval[];
   weeklyBonusEligibilityIntervals?: readonly PayableInterval[];
   excludedWeeklyBonusWeekStarts?: readonly string[];
@@ -296,7 +436,7 @@ export function calculateHourlyPayroll(input: {
   // Forces IANA timezone validation before calculations begin.
   localParts(new Date(0), input.timezone);
 
-  const intervals = [...input.intervals]
+  const intervals = wholeSecondPayableIntervals(input.intervals)
     .filter(
       (interval) =>
         interval.approvalStatus === "approved" || input.includePendingAsEstimate,
@@ -308,31 +448,27 @@ export function calculateHourlyPayroll(input: {
   // every organization-local date so a multi-day pay period cannot make all
   // work after day one look like overtime.
   const cumulativeSecondsByDate = new Map<string, number>();
+  const approvedSecondsByDate = new Map<string, number>();
+  const dailyContext = input.dailyContextIntervals
+    ? wholeSecondPayableIntervals([...input.dailyContextIntervals, ...input.intervals])
+        .filter((interval) => interval.approvalStatus === "approved" || input.includePendingAsEstimate)
+    : undefined;
+  const contextSecondsBefore = dailyContext ? dailyContextCounter(dailyContext, input.timezone) : undefined;
+  const approvedContextSecondsBefore = dailyContext
+    ? dailyContextCounter(dailyContext.filter((interval) => interval.approvalStatus === "approved"), input.timezone) : undefined;
   const components = new Map<string, MutableComponent>();
 
   for (const interval of intervals) {
     if (interval.endAt <= interval.startAt) {
       throw new RangeError("Payroll intervals must have a positive duration");
     }
-    let cursor = new Date(interval.startAt);
-    while (cursor < interval.endAt) {
-      const nextMinute = new Date(
-        Math.min(
-          interval.endAt.getTime(),
-          Math.floor(cursor.getTime() / 60_000) * 60_000 + 60_000,
-        ),
-      );
-      // Timer events carry millisecond precision. Rounding down the first
-      // partial minute left the cursor just before the same minute boundary;
-      // the next pass then had zero whole seconds and could discard the rest
-      // of an otherwise valid hour. Ceiling advances to the boundary while
-      // the interval's integer-second total remains exact.
-      let segmentSeconds = Math.ceil((nextMinute.getTime() - cursor.getTime()) / 1_000);
-      if (segmentSeconds <= 0) break;
+    for (const segment of payableMinuteSegments(interval)) {
+      let cursor = segment.startAt;
+      let segmentSeconds = segment.seconds;
 
       while (segmentSeconds > 0) {
         const parts = localParts(cursor, input.timezone);
-        const cumulativeSeconds = cumulativeSecondsByDate.get(parts.date) ?? 0;
+        const cumulativeSeconds = contextSecondsBefore?.(cursor, parts.date) ?? cumulativeSecondsByDate.get(parts.date) ?? 0;
         const isWeekendDay = parts.weekday === "Sat" || parts.weekday === "Sun";
         const holidayRule = highestPriority(
           input.rules,
@@ -393,7 +529,10 @@ export function calculateHourlyPayroll(input: {
           }
         }
 
-        const estimate = interval.approvalStatus === "pending_review";
+        const pending = interval.approvalStatus === "pending_review";
+        const approvedBefore = approvedContextSecondsBefore?.(cursor, parts.date) ?? approvedSecondsByDate.get(parts.date) ?? 0;
+        const estimate = pending || Boolean(overtimeRule && ruleIds.includes(overtimeRule.id) &&
+          approvedBefore < (overtimeRule.thresholdSeconds ?? Number.MAX_SAFE_INTEGER));
         // A date-scoped component is intentionally preserved in the immutable
         // payroll trace. The employee dashboard can therefore render exact
         // daily pay without recalculating money in the browser.
@@ -418,8 +557,11 @@ export function calculateHourlyPayroll(input: {
         component.seconds += pieceSeconds;
         component.amountNumerator +=
           rateMicros * multiplierMicros * BigInt(pieceSeconds);
-        if (estimate) pendingSeconds += pieceSeconds;
-        else approvedSeconds += pieceSeconds;
+        if (pending) pendingSeconds += pieceSeconds;
+        else {
+          approvedSeconds += pieceSeconds;
+          approvedSecondsByDate.set(parts.date, approvedBefore + pieceSeconds);
+        }
         cumulativeSecondsByDate.set(parts.date, cumulativeSeconds + pieceSeconds);
         segmentSeconds -= pieceSeconds;
         cursor = new Date(
@@ -450,9 +592,9 @@ export function calculateHourlyPayroll(input: {
   let weeklyBonusEstimatedSeconds = 0;
   const weeklyBonusWeekStarts: string[] = [];
   const excludedWeeks = new Set(input.excludedWeeklyBonusWeekStarts ?? []);
-  const weeklyContext = input.weeklyContextIntervals ?? input.intervals;
+  const weeklyContext = wholeSecondPayableIntervals(input.weeklyContextIntervals ?? input.intervals);
   const weeklyBonusEligibility =
-    input.weeklyBonusEligibilityIntervals ?? input.intervals;
+    wholeSecondPayableIntervals(input.weeklyBonusEligibilityIntervals ?? input.intervals);
   const approvedContext = weeklyContext.filter(
     (interval) => interval.approvalStatus === "approved",
   );
@@ -483,7 +625,6 @@ export function calculateHourlyPayroll(input: {
       if (!crossing) continue;
       const belongsToCalculation = weeklyBonusEligibility.some(
         (interval) =>
-          interval.sourceId === crossing.sourceId &&
           crossing.earnedAt >= interval.startAt &&
           crossing.earnedAt < interval.endAt &&
           (approvedCrossing !== undefined || input.includePendingAsEstimate),
@@ -532,7 +673,7 @@ export function calculateHourlyPayroll(input: {
     weeklyBonusEstimatedSeconds,
     weeklyBonusWeekStarts,
     grossAmount: formatDecimal(grossAmount),
-    estimate: pendingSeconds > 0 || weeklyBonusEstimatedSeconds > 0,
+    estimate: resultComponents.some((component) => component.estimate),
     components: resultComponents,
   };
 }

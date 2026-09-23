@@ -1220,8 +1220,8 @@ test("personal payroll renders reconciled totals, daily pay, period trend, and c
   await expect(page.getByRole("img", { name: "2026 年 9 月每日薪资" })).toBeVisible();
   await expect(page.getByRole("img", { name: "周期薪资趋势" })).toBeVisible();
   await expect(page.getByRole("img", { name: "2026 年 9 月薪资构成瀑布图" })).toBeVisible();
-  await expect(page.getByText("基础工时", { exact: true })).toBeVisible();
-  await expect(page.getByText("补贴", { exact: true })).toBeVisible();
+  await expect(page.getByRole("paragraph").filter({ hasText: /^基础工时$/ })).toBeVisible();
+  await expect(page.getByRole("paragraph").filter({ hasText: /^补贴$/ })).toBeVisible();
   await page.getByRole("button", { name: "确认已收到薪资" }).click();
   await expect.poll(() => acknowledgedPayslip).toBe(true);
 });
@@ -4910,7 +4910,8 @@ test("calendar exposes mini navigation and reserves drag scheduling for drafts",
     recordKind: "plan",
   };
   const overnightStart = new Date(sessionStart);
-  overnightStart.setDate(overnightStart.getDate() - 1);
+  // Both halves must belong to the visible week, including Monday runs.
+  overnightStart.setDate(overnightStart.getDate() - (overnightStart.getDay() === 1 ? 0 : 1));
   overnightStart.setHours(23, 30, 0, 0);
   const overnight = {
     ...session,
@@ -5914,10 +5915,22 @@ test("work entry updates selected nodes across projects without reselecting unre
   const unrelated = "00000000-0000-4000-8000-000000000913";
   const recordId = "00000000-0000-4000-8000-000000000921";
   let submitted: Record<string, unknown> | null = null;
+  let recommendationStarted = false;
+  let releaseRecommendations!: () => void;
+  let secondTreeStarted = false;
+  let releaseSecondTree!: () => void;
   await page.route("**/api/projects", (route) => route.fulfill({ json: { items: [{ id: a, key: "A", name: "项目甲" }, { id: b, key: "B", name: "项目乙" }] } }));
   await page.route("**/api/projects/" + a + "/tree", (route) => route.fulfill({ json: { nodes: [{ id: first, title: "项目甲交付", type: "task", status: "in_progress", progress: "10", progressMode: "manual" }, { id: unrelated, title: "未选任务", type: "task", status: "in_progress", progress: "5", progressMode: "manual" }] } }));
-  await page.route("**/api/projects/" + b + "/tree", (route) => route.fulfill({ json: { nodes: [{ id: second, title: "项目乙验收", type: "task", status: "in_progress", progress: "20", progressMode: "manual" }] } }));
-  await page.route("**/api/work-sessions/project-node-recommendations?**", (route) => route.fulfill({ json: { items: [] } }));
+  await page.route("**/api/projects/" + b + "/tree", async (route) => {
+    secondTreeStarted = true;
+    await new Promise<void>((resolve) => { releaseSecondTree = resolve; });
+    await route.fulfill({ json: { nodes: [{ id: second, title: "项目乙验收", type: "task", status: "in_progress", progress: "20", progressMode: "manual" }] } });
+  });
+  await page.route("**/api/work-sessions/project-node-recommendations?**", async (route) => {
+    recommendationStarted = true;
+    await new Promise<void>((resolve) => { releaseRecommendations = resolve; });
+    await route.fulfill({ json: { items: [{ id: first, projectId: a, projectKey: "A", projectName: "项目甲", projectColor: "#3468f5", title: "项目甲交付", type: "task", status: "in_progress", progress: "10", progressMode: "manual", reasons: ["工作内容相关"] }] } });
+  });
   await page.route("**/api/work-sessions?**", (route) => route.fulfill({ json: { items: [] } }));
   await page.route("**/api/work-sessions", async (route) => {
     submitted = route.request().postDataJSON();
@@ -5940,7 +5953,20 @@ test("work entry updates selected nodes across projects without reselecting unre
   await expect(page.getByLabel("主项目节点", { exact: true })).not.toContainText("未选任务");
   await page.getByLabel("更新 项目甲交付 的进度").check();
   await page.getByLabel("项目甲交付完成度", { exact: true }).fill("25");
+  await expect.poll(() => recommendationStarted).toBe(true);
+  const progressTopBefore = await page.getByLabel("项目甲交付进度更新").evaluate((element) => element.getBoundingClientRect().top);
+  releaseRecommendations();
+  await expect(page.getByRole("listbox", { name: "推荐项目节点" })).toBeVisible();
+  const progressTopAfter = await page.getByLabel("项目甲交付进度更新").evaluate((element) => element.getBoundingClientRect().top);
+  expect(Math.abs(progressTopAfter - progressTopBefore)).toBeLessThanOrEqual(1);
+  await expect(page.getByLabel("项目甲交付完成度", { exact: true })).toHaveValue("25");
   await page.getByLabel("关联项目（可选）", { exact: true }).selectOption(b);
+  await expect.poll(() => secondTreeStarted).toBe(true);
+  const selectedNodeTopBefore = await page.getByLabel("项目甲交付进度更新").evaluate((element) => element.getBoundingClientRect().top);
+  releaseSecondTree();
+  await expect(page.getByLabel("关联 项目乙验收", { exact: true })).toBeVisible();
+  const selectedNodeTopAfter = await page.getByLabel("项目甲交付进度更新").evaluate((element) => element.getBoundingClientRect().top);
+  expect(Math.abs(selectedNodeTopAfter - selectedNodeTopBefore)).toBeLessThanOrEqual(1);
   await page.getByLabel("关联 项目乙验收", { exact: true }).check();
   await page.getByLabel("更新 项目乙验收 的进度").check();
   await page.getByLabel("项目乙验收完成度", { exact: true }).fill("75");
@@ -6014,4 +6040,478 @@ test("Owner saves and tests a new provider with editable generation settings", a
   await expect(page.getByRole("status").filter({ hasText: "配置已保存，连接测试未完成" })).toBeVisible();
   await expect(page.getByLabel("AI Base URL")).toHaveValue("https://third.example/v1");
   await expect(page.getByLabel("当前 Owner 密码")).toHaveValue("");
+});
+
+async function loginForResilience(page: Page, path: string) {
+  await page.goto("/login");
+  await page.getByLabel("邮箱或手机号").fill("owner@example.test");
+  await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "林知夏，今天好" })).toBeVisible();
+  await page.goto(path);
+}
+
+test("resilience: blocked preference storage never blanks the workspace", async ({ page }) => {
+  await page.addInitScript(() => {
+    Storage.prototype.getItem = () => { throw new DOMException("blocked", "SecurityError"); };
+    Storage.prototype.setItem = () => { throw new DOMException("blocked", "QuotaExceededError"); };
+  });
+  await mockAuthenticatedWorkspace(page);
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await loginForResilience(page, "/work");
+  await expect(page.getByRole("heading", { name: "工作记录", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "外观设置" }).click();
+  await page.getByRole("button", { name: "深色", exact: true }).click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  expect(errors).toEqual([]);
+});
+
+test("resilience: failed analytics can be retried without pretending to be an empty result", async ({ page }) => {
+  await mockAuthenticatedWorkspace(page);
+  let fail = true;
+  await page.route("**/api/analytics/summary?**", (route) => fail
+    ? route.fulfill({ status: 403, json: { error: "forbidden", message: "测试暂时无法读取分析" } })
+    : route.fallback());
+  await loginForResilience(page, "/analytics");
+  await expect(page.getByRole("alert")).toContainText("测试暂时无法读取分析");
+  await expect(page.getByRole("img", { name: "每日净工时趋势图" })).toHaveCount(0);
+  fail = false;
+  await page.getByRole("button", { name: "重新加载", exact: true }).click();
+  await expect(page.getByRole("img", { name: "每日净工时趋势图" })).toBeVisible();
+  await expect(page.getByRole("alert")).toHaveCount(0);
+});
+
+test("resilience: all chart families expose data, export PNG and recover from denied fullscreen", async ({ page }, testInfo) => {
+  await mockAuthenticatedWorkspace(page);
+  await page.addInitScript(() => {
+    Element.prototype.requestFullscreen = () => Promise.reject(new DOMException("unsupported", "NotSupportedError"));
+  });
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await loginForResilience(page, "/analytics");
+  const names = ["每日净工时趋势图", "项目投入分布图", "24 小时工作节奏图", "工作记录日历热力图", "审核状态分布图", "记录到计薪漏斗图", "事实与未来工时预测带", "项目工作类型与审核流向桑基图", "项目与工作类型旭日图", "成员工作量分布图", "项目工时与加权进度图", "异常记录类别图"];
+  for (const name of names) {
+    const summary = page.getByText(`查看${name}数据`, { exact: true });
+    await summary.click();
+    const table = page.getByRole("region", { name: `${name}数据表`, exact: true });
+    await expect(table).toBeVisible();
+    expect(await table.locator("tbody tr").count()).toBeGreaterThan(0);
+    await summary.click();
+  }
+  const downloadEvent = page.waitForEvent("download");
+  await page.getByRole("button", { name: "下载每日净工时趋势图图片" }).click();
+  expect((await downloadEvent).suggestedFilename()).toBe("每日净工时趋势图.png");
+  const enter = page.getByRole("button", { name: "全屏查看每日净工时趋势图" });
+  await enter.click();
+  const expanded = page.getByRole("dialog", { name: "每日净工时趋势图", exact: true });
+  await expect(expanded).toBeVisible();
+  await page.keyboard.press("Control+k");
+  await expect(page.getByRole("dialog", { name: "全局导航", exact: true })).toHaveCount(0);
+  const box = await expanded.boundingBox();
+  expect(box?.width).toBe(page.viewportSize()!.width);
+  expect(await expanded.evaluate((element) => [[8, 8], [innerWidth - 8, 8], [8, innerHeight - 8], [innerWidth / 2, innerHeight / 2]]
+    .every(([x, y]) => element.contains(document.elementFromPoint(x!, y!))))).toBe(true);
+  await expanded.getByRole("button", { name: "退出全屏每日净工时趋势图" }).focus();
+  await page.keyboard.press("Tab");
+  const dataSummary = expanded.locator("summary");
+  await expect(dataSummary).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(expanded.getByRole("region", { name: "每日净工时趋势图数据表" })).toBeVisible();
+  await page.keyboard.press("Enter");
+  await page.screenshot({ path: testInfo.outputPath("chart-fullscreen-recovery.png") });
+  await page.keyboard.press("Escape");
+  await expect(expanded).toHaveCount(0);
+  await expect(enter).toBeFocused();
+  expect(errors).toEqual([]);
+});
+
+for (const capability of ["disabled", "resolved-without-entering"] as const) {
+  test(`resilience: chart fullscreen recovers when the native API is ${capability}`, async ({ page }) => {
+    await mockAuthenticatedWorkspace(page);
+    await page.addInitScript((mode) => {
+      Object.defineProperty(document, "fullscreenEnabled", { configurable: true, value: mode !== "disabled" });
+      Element.prototype.requestFullscreen = () => {
+        document.documentElement.dataset.fullscreenRequested = "true";
+        return Promise.resolve();
+      };
+    }, capability);
+    await loginForResilience(page, "/analytics");
+    const enter = page.getByRole("button", { name: "全屏查看每日净工时趋势图", exact: true });
+    await enter.click();
+    const dialog = page.getByRole("dialog", { name: "每日净工时趋势图", exact: true });
+    await expect(dialog).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.dataset.fullscreenRequested === "true")).toBe(capability !== "disabled");
+    expect(await dialog.evaluate((element) => element.getBoundingClientRect().width / innerWidth)).toBeGreaterThan(0.95);
+    await page.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0);
+    await expect(enter).toBeFocused();
+    await expect(enter).toBeEnabled();
+  });
+}
+
+test("resilience: global search traps keyboard focus and restores its opener", async ({ page }) => {
+  await mockAuthenticatedWorkspace(page);
+  await loginForResilience(page, "/work");
+  if (await page.getByRole("button", { name: "打开导航", exact: true }).isVisible()) {
+    await page.getByRole("button", { name: "打开导航", exact: true }).click();
+  }
+  const opener = page.getByRole("button", { name: /搜索工作台/ });
+  await opener.click();
+  const dialog = page.getByRole("dialog", { name: "全局导航" });
+  await expect(page.getByRole("textbox", { name: "搜索工作台" })).toBeFocused();
+  await page.keyboard.press("Shift+Tab");
+  expect(await dialog.evaluate((element) => element.contains(document.activeElement))).toBe(true);
+  await page.keyboard.press("Tab");
+  await expect(page.getByRole("textbox", { name: "搜索工作台" })).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(dialog).toHaveCount(0);
+  // On mobile Escape also closes navigation, so focus must return to a visible control.
+  if (await opener.isVisible()) await expect(opener).toBeFocused();
+});
+
+test("resilience: sending an AI turn preserves edits and drafts in another conversation", async ({ page }) => {
+  await mockAuthenticatedWorkspace(page);
+  let release!: () => void;
+  const waitForReply = new Promise<void>((resolve) => { release = resolve; });
+  let sent = false;
+  await page.route("**/api/ai/reports", async (route) => {
+    if (route.request().method() !== "POST") return route.fulfill({ json: { items: [] } });
+    sent = true;
+    await waitForReply;
+    return route.fulfill({ status: 202, json: { job: { id: "00000000-0000-4000-8000-000000000881" } } });
+  });
+  await loginForResilience(page, "/ai");
+  const question = page.getByRole("textbox", { name: "向 AI 提问", exact: true });
+  await question.fill("第一轮的问题");
+  await page.getByRole("button", { name: "发送", exact: true }).click();
+  await expect.poll(() => sent).toBe(true);
+  await question.fill("第一对话里继续写的新草稿");
+  await page.getByRole("button", { name: "新建", exact: true }).click();
+  await question.fill("第二对话尚未发送的草稿");
+  release();
+  await expect(page.getByRole("button", { name: "发送", exact: true })).toBeEnabled();
+  await expect(question).toHaveValue("第二对话尚未发送的草稿");
+  await page.goBack();
+  await expect(question).toHaveValue("第一对话里继续写的新草稿");
+});
+
+test("resilience: page Copilot keeps text typed while a previous request is submitting", async ({ page }) => {
+  await mockAuthenticatedWorkspace(page);
+  let release!: () => void;
+  const pending = new Promise<void>((resolve) => { release = resolve; });
+  let sent = false;
+  await page.route("**/api/ai/reports", async (route) => {
+    if (route.request().method() !== "POST") return route.fulfill({ json: { items: [] } });
+    sent = true; await pending;
+    return route.fulfill({ status: 202, json: { job: { id: "00000000-0000-4000-8000-000000000882" } } });
+  });
+  await loginForResilience(page, "/work");
+  await page.getByRole("button", { name: "打开 AI 上下文" }).click();
+  const input = page.getByRole("textbox", { name: "向页面 AI 提问" });
+  await input.fill("先回答的页面问题");
+  await page.getByRole("button", { name: "发送", exact: true }).click();
+  await expect.poll(() => sent).toBe(true);
+  await input.fill("继续编辑的页面问题");
+  release();
+  await expect(page.getByRole("button", { name: "发送", exact: true })).toBeEnabled();
+  await expect(input).toHaveValue("继续编辑的页面问题");
+});
+
+test("resilience: failed AI history is not shown as an empty history and has a reload action", async ({ page }) => {
+  await mockAuthenticatedWorkspace(page);
+  let fail = true;
+  await page.route("**/api/ai/reports", (route) => fail
+    ? route.fulfill({ status: 403, json: { message: "暂时无法读取报告历史" } })
+    : route.fulfill({ json: { items: [] } }));
+  await loginForResilience(page, "/ai");
+  await expect(page.getByRole("alert")).toContainText("暂时无法读取报告历史");
+  await expect(page.getByText("还没有报告。生成后会在这里保留历史与来源数量。", { exact: true })).toHaveCount(0);
+  fail = false;
+  await page.getByRole("button", { name: "重新加载", exact: true }).click();
+  await expect(page.getByRole("textbox", { name: "向 AI 提问", exact: true })).toBeVisible();
+});
+
+test("resilience: interrupted timer writes remain visible and replay the same event for the same account", async ({ page }) => {
+  await mockAuthenticatedWorkspace(page);
+  let disconnected = true;
+  const received: Array<{ id: string; membership: string | undefined }> = [];
+  await page.route("**/api/timer/start", (route) => {
+    received.push({ id: route.request().postDataJSON().eventId, membership: route.request().headers()["x-workbench-membership"] });
+    return disconnected ? route.abort("connectionfailed") : route.fulfill({ status: 201, json: { timer: { id: "00000000-0000-4000-8000-000000000883", status: "running" } } });
+  });
+  await loginForResilience(page, "/work");
+  await page.getByLabel("准备做什么").fill("验证可恢复计时");
+  await page.getByRole("button", { name: "开始计时", exact: true }).click();
+  await expect(page.getByText("1 项计时操作待同步", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "开始计时", exact: true })).toBeDisabled();
+  disconnected = false;
+  await page.getByRole("button", { name: "重试同步", exact: true }).click();
+  await expect(page.getByText("1 项计时操作待同步", { exact: true })).toHaveCount(0);
+  expect(received).toHaveLength(2);
+  expect(received[0]).toEqual(received[1]);
+  expect(received[0]?.membership).toBe("00000000-0000-4000-8000-000000000002");
+});
+
+test("resilience: a conflicting offline timer can be reviewed and discarded only after confirmation", async ({ page }) => {
+  await mockAuthenticatedWorkspace(page);
+  let offline = true;
+  await page.route("**/api/timer/start", (route) => offline ? route.abort("connectionfailed") : route.fulfill({ status: 409, json: { error: "timer_conflict", message: "计时器已在另一台设备更新" } }));
+  await loginForResilience(page, "/work");
+  await page.getByLabel("准备做什么").fill("需要核对的本机计时");
+  await page.getByRole("button", { name: "开始计时", exact: true }).click();
+  await expect(page.getByText("1 项计时操作待同步", { exact: true })).toBeVisible();
+  offline = false;
+  await page.getByRole("button", { name: "重试同步", exact: true }).click();
+  await expect(page.getByText("计时器已在另一台设备更新", { exact: true })).toBeVisible();
+  await page.getByText("查看并处理待同步操作", { exact: true }).click();
+  await expect(page.locator(".offline-timer-status")).toContainText("需要核对的本机计时");
+  page.once("dialog", (dialog) => dialog.dismiss());
+  await page.getByRole("button", { name: "放弃这些本机操作", exact: true }).click();
+  await expect(page.getByText("1 项计时操作待同步", { exact: true })).toBeVisible();
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.getByRole("button", { name: "放弃这些本机操作", exact: true }).click();
+  await expect(page.getByText("1 项计时操作待同步", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "开始计时", exact: true })).toBeEnabled();
+});
+
+test("resilience: unowned and other-account timer events never replay in the current account", async ({ page }) => {
+  await mockAuthenticatedWorkspace(page);
+  const received: string[] = [];
+  await page.route("**/api/timer/start", (route) => { received.push(route.request().postDataJSON().eventId); return route.fulfill({ status: 201, json: { timer: null } }); });
+  await loginForResilience(page, "/work");
+  await page.evaluate(async () => {
+    const db = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("workbench-offline-v1", 1);
+      request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error);
+    });
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction("timer-events", "readwrite");
+      const store = tx.objectStore("timer-events");
+      for (const membershipId of [undefined, "other-account", "00000000-0000-4000-8000-000000000002"]) {
+        const id = membershipId ?? "legacy";
+        store.put({ id, membershipId, path: "/api/timer/start", body: { eventId: id }, queuedAt: new Date().toISOString() });
+      }
+      tx.oncomplete = () => resolve(); tx.onerror = () => reject(tx.error);
+    });
+    db.close();
+  });
+  await page.reload();
+  await expect.poll(() => received).toEqual(["00000000-0000-4000-8000-000000000002"]);
+  await expect(page.getByRole("heading", { name: "工作记录", exact: true })).toBeVisible();
+});
+
+for (const scenario of [
+  { path: "/work", api: "**/api/work-sessions?**", empty: "还没有工时记录" },
+  { path: "/projects", api: "**/api/projects/catalog", empty: "暂无项目" },
+  { path: "/approvals", api: "**/api/approvals?**", empty: "没有待处理审批" },
+]) {
+  test(`resilience: ${scenario.path} distinguishes a failed read from no records`, async ({ page }) => {
+    await mockAuthenticatedWorkspace(page);
+    let fail = true;
+    await page.route(scenario.api, (route) => fail ? route.fulfill({ status: 403, json: { message: "读取失败，请重试核对" } }) : route.fallback());
+    await loginForResilience(page, scenario.path);
+    await expect(page.getByRole("alert").filter({ hasText: "读取失败，请重试核对" }).first()).toBeVisible();
+    await expect(page.getByRole("heading", { name: scenario.empty, exact: true })).toHaveCount(0);
+    fail = false;
+    await page.getByRole("button", { name: "重新加载", exact: true }).first().click();
+    await expect(page.getByRole("alert").filter({ hasText: "读取失败，请重试核对" })).toHaveCount(0);
+  });
+}
+
+test("resilience: local work prefills are isolated across account switches", async ({ page }) => {
+  await mockAuthenticatedWorkspace(page);
+  await loginForResilience(page, "/work");
+  await page.getByRole("button", { name: "手工录入", exact: true }).click();
+  await page.getByLabel(/^工作内容/).fill("只属于第一账号的本机草稿");
+  await page.getByRole("button", { name: "本机保存预填写", exact: true }).click();
+  const original = await page.evaluate(async () => (await fetch("/api/me")).json());
+  await page.route("**/api/me", (route) => route.fulfill({ json: { ...original, user: { ...original.user, membershipId: "00000000-0000-4000-8000-000000000777" } } }));
+  await page.reload();
+  await page.getByRole("button", { name: "手工录入", exact: true }).click();
+  await page.getByRole("button", { name: "恢复预填写", exact: true }).click();
+  await expect(page.getByLabel(/^工作内容/)).toHaveValue("");
+  expect(await page.evaluate(() => localStorage.getItem("workbench:manual-work-prefill:v2:00000000-0000-4000-8000-000000000002"))).toContain("只属于第一账号的本机草稿");
+});
+
+test("resilience: an invalid export can be retried without downloading an error page", async ({ page }) => {
+  await mockAuthenticatedWorkspace(page, { canExport: true });
+  await page.route("**/api/exports/capabilities", (route) => route.fulfill({ json: { available: false, formats: ["csv", "json"], retentionHours: 24 } }));
+  await page.route("**/api/exports", (route) => route.fulfill({ json: { items: [] } }));
+  let failed = true;
+  await page.route("**/api/exports/work-sessions.csv?**", (route) => route.fulfill(failed
+    ? { contentType: "text/html", body: "<html>Gateway returned the wrong page</html>" }
+    : { contentType: "text/csv", body: "日期,工时\n2026-09-21,2\n" }));
+  const downloads: string[] = [];
+  page.on("download", (download) => downloads.push(download.suggestedFilename()));
+  await loginForResilience(page, "/analytics");
+  await page.getByRole("button", { name: "直接导出", exact: true }).click();
+  await expect(page.getByRole("alert").filter({ hasText: "有效的导出文件" })).toBeVisible();
+  expect(downloads).toEqual([]);
+  failed = false;
+  await page.getByRole("button", { name: "直接导出", exact: true }).click();
+  await expect.poll(() => downloads).toEqual(["work-sessions.csv"]);
+  await expect(page.getByRole("status").filter({ hasText: "已生成导出文件" })).toBeVisible();
+  await expect(page.getByRole("alert").filter({ hasText: "有效的导出文件" })).toHaveCount(0);
+});
+
+test("resilience: a render failure shows recovery controls and recovers after refreshing", async ({ page }) => {
+  await mockAuthenticatedWorkspace(page);
+  let malformed = true;
+  await page.route("**/api/projects/catalog", (route) => malformed ? route.fulfill({ json: { items: [null] } }) : route.fallback());
+  await loginForResilience(page, "/projects");
+  await expect(page.getByRole("heading", { name: "当前页面暂时无法显示" })).toBeVisible();
+  malformed = false;
+  await page.getByRole("button", { name: "刷新工作台", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "当前页面暂时无法显示" })).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "项目", exact: true })).toBeVisible();
+});
+
+test("resilience: analytics advances at organization midnight and keeps whole DST calendar days", async ({ page }) => {
+  await page.clock.setFixedTime(new Date("2026-03-09T03:59:00.000Z"));
+  await mockAuthenticatedWorkspace(page);
+  await loginForResilience(page, "/work");
+  const original = await page.evaluate(async () => (await fetch("/api/me")).json());
+  await page.route("**/api/me", (route) => route.fulfill({ json: { ...original, user: { ...original.user, timezone: "America/New_York" } } }));
+  const ranges: URL[] = [];
+  page.on("request", (request) => { if (new URL(request.url()).pathname === "/api/analytics/summary") ranges.push(new URL(request.url())); });
+  await page.goto("/analytics");
+  await expect.poll(() => ranges.at(-1)?.searchParams.get("to")).toBe("2026-03-09T04:00:00.000Z");
+  const initial = ranges.at(-1)!;
+  expect((Date.parse(initial.searchParams.get("to")!) - Date.parse(initial.searchParams.get("from")!)) / 3_600_000).toBe(30 * 24 - 1);
+  await page.clock.setFixedTime(new Date("2026-03-09T04:01:00.000Z"));
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await expect.poll(() => ranges.at(-1)?.searchParams.get("to")).toBe("2026-03-10T04:00:00.000Z");
+});
+
+for (const logoutStatus of [204, 401]) {
+  test(`resilience: failed logout stays recoverable and completes on ${logoutStatus}`, async ({ page }) => {
+    await mockAuthenticatedWorkspace(page);
+    let attempts = 0;
+    await page.route("**/api/auth/logout", async (route) => {
+      attempts += 1;
+      if (attempts === 1) return route.fulfill({ status: 503, json: { message: "会话服务暂时不可用" } });
+      if (logoutStatus === 204) return route.fallback();
+      return route.fulfill({ status: 401, json: { error: "unauthorized" } });
+    });
+    await loginForResilience(page, "/work");
+    const openNavigation = page.getByRole("button", { name: "打开导航", exact: true });
+    if (await openNavigation.isVisible()) await openNavigation.click();
+    await page.getByRole("button", { name: "退出登录", exact: true }).click();
+    await expect(page.getByRole("alert")).toContainText("尚未确认退出成功");
+    await expect(page).toHaveURL(/\/work$/);
+    expect(attempts).toBe(1);
+    await page.getByRole("button", { name: "重试退出", exact: true }).click();
+    await expect(page.getByRole("button", { name: "登录", exact: true })).toBeVisible();
+    await expect(page).toHaveURL(/\/login$/);
+    expect(attempts).toBe(2);
+  });
+}
+
+test("resilience: notification read and write failures retain recovery controls and accurate state", async ({ page }) => {
+  await mockAuthenticatedWorkspace(page);
+  let failRead = true;
+  let failWrite = true;
+  const item = { id: "notification-resilience", title: "待处理事项", body: "请查看这条通知", severity: "info", actionUrl: null, createdAt: "2026-09-21T01:00:00Z", readAt: null as string | null };
+  await page.route("**/api/notifications", (route) => failRead
+    ? route.fulfill({ status: 403, json: { message: "暂时无法读取通知" } })
+    : route.fulfill({ json: { items: [item] } }));
+  await page.route(`**/api/notifications/${item.id}/read`, (route) => {
+    if (failWrite) return route.fulfill({ status: 503, json: { message: "通知更新失败" } });
+    item.readAt = "2026-09-21T02:00:00Z";
+    return route.fulfill({ json: { notification: item } });
+  });
+  await loginForResilience(page, "/work");
+  await page.getByRole("button", { name: "通知", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("暂时无法读取通知");
+  await expect(page.getByText("暂无通知。", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("未读数待确认", { exact: true })).toBeVisible();
+  failRead = false;
+  await page.getByRole("button", { name: "重新加载通知", exact: true }).click();
+  await expect(page.getByText("1 条未读", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "标已读", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("通知状态未能更新");
+  await expect(page.getByText("1 条未读", { exact: true })).toBeVisible();
+  failWrite = false;
+  await page.getByRole("button", { name: "标已读", exact: true }).click();
+  await expect(page.getByText("0 条未读", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "标未读", exact: true })).toBeVisible();
+  await expect(page.getByRole("alert")).toHaveCount(0);
+});
+
+test("resilience: a late AI report creation does not replace the conversation opened meanwhile", async ({ page }) => {
+  await mockAuthenticatedWorkspace(page);
+  let release!: () => void;
+  const pending = new Promise<void>((resolve) => { release = resolve; });
+  let sent = false;
+  await page.route("**/api/ai/reports", async (route) => {
+    if (route.request().method() !== "POST") return route.fulfill({ json: { items: [] } });
+    sent = true;
+    await pending;
+    return route.fulfill({ status: 202, json: { job: { id: "late-report" } } });
+  });
+  await loginForResilience(page, "/ai");
+  await page.getByRole("button", { name: "生成所选洞察", exact: true }).click();
+  await expect.poll(() => sent).toBe(true);
+  await page.getByRole("button", { name: "新建", exact: true }).click();
+  const conversationUrl = page.url();
+  await page.getByRole("textbox", { name: "向 AI 提问", exact: true }).fill("新对话中的草稿");
+  release();
+  await expect(page.getByRole("button", { name: "生成所选洞察", exact: true })).toBeEnabled();
+  await expect(page).toHaveURL(conversationUrl);
+  await expect(page.getByRole("textbox", { name: "向 AI 提问", exact: true })).toHaveValue("新对话中的草稿");
+});
+
+test("resilience: work dates remain editable when cleared and new segments use organization wall time", async ({ page }) => {
+  await mockAuthenticatedWorkspace(page);
+  await page.route("**/api/evidence/capabilities", (route) => route.fulfill({ json: { fileUploads: { available: false, maxBytes: 1024 }, references: { text: true, url: true } } }));
+  await page.route("**/api/work-sessions/project-node-recommendations?**", (route) => route.fulfill({ json: { items: [] } }));
+  await loginForResilience(page, "/work");
+  const original = await page.evaluate(async () => (await fetch("/api/me")).json());
+  await page.route("**/api/me", (route) => route.fulfill({ json: { ...original, user: { ...original.user, timezone: "Pacific/Honolulu" } } }));
+  await page.reload();
+  await page.getByRole("button", { name: "手工录入", exact: true }).click();
+  const content = page.getByRole("textbox", { name: /^工作内容/ });
+  await content.fill("日期修改时保留的工作说明");
+  await page.getByLabel("结束时间", { exact: true }).fill("");
+  await expect(content).toHaveValue("日期修改时保留的工作说明");
+  await expect(page.getByText("请填写有效的结束时间；不完整或在组织时区中不存在的时间不会被当作计划或真实工时。", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "添加一段", exact: true })).toBeDisabled();
+  await page.getByLabel("开始时间", { exact: true }).fill("2026-09-21T10:00");
+  await page.getByLabel("结束时间", { exact: true }).fill("2026-09-21T11:00");
+  await page.getByRole("button", { name: "添加一段", exact: true }).click();
+  await expect(page.getByLabel("开始", { exact: true })).toHaveValue("2026-09-21T11:00");
+  await expect(page.getByLabel("结束", { exact: true })).toHaveValue("2026-09-21T12:00");
+  await page.getByLabel("结束", { exact: true }).fill("");
+  await expect(page.getByText("时间待完善", { exact: true })).toBeVisible();
+  await expect(content).toHaveValue("日期修改时保留的工作说明");
+  await expect(page.getByRole("heading", { name: "当前页面暂时无法显示" })).toHaveCount(0);
+});
+
+test("resilience: pending work saves lock the submitted editor and failures preserve the draft", async ({ page }) => {
+  await mockAuthenticatedWorkspace(page);
+  await page.route("**/api/evidence/capabilities", (route) => route.fulfill({ json: { fileUploads: { available: false, maxBytes: 1024 }, references: { text: true, url: true } } }));
+  await page.route("**/api/work-sessions/project-node-recommendations?**", (route) => route.fulfill({ json: { items: [] } }));
+  let release!: () => void;
+  const pending = new Promise<void>((resolve) => { release = resolve; });
+  let sent = false;
+  await page.route("**/api/work-plans", async (route) => {
+    sent = true;
+    await pending;
+    return route.fulfill({ status: 503, json: { message: "计划保存暂时不可用" } });
+  });
+  await loginForResilience(page, "/work");
+  await page.getByRole("button", { name: "手工录入", exact: true }).click();
+  const content = page.getByRole("textbox", { name: /^工作内容/ });
+  await content.fill("保存失败也必须保留的计划草稿");
+  await page.getByLabel("开始时间", { exact: true }).fill("2026-10-01T09:00");
+  await page.getByLabel("结束时间", { exact: true }).fill("2026-10-01T10:00");
+  await page.getByRole("button", { name: "保存云端计划", exact: true }).click();
+  await expect.poll(() => sent).toBe(true);
+  await expect(content).toBeDisabled();
+  await expect(page.getByRole("button", { name: "收起录入", exact: true })).toBeDisabled();
+  release();
+  await expect(page.getByRole("alert")).toContainText("计划保存暂时不可用");
+  await expect(content).toBeEnabled();
+  await expect(content).toHaveValue("保存失败也必须保留的计划草稿");
 });

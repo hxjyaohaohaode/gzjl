@@ -61,6 +61,7 @@ test("real API, database and file bytes connect the employee and management work
     await employee.getByLabel("关联 手机和桌面真实交付任务", { exact: true }).check();
     await employee.getByLabel("更新 手机和桌面真实交付任务 的进度").check();
     await employee.getByRole("button", { name: "75%", exact: true }).click();
+    await expect(employee.getByLabel("手机和桌面真实交付任务完成度", { exact: true })).toHaveValue("75");
     await employee.getByLabel("关联项目（可选）", { exact: true }).selectOption(secondProject.project.id);
     await employee.getByLabel("关联 跨项目同步验收", { exact: true }).check();
     await employee.getByLabel("更新 跨项目同步验收 的进度").check();
@@ -173,13 +174,46 @@ test("real API, database and file bytes connect the employee and management work
             expect(await button.evaluate((element) => element.getBoundingClientRect().height)).toBeGreaterThanOrEqual(44);
           }
         }
+        if (role === "owner" && path === "/analytics") {
+          const summary = page.getByText("查看每日净工时趋势图数据", { exact: true });
+          await summary.click();
+          await expect(page.getByRole("region", { name: "每日净工时趋势图数据表", exact: true })).toBeVisible();
+          await summary.click();
+          // Exercise the browser fullscreen path before forcing its fallback.
+          // Mobile card rules must not shrink the fullscreen canvas to 16rem.
+          const enterFullscreen = page.getByRole("button", { name: "全屏查看每日净工时趋势图", exact: true });
+          if (testInfo.project.use.hasTouch) await enterFullscreen.tap();
+          else await enterFullscreen.click();
+          const browserChart = page.getByRole("dialog", { name: "每日净工时趋势图", exact: true });
+          await expect(browserChart).toBeVisible();
+          await page.keyboard.press("Control+k");
+          await expect(page.getByRole("dialog", { name: "全局导航", exact: true })).toHaveCount(0);
+          expect(await browserChart.locator(".analytics-chart-canvas").evaluate((element) => element.getBoundingClientRect().height / innerHeight)).toBeGreaterThan(0.65);
+          expect(await browserChart.locator(".analytics-chart-canvas").evaluate((element) => element.getBoundingClientRect().width / innerWidth)).toBeGreaterThan(0.85);
+          await page.screenshot({ path: testInfo.outputPath("chart-browser-fullscreen.png") });
+          await browserChart.getByRole("button", { name: "退出全屏每日净工时趋势图", exact: true }).click();
+          await expect(browserChart).toHaveCount(0);
+          // Real browsers must also escape the surrounding card's clipping and
+          // stacking contexts when the native fullscreen API is unavailable.
+          await page.evaluate(() => { Element.prototype.requestFullscreen = () => Promise.reject(new DOMException("blocked for acceptance", "NotSupportedError")); });
+          if (testInfo.project.use.hasTouch) await enterFullscreen.tap();
+          else await enterFullscreen.click();
+          const chart = page.getByRole("dialog", { name: "每日净工时趋势图", exact: true });
+          await expect(chart).toBeVisible();
+          expect(await chart.evaluate((element) => [[8, 8], [innerWidth - 8, 8], [8, innerHeight - 8], [innerWidth / 2, innerHeight / 2]]
+            .every(([x, y]) => element.contains(document.elementFromPoint(x!, y!))))).toBe(true);
+          await page.screenshot({ path: testInfo.outputPath("chart-fullscreen-viewport.png") });
+          await page.keyboard.press("Escape");
+          await expect(chart).toHaveCount(0);
+        }
         expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), `${role} ${path} horizontal overflow`).toBe(true);
         const controls = await page.locator("#main-content").evaluate((main) => Array.from(main.querySelectorAll("button, input, select, textarea, a, summary")).filter((element) => element.getClientRects().length).map((element) => ({
           tag: element.tagName,
-          text: element.getAttribute("aria-label") || element.getAttribute("aria-labelledby")?.split(/\s+/).map((id) => document.getElementById(id)?.textContent).join(" ") || element.getAttribute("title") || Array.from((element as HTMLInputElement).labels ?? []).map((label) => label.textContent?.trim()).join(" ") || element.textContent?.trim().slice(0, 100),
+          text: element.getAttribute("aria-label") || element.getAttribute("aria-labelledby")?.split(/\s+/).map((id) => document.getElementById(id)?.textContent).join(" ") || element.getAttribute("title") || Array.from((element as HTMLInputElement).labels ?? []).map((label) => label.textContent?.trim()).join(" ") || (element.matches("input, select, textarea") ? "" : element.textContent?.trim().slice(0, 100)),
           type: element.getAttribute("type"), href: element.getAttribute("href"),
           disabled: element.hasAttribute("disabled"), width: element.getBoundingClientRect().width, height: element.getBoundingClientRect().height,
         })));
+        expect(controls.filter((control) => ["INPUT", "SELECT", "TEXTAREA"].includes(control.tag) && !control.text), `${role} ${path} unnamed form fields`).toEqual([]);
         inventory.push({ role, path, controls });
         await page.screenshot({ path: testInfo.outputPath(`${role}-${path.replaceAll("/", "_") || "home"}.png`), fullPage: true });
       }

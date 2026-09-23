@@ -384,7 +384,7 @@ describe("employee payroll view and receipt acknowledgement", () => {
       })
       .returning();
     const run = await service.calculate(ownerActor, period!.id);
-    expect(run.calculationVersion).toBe("payroll-engine-v6-subsidy-distribution-reimbursement");
+    expect(run.calculationVersion).toBe("payroll-engine-v8-effective-millisecond-budget");
     const [item] = await db
       .select()
       .from(payrollItems)

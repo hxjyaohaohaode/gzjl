@@ -26,13 +26,21 @@ import {
 import {
   addDecimalAmounts,
   calculateHourlyPayroll,
+  calculateWorkDuration,
+  clipWholeSecondPayableIntervals,
   forecastCalendarSeries,
   localDateKeysForIntervals,
+  wholeSecondPayableIntervals,
+  payableIntervalSeconds,
   multiplyDecimalAmount,
   prorateDecimalAmount,
+  timezoneSchema,
   type PayableInterval,
   type PayrollRateRule,
 } from "@workbench/shared";
+import { lockPayrollInputs } from "./input-lock.js";
+
+const PAYROLL_CALCULATION_VERSION = "payroll-engine-v8-effective-millisecond-budget";
 
 export interface PayrollActor {
   organizationId: string;
@@ -96,6 +104,22 @@ export class PayrollConflictError extends Error {
     super(message);
     this.name = "PayrollConflictError";
   }
+}
+
+function canonicalSnapshotValue(value: unknown): unknown {
+  if (value instanceof Date) return value.toISOString();
+  if (Array.isArray(value)) return value.map(canonicalSnapshotValue);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => [key, canonicalSnapshotValue(entry)]));
+  }
+  return value;
+}
+
+function sameSnapshotRows(saved: unknown, current: unknown[]): boolean {
+  if (!Array.isArray(saved)) return false;
+  const signature = (rows: unknown[]) => rows.map((row) => JSON.stringify(canonicalSnapshotValue(row))).sort().join("\n");
+  return signature(saved) === signature(current);
 }
 
 function sha256(value: unknown): string {
@@ -219,31 +243,24 @@ function payableIntervals(
   }
   if (cursor < session.endAt) raw.push({ startAt: cursor, endAt: session.endAt });
 
-  let remaining = session.netSeconds;
-  const result: PayableInterval[] = [];
-  for (const interval of raw) {
-    if (remaining <= 0) break;
-    const available = Math.floor(
-      (interval.endAt.getTime() - interval.startAt.getTime()) / 1_000,
-    );
-    const seconds = Math.min(available, remaining);
-    if (seconds > 0) {
-      result.push({
-        sourceId: session.id,
-        startAt: interval.startAt,
-        endAt: new Date(interval.startAt.getTime() + seconds * 1_000),
-        approvalStatus:
-          session.approvalStatus === "approved" || session.approvalStatus === "locked"
-            ? "approved"
-            : "pending_review",
-      });
-      remaining -= seconds;
-    }
+  let actual: ReturnType<typeof calculateWorkDuration>;
+  try {
+    actual = calculateWorkDuration({ startAt: session.startAt, endAt: session.endAt }, clippedBreaks);
+  } catch {
+    throw new PayrollConflictError(`工时 ${session.id} 的休息区间与实际时间不一致，请先核对事实。`);
   }
-  if (remaining > 0) {
+  const legacyBreakSeconds = clippedBreaks.reduce((sum, entry) => sum + Math.floor((entry.endAt.getTime() - entry.startAt.getTime()) / 1_000), 0);
+  const legacyNetSeconds = actual.grossSeconds - legacyBreakSeconds;
+  const matchesCurrent = session.netSeconds === actual.netSeconds && session.breakSeconds === actual.breakSeconds;
+  const matchesLegacy = session.netSeconds === legacyNetSeconds && session.breakSeconds === legacyBreakSeconds;
+  if (session.grossSeconds !== actual.grossSeconds || (!matchesCurrent && !matchesLegacy)) {
     throw new PayrollConflictError(`工时 ${session.id} 的净时长与休息区间不一致。`);
   }
-  return result;
+  // Keep exact factual timestamps. Legacy independently rounded break values
+  // remain immutable; new payroll inputs use the actual effective milliseconds.
+  return raw.map((interval) => ({ ...interval, sourceId: session.id,
+    approvalStatus: session.approvalStatus === "approved" || session.approvalStatus === "locked" ? "approved" : "pending_review",
+  }));
 }
 
 function clipPayableIntervals(
@@ -251,11 +268,11 @@ function clipPayableIntervals(
   startsAt: Date,
   endsAt: Date,
 ): PayableInterval[] {
-  return intervals.flatMap((interval) => {
+  return wholeSecondPayableIntervals(intervals.flatMap((interval) => {
     const startAt = interval.startAt < startsAt ? startsAt : interval.startAt;
     const endAt = interval.endAt > endsAt ? endsAt : interval.endAt;
-    return endAt > startAt ? [{ ...interval, startAt, endAt }] : [];
-  });
+    return endAt > startAt ? [{ sourceId: interval.sourceId, approvalStatus: interval.approvalStatus, startAt, endAt }] : [];
+  }));
 }
 
 function zonedMonthBoundary(timezone: string, monthOffset: number): Date {
@@ -368,9 +385,10 @@ function workSecondsByLocalDate(
 ): Map<string, { approvedSeconds: number; pendingSeconds: number }> {
   const result = new Map<string, { approvedSeconds: number; pendingSeconds: number }>();
   for (const interval of intervals) {
-    let cursor = interval.startAt.getTime();
-    const end = interval.endAt.getTime();
-    while (cursor < end) {
+    let cursor = (interval.firstPayableAt ?? interval.startAt).getTime();
+    let remaining = payableIntervalSeconds(interval);
+    const end = cursor + remaining * 1_000;
+    while (remaining > 0) {
       const date = localDateKey(new Date(cursor), timezone);
       let boundary = end;
       if (localDateKey(new Date(Math.max(cursor, end - 1)), timezone) !== date) {
@@ -383,12 +401,13 @@ function workSecondsByLocalDate(
         }
         boundary = low;
       }
-      const seconds = Math.floor((boundary - cursor) / 1_000);
+      const seconds = Math.min(remaining, Math.ceil((boundary - cursor) / 1_000));
       const current = result.get(date) ?? { approvedSeconds: 0, pendingSeconds: 0 };
       if (interval.approvalStatus === "approved") current.approvedSeconds += seconds;
       else current.pendingSeconds += seconds;
       result.set(date, current);
-      cursor = boundary;
+      remaining -= seconds;
+      cursor += seconds * 1_000;
     }
   }
   return result;
@@ -515,9 +534,7 @@ export class PayrollService {
       .reduce(
         (total, interval) =>
           total +
-          Math.floor(
-            (interval.endAt.getTime() - interval.startAt.getTime()) / 1_000,
-          ),
+          payableIntervalSeconds(interval),
         0,
       );
     const pendingSeconds = intervals
@@ -525,9 +542,7 @@ export class PayrollService {
       .reduce(
         (total, interval) =>
           total +
-          Math.floor(
-            (interval.endAt.getTime() - interval.startAt.getTime()) / 1_000,
-          ),
+          payableIntervalSeconds(interval),
         0,
       );
     const version = currentPlan.version;
@@ -612,7 +627,7 @@ export class PayrollService {
         }
       }
     } else if (version.type === "daily") {
-      const payableDates = localDateKeysForIntervals(
+      const dailyWork = workSecondsByLocalDate(
         intervals.filter(
           (interval) =>
             interval.approvalStatus === "approved" ||
@@ -620,21 +635,19 @@ export class PayrollService {
         ),
         organization.timezone,
       );
+      const payableDates = [...dailyWork.keys()];
       estimatedAmount = multiplyDecimalAmount(
         version.baseAmount,
         payableDates.length,
       );
       for (const date of payableDates) {
-        const dateIntervals = intervals.filter((interval) =>
-          localDateKeysForIntervals([interval], organization.timezone).includes(date),
-        );
+        const seconds = dailyWork.get(date)!;
         liveComponents.push({
           date,
           amount: version.baseAmount,
           seconds: 0,
           estimate:
-            !dateIntervals.some((interval) => interval.approvalStatus === "approved") &&
-            dateIntervals.some((interval) => interval.approvalStatus === "pending_review"),
+            seconds.approvedSeconds === 0 && seconds.pendingSeconds > 0,
           bonus: false,
           recurring: false,
         });
@@ -1250,6 +1263,7 @@ export class PayrollService {
     input: ConfigureCompensationPlanInput,
   ) {
     return this.db.transaction(async (tx) => {
+      await lockPayrollInputs(tx, actor.organizationId);
       const [member] = await tx
         .select({ id: orgMemberships.id, status: orgMemberships.status })
         .from(orgMemberships)
@@ -1423,10 +1437,19 @@ export class PayrollService {
   }
 
   async createPeriod(actor: PayrollActor, input: CreatePayPeriodInput) {
+    if (!timezoneSchema.safeParse(input.timezone).success) {
+      throw new PayrollConflictError("请选择有效的 IANA 时区，例如 Asia/Shanghai。");
+    }
     if (input.endsAt <= input.startsAt) {
       throw new PayrollConflictError("结算周期结束时间必须晚于开始时间。");
     }
-    const [overlap] = await this.db
+    return this.db.transaction(async (tx) => {
+      await lockPayrollInputs(tx, actor.organizationId);
+    // A missing range cannot be row-locked. Serialize range creation on the
+    // organization so simultaneous tabs cannot create overlapping periods.
+    await tx.select({ id: organizations.id }).from(organizations)
+      .where(eq(organizations.id, actor.organizationId)).for("update");
+    const [overlap] = await tx
       .select({ id: payPeriods.id })
       .from(payPeriods)
       .where(
@@ -1438,7 +1461,6 @@ export class PayrollService {
       )
       .limit(1);
     if (overlap) throw new PayrollConflictError("该时间范围与已有薪资周期重叠。");
-    return this.db.transaction(async (tx) => {
       const [period] = await tx
         .insert(payPeriods)
         .values({ organizationId: actor.organizationId, ...input })
@@ -1457,7 +1479,9 @@ export class PayrollService {
   }
 
   async deleteUncommittedPeriod(actor: PayrollActor, payPeriodId: string) {
-    const [period] = await this.db
+    return this.db.transaction(async (tx) => {
+      await lockPayrollInputs(tx, actor.organizationId);
+    const [period] = await tx
       .select()
       .from(payPeriods)
       .where(
@@ -1466,14 +1490,14 @@ export class PayrollService {
           eq(payPeriods.organizationId, actor.organizationId),
         ),
       )
-      .limit(1);
+      .for("update").limit(1);
     if (!period) throw new PayrollNotFoundError();
     if (period.status !== "open" || period.settledAt || period.lockedAt) {
       throw new PayrollConflictError("请先撤销未锁定的计算批次；已导出锁定的周期不能删除。");
     }
     const [runs, adjustments] = await Promise.all([
-      this.db.select().from(payrollRuns).where(eq(payrollRuns.payPeriodId, period.id)),
-      this.db
+      tx.select().from(payrollRuns).where(eq(payrollRuns.payPeriodId, period.id)),
+      tx
         .select({ id: payrollAdjustments.id })
         .from(payrollAdjustments)
         .where(eq(payrollAdjustments.payPeriodId, period.id)),
@@ -1487,7 +1511,6 @@ export class PayrollService {
     if (adjustments.length > 0) {
       throw new PayrollConflictError("该周期已有人工薪资调整，为避免丢失审计事实，不能直接删除。");
     }
-    return this.db.transaction(async (tx) => {
       const runIds = runs.map((run) => run.id);
       const itemRows = runIds.length
         ? await tx
@@ -1675,18 +1698,20 @@ export class PayrollService {
         period.startsAt,
         period.endsAt,
       );
-      const approvedSeconds = intervals
+      const countedIntervals = wholeSecondPayableIntervals(versions.flatMap((version) =>
+        clipWholeSecondPayableIntervals(intervals, version.effectiveFrom, version.effectiveTo ?? period.endsAt)));
+      const approvedSeconds = countedIntervals
         .filter((interval) => interval.approvalStatus === "approved")
         .reduce(
           (total, interval) =>
-            total + Math.floor((interval.endAt.getTime() - interval.startAt.getTime()) / 1_000),
+            total + payableIntervalSeconds(interval),
           0,
         );
-      const pendingSeconds = intervals
+      const pendingSeconds = countedIntervals
         .filter((interval) => interval.approvalStatus === "pending_review")
         .reduce(
           (total, interval) =>
-            total + Math.floor((interval.endAt.getTime() - interval.startAt.getTime()) / 1_000),
+            total + payableIntervalSeconds(interval),
           0,
         );
 
@@ -1724,7 +1749,8 @@ export class PayrollService {
             ? version.effectiveTo
             : period.endsAt;
         if (segmentEnd <= segmentStart) continue;
-        const versionIntervals = clipPayableIntervals(
+        const versionIntervals = (version.type === "hourly" || version.type === "hybrid"
+          ? clipWholeSecondPayableIntervals : clipPayableIntervals)(
           intervals,
           segmentStart,
           segmentEnd,
@@ -1735,6 +1761,9 @@ export class PayrollService {
             hourlyRate: version.baseAmount,
             timezone: period.timezone,
             intervals: versionIntervals,
+            // A rate version changes the price, not the amount already worked
+            // on this civil day. The engine applies this version's pending policy.
+            dailyContextIntervals: intervals,
             // Every version sees the final approved/pending state for the
             // whole natural week; the period boundary still clips a week that
             // straddles two payroll months into two independent reward spans.
@@ -1769,6 +1798,7 @@ export class PayrollService {
               multiplier: component.multiplier,
               trace: {
                 ...component.trace,
+                durationPolicy: "effective_millisecond_union_approved_budget_first",
                 sourceIds: component.sourceIds,
                 estimate: component.estimate,
                 effectiveFrom: segmentStart,
@@ -1801,7 +1831,7 @@ export class PayrollService {
             }
           }
         } else if (version.type === "daily") {
-          const dates = localDateKeysForIntervals(
+          const dailyWork = workSecondsByLocalDate(
             versionIntervals.filter(
               (interval) =>
                 interval.approvalStatus === "approved" ||
@@ -1809,12 +1839,11 @@ export class PayrollService {
             ),
             period.timezone,
           );
+          const dates = [...dailyWork.keys()];
           const amount = multiplyDecimalAmount(version.baseAmount, dates.length);
           grossAmount = addDecimalAmounts(grossAmount, amount);
           estimate ||=
-            versionIntervals.some(
-              (interval) => interval.approvalStatus === "pending_review",
-            ) && version.pendingReviewCountsInEstimate;
+            [...dailyWork.values()].some((seconds) => seconds.approvedSeconds === 0 && seconds.pendingSeconds > 0);
           components.push({
             type: "base",
             label: "按工作日计薪",
@@ -1906,6 +1935,13 @@ export class PayrollService {
       const adjustmentAmount = addDecimalAmounts(
         ...memberAdjustments.map((adjustment) => adjustment.amount),
       );
+      const finalAmount = addDecimalAmounts(grossAmount, adjustmentAmount);
+      // A valid rate can still overflow after hours, multipliers or several
+      // components are accumulated. Reject before creating a partial batch.
+      if ([grossAmount, adjustmentAmount, finalAmount, ...components.map((component) => component.amount)]
+        .some((amount) => !/^-?\d{1,14}(?:\.\d{1,6})?$/.test(amount))) {
+        throw new PayrollConflictError("计算金额超过可保存的 14 位整数与 6 位小数范围，请核对计薪单价、倍率、工时和调整金额。");
+      }
       return {
         membershipId: plan.membershipId,
         planVersionId: latestVersion.id,
@@ -1914,7 +1950,7 @@ export class PayrollService {
         pendingSeconds,
         grossAmount,
         adjustmentAmount,
-        finalAmount: addDecimalAmounts(grossAmount, adjustmentAmount),
+        finalAmount,
         estimate,
         needsReview,
         components,
@@ -1923,7 +1959,8 @@ export class PayrollService {
     });
 
     const snapshotPayload = {
-      calculationVersion: "payroll-engine-v6-subsidy-distribution-reimbursement",
+      calculationVersion: PAYROLL_CALCULATION_VERSION,
+      durationPolicy: "effective_millisecond_union_approved_budget_first",
       // Only immutable calculation inputs belong in the idempotency hash.
       // Runtime fields such as status/updatedAt change when a calculation is
       // cancelled, and must not turn an exact retry into a duplicate batch.
@@ -1965,6 +2002,9 @@ export class PayrollService {
         )
         .limit(1);
       return this.db.transaction(async (tx) => {
+      await lockPayrollInputs(tx, actor.organizationId);
+        const [currentPeriod] = await tx.select().from(payPeriods).where(eq(payPeriods.id, period.id)).for("update");
+        if (!currentPeriod || ["locked", "settled"].includes(currentPeriod.status)) throw new PayrollConflictError("周期已经结算，请刷新。");
         const restoredStatus = reviewItem ? "review_required" as const : "ready" as const;
         const [restored] = await tx
           .update(payrollRuns)
@@ -1994,8 +2034,14 @@ export class PayrollService {
     }
 
     return this.db.transaction(async (tx) => {
+      await lockPayrollInputs(tx, actor.organizationId);
       const [currentPeriod] = await tx.select().from(payPeriods).where(eq(payPeriods.id, period.id)).for("update");
       if (!currentPeriod || ["locked", "settled"].includes(currentPeriod.status)) throw new PayrollConflictError("周期已经结算，请刷新。");
+      const [concurrentRun] = await tx.select().from(payrollRuns).where(and(eq(payrollRuns.payPeriodId, period.id), eq(payrollRuns.inputHash, inputHash))).limit(1);
+      if (concurrentRun) {
+        if (["ready", "review_required"].includes(concurrentRun.status)) return concurrentRun;
+        throw new PayrollConflictError("计算批次已被其他操作更新，请刷新后重新计算。");
+      }
       const currentAdjustments = await tx.select().from(payrollAdjustments).where(and(
         eq(payrollAdjustments.organizationId, actor.organizationId), eq(payrollAdjustments.payPeriodId, period.id)));
       const adjustmentSignature = (rows: typeof adjustments) => sha256([...rows].sort((a, b) => a.id.localeCompare(b.id)));
@@ -2015,7 +2061,7 @@ export class PayrollService {
           status: calculatedItems.some((item) => item.needsReview)
             ? "review_required"
             : "ready",
-          calculationVersion: "payroll-engine-v6-subsidy-distribution-reimbursement",
+          calculationVersion: PAYROLL_CALCULATION_VERSION,
           requestedBy: actor.membershipId,
           inputHash,
           startedAt: new Date(),
@@ -2117,6 +2163,9 @@ export class PayrollService {
       throw new PayrollConflictError("只有尚未导出锁定的计算批次可以撤销。");
     }
     return this.db.transaction(async (tx) => {
+      await lockPayrollInputs(tx, actor.organizationId);
+      const [currentPeriod] = await tx.select().from(payPeriods).where(eq(payPeriods.id, record.period.id)).for("update");
+      if (!currentPeriod || ["locked", "settled"].includes(currentPeriod.status)) throw new PayrollConflictError("周期已经结算，不能撤销未锁定计算。");
       const [cancelled] = await tx
         .update(payrollRuns)
         .set({
@@ -2175,12 +2224,73 @@ export class PayrollService {
       )
       .limit(1);
     if (!record) throw new PayrollNotFoundError();
+    if (record.run.status === "settled") return record.run;
+    if (record.run.calculationVersion !== PAYROLL_CALCULATION_VERSION) {
+      throw new PayrollConflictError("该批次使用旧版计薪规则，请撤销旧批次并重新计算后再结算；已结算历史保持不变。");
+    }
     if (record.run.status !== "ready") {
       throw new PayrollConflictError("只有已就绪且无待复核项的批次可以结算。")
     }
     return this.db.transaction(async (tx) => {
+      await lockPayrollInputs(tx, actor.organizationId);
       const [currentPeriod] = await tx.select().from(payPeriods).where(eq(payPeriods.id, record.period.id)).for("update");
+      const [currentRun] = await tx.select().from(payrollRuns).where(eq(payrollRuns.id, runId)).for("update");
+      if (currentRun?.status === "settled") return currentRun;
       if (!currentPeriod || ["locked", "settled"].includes(currentPeriod.status)) throw new PayrollConflictError("周期已经结算。");
+      const [snapshot] = await tx.select().from(payrollSnapshots).where(eq(payrollSnapshots.payrollRunId, runId)).limit(1);
+      const payload = snapshot?.payload as Record<string, unknown> | undefined;
+      const currentSessions = await tx.select().from(workSessions).where(and(
+        eq(workSessions.organizationId, actor.organizationId),
+        lt(workSessions.startAt, record.period.endsAt), gt(workSessions.endAt, record.period.startsAt),
+        eq(workSessions.recordKind, "fact"),
+        inArray(workSessions.approvalStatus, ["approved", "pending_review", "locked"]),
+        isNull(workSessions.deletedAt),
+      )).for("update");
+      const currentPlans = await tx.select({ plan: compensationPlans, version: compensationPlanVersions })
+        .from(compensationPlans).innerJoin(compensationPlanVersions, eq(compensationPlanVersions.compensationPlanId, compensationPlans.id))
+        .where(and(eq(compensationPlans.organizationId, actor.organizationId), isNull(compensationPlans.archivedAt),
+          lt(compensationPlanVersions.effectiveFrom, record.period.endsAt),
+          or(isNull(compensationPlanVersions.effectiveTo), gt(compensationPlanVersions.effectiveTo, record.period.startsAt))));
+      const currentRules = currentPlans.length ? await tx.select().from(rateRules)
+        .where(inArray(rateRules.compensationPlanVersionId, currentPlans.map(({ version }) => version.id))) : [];
+      const currentBreaks = currentSessions.length ? await tx.select().from(workBreaks)
+        .where(inArray(workBreaks.workSessionId, currentSessions.map((session) => session.id))) : [];
+      const currentAdjustments = await tx.select().from(payrollAdjustments).where(and(
+        eq(payrollAdjustments.organizationId, actor.organizationId), eq(payrollAdjustments.payPeriodId, record.period.id)));
+      if (!payload || !sameSnapshotRows(payload.sessions, currentSessions) ||
+          !sameSnapshotRows(payload.plans, currentPlans) || !sameSnapshotRows(payload.rules, currentRules) ||
+          !sameSnapshotRows(payload.breaks, currentBreaks) || !sameSnapshotRows(payload.adjustments, currentAdjustments)) {
+        throw new PayrollConflictError("计算后工时、薪资规则或调整已发生变化，请撤销旧批次并重新计算后再结算。");
+      }
+      const breaksBySession = new Map<string, Array<typeof workBreaks.$inferSelect>>();
+      for (const entry of currentBreaks) {
+        const entries = breaksBySession.get(entry.workSessionId) ?? [];
+        entries.push(entry); breaksBySession.set(entry.workSessionId, entries);
+      }
+      const versionsByMember = new Map<string, Array<typeof compensationPlanVersions.$inferSelect>>();
+      for (const { plan, version } of currentPlans) {
+        const versions = versionsByMember.get(plan.membershipId) ?? [];
+        versions.push(version); versionsByMember.set(plan.membershipId, versions);
+      }
+      const effectiveByMember = new Map<string, PayableInterval[]>();
+      for (const session of currentSessions) {
+        if (!versionsByMember.has(session.membershipId)) continue;
+        const effective = effectiveByMember.get(session.membershipId) ?? [];
+        effective.push(...payableIntervals(session, breaksBySession.get(session.id) ?? []));
+        effectiveByMember.set(session.membershipId, effective);
+      }
+      const participatingSessionIds = new Set<string>();
+      for (const [membershipId, rawIntervals] of effectiveByMember) {
+        const effectiveIntervals = clipPayableIntervals(rawIntervals, record.period.startsAt, record.period.endsAt);
+        for (const version of versionsByMember.get(membershipId) ?? []) {
+          const versionIntervals = (version.type === "hourly" || version.type === "hybrid" ? clipWholeSecondPayableIntervals : clipPayableIntervals)(
+            effectiveIntervals, version.effectiveFrom, version.effectiveTo ?? record.period.endsAt,
+          );
+          for (const interval of versionIntervals) {
+            if (payableIntervalSeconds(interval) > 0) participatingSessionIds.add(interval.sourceId);
+          }
+        }
+      }
       const settledAt = new Date();
       const [run] = await tx
         .update(payrollRuns)
@@ -2205,6 +2315,7 @@ export class PayrollService {
             eq(workSessions.organizationId, actor.organizationId),
             eq(workSessions.approvalStatus, "approved"),
             eq(workSessions.recordKind, "fact"),
+            inArray(workSessions.id, [...participatingSessionIds]),
             lt(workSessions.startAt, record.period.endsAt),
             gt(workSessions.endAt, record.period.startsAt),
           ),
@@ -2383,6 +2494,8 @@ export class PayrollService {
     }
     const settledAt = record.run.settledAt;
     return this.db.transaction(async (tx) => {
+      await lockPayrollInputs(tx, actor.organizationId);
+      await tx.select({ id: payPeriods.id }).from(payPeriods).where(eq(payPeriods.id, record.period.id)).for("update");
       const [cancelled] = await tx
         .update(payrollRuns)
         .set({ status: "cancelled", errorSummary: "由薪资管理员撤销导出锁定" })

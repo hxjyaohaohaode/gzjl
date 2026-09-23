@@ -84,16 +84,21 @@ export function calculateWorkDuration(
   }
 
   const grossSeconds = secondsBetween(session.startAt, session.endAt);
-  const breakSeconds = breaks.reduce(
+  const breakMilliseconds = breaks.reduce(
     (total, currentBreak) =>
-      total + secondsBetween(currentBreak.startAt, currentBreak.endAt),
+      total + currentBreak.endAt.getTime() - currentBreak.startAt.getTime(),
     0,
   );
+  // Round the complete effective working duration once. Splitting a break or
+  // a work fragment must not create payable seconds; assign the remaining
+  // sub-second rounding to breakSeconds so gross = break + net still holds.
+  const netSeconds = Math.floor((session.endAt.getTime() - session.startAt.getTime() - breakMilliseconds) / 1_000);
+  const breakSeconds = grossSeconds - netSeconds;
 
   return {
     grossSeconds,
     breakSeconds,
-    netSeconds: grossSeconds - breakSeconds,
+    netSeconds,
   };
 }
 

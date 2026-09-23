@@ -81,6 +81,7 @@ jobs:
           name: workspace-acceptance-${{ github.run_id }}
           path: |
             test-results/live
+            test-results/wide
             test-results/engines
           if-no-files-found: ignore
           retention-days: 7

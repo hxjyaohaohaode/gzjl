@@ -40,7 +40,13 @@ export async function registerTimerRoutes(
     scopeId: request.auth?.membershipId ?? null,
   }));
   const protectedRead = [authenticate, ownPermission];
-  const protectedWrite = [app.csrfProtection, authenticate, ownPermission];
+  const sameMembership: preHandlerHookHandler = async (request, reply) => {
+    const expected = request.headers["x-workbench-membership"];
+    if (expected !== undefined && expected !== request.auth?.membershipId) {
+      return reply.code(409).send({ error: "timer_session_changed", message: "该计时操作属于另一个账号，请切换回原账号后同步。" });
+    }
+  };
+  const protectedWrite = [app.csrfProtection, authenticate, ownPermission, sameMembership];
 
   app.get("/api/timer", { preHandler: protectedRead }, async (request) => ({
     timer: await service.getCurrent(request.auth!),

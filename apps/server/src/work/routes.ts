@@ -13,7 +13,13 @@ import type { WorkSessionService } from "./service.js";
 
 const listQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(30),
-  before: z.iso.datetime({ offset: true }).optional(),
+  before: z.string().max(100).superRefine((value, context) => {
+    const parts = value.split("|");
+    if (parts.length > 2 || !z.iso.datetime({ offset: true }).safeParse(parts[0]).success ||
+        (parts.length === 2 && !z.uuid().safeParse(parts[1]).success)) {
+      context.addIssue({ code: "custom", message: "分页位置无效，请刷新后重试。" });
+    }
+  }).optional(),
   from: z.iso.datetime({ offset: true }).optional(),
   to: z.iso.datetime({ offset: true }).optional(),
   recordKind: z.enum(["all", "fact", "plan"]).default("all"),
@@ -82,7 +88,8 @@ export async function registerWorkRoutes(
         actor,
         query.limit,
         {
-          before: query.before ? new Date(query.before) : undefined,
+          before: query.before ? new Date(query.before.split("|")[0]!) : undefined,
+          beforeId: query.before?.split("|")[1],
           from: query.from ? new Date(query.from) : undefined,
           to: query.to ? new Date(query.to) : undefined,
           recordKind: query.recordKind === "all" ? undefined : query.recordKind,
@@ -90,7 +97,8 @@ export async function registerWorkRoutes(
       );
       return {
         items,
-        nextCursor: items.length === query.limit ? items.at(-1)?.startAt.toISOString() : null,
+        nextCursor: items.length === query.limit && items.at(-1)
+          ? `${items.at(-1)!.startAt.toISOString()}|${items.at(-1)!.id}` : null,
       };
     },
   );

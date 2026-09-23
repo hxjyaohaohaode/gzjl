@@ -1,5 +1,6 @@
 import type { FastifyInstance, preHandlerHookHandler } from "fastify";
 import { z } from "zod";
+import { timezoneSchema } from "@workbench/shared";
 
 import { requirePermission } from "../auth/authorization.js";
 import type { ReimbursementService } from "./reimbursements.js";
@@ -57,7 +58,7 @@ const planSchema = z.object({
 });
 const createPeriodSchema = z.object({
   name: z.string().trim().min(2).max(120),
-  timezone: z.string().trim().min(3).max(64),
+  timezone: timezoneSchema,
   startsAt: z.iso.datetime({ offset: true }).transform((value) => new Date(value)),
   endsAt: z.iso.datetime({ offset: true }).transform((value) => new Date(value)),
   cutoffAt: z.iso.datetime({ offset: true }).transform((value) => new Date(value)),

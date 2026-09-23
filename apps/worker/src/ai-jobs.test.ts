@@ -31,6 +31,21 @@ function completion() {
   return new Response(JSON.stringify({ id: "current-request", choices: [{ message: { content: JSON.stringify({ title: "实际任务测试", summary: "已完成验证。", highlights: [], risks: [], suggestions: [] }) } }], usage: { prompt_tokens: 20, completion_tokens: 30 } }));
 }
 
+it("preserves a completed paid report if notification preferences fail", async () => {
+  const { db, job, readJob } = await setup();
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+  const fetcher = vi.fn(async () => completion()) as typeof fetch;
+  try {
+    const process = createAiJobProcessor(db, config, async () => { throw new Error("private-database-error"); }, fetcher);
+    await process(job.id);
+    await process(job.id);
+    expect(await readJob()).toMatchObject({ status: "completed", attempt: 1 });
+    expect(await db.select().from(aiReports)).toHaveLength(1);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith("AI job notification unavailable; job result preserved.");
+  } finally { warn.mockRestore(); }
+});
+
 it("uses the entire current provider after a switch and claims a job only once", async () => {
   const { db, job, readJob } = await setup();
   const fetcher = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
@@ -104,4 +119,22 @@ it("recovers interrupted jobs and rejects results from an obsolete attempt", asy
   await db.update(aiJobs).set({ startedAt: new Date(Date.now() - 7 * 60000) }).where(eq(aiJobs.id, job.id));
   await recoverStaleAiJobs(db);
   expect(await readJob()).toMatchObject({ status: "failed", errorSummary: expect.stringContaining("达到尝试次数") });
+});
+
+it("rejects a late response after cancellation and a manual retry resets the attempt counter", async () => {
+  const { db, job, readJob } = await setup();
+  let started!: () => void;
+  let finish!: () => void;
+  const sent = new Promise<void>((resolve) => { started = resolve; });
+  const release = new Promise<void>((resolve) => { finish = resolve; });
+  const fetcher = vi.fn(async () => { started(); await release; return completion(); }) as typeof fetch;
+  const oldAttempt = createAiJobProcessor(db, config, async () => false, fetcher)(job.id);
+  await sent;
+  const old = await readJob();
+  // The cancelled attempt and manually retried attempt can both be number 1.
+  await db.update(aiJobs).set({ status: "running", attempt: 1, startedAt: new Date(old.startedAt!.getTime() + 1_000) }).where(eq(aiJobs.id, job.id));
+  finish();
+  await oldAttempt;
+  expect(await readJob()).toMatchObject({ status: "running", attempt: 1 });
+  expect(await db.select().from(aiReports)).toHaveLength(0);
 });

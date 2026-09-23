@@ -10,7 +10,7 @@ import {
   Rows3,
   Table2,
 } from "lucide-react";
-import { useState, type CSSProperties } from "react";
+import { useEffect, useState, type CSSProperties } from "react";
 import { Link } from "react-router-dom";
 import {
   Badge,
@@ -23,6 +23,7 @@ import {
 
 import { api } from "./api.js";
 import { getCalendarAlmanac } from "./calendar-almanac.js";
+import { calendarDayBoundary, calendarDayDifference, calendarPeriodSeconds, loadCalendarRecords, shiftCalendarMonth, splitCalendarInterval, type CalendarIntervalSegment } from "./calendar-model.js";
 import { EmptyState, ErrorMessage, LoadingBlock, PageHeader } from "./pages.js";
 import {
   getOrganizationTimezone,
@@ -38,6 +39,7 @@ interface CalendarSession {
   startAt: string;
   endAt: string;
   netSeconds: number;
+  periodNetSeconds?: number;
   content: string;
   result: string;
   source: string;
@@ -47,11 +49,9 @@ interface CalendarSession {
   version: number;
 }
 
-interface CalendarSessionSegment {
+interface CalendarSessionSegment extends CalendarIntervalSegment {
   key: string;
   session: CalendarSession;
-  displayStartAt: Date;
-  displayEndAt: Date;
 }
 
 interface CalendarMilestone {
@@ -96,14 +96,16 @@ function shiftInstantByOrganizationDays(value: string, days: number): Date {
   return wallDateToInstant(wall);
 }
 function dayDelta(from: Date, to: Date): number {
-  return Math.round(
-    (startOfDay(to).getTime() - startOfDay(from).getTime()) / 86_400_000,
-  );
+  return calendarDayDifference(from, to);
 }
+const canReschedule = (session: CalendarSession) => session.submissionStatus === "draft" && session.source === "manual";
 function formatDuration(seconds: number): string {
+  if (seconds > 0 && seconds < 1) return "不足 1 秒";
   const hours = Math.floor(seconds / 3600);
   const minutes = Math.floor((seconds % 3600) / 60);
-  return hours ? `${hours} 小时 ${minutes} 分` : `${minutes} 分钟`;
+  const remainder = Math.floor(seconds % 60);
+  if (seconds < 60) return `${Math.floor(seconds)} 秒`;
+  return `${hours ? `${hours} 小时 ${minutes} 分` : `${minutes} 分钟`}${remainder ? ` ${remainder} 秒` : ""}`;
 }
 function formatTime(value: string | Date): string {
   return new Intl.DateTimeFormat("zh-CN", {
@@ -112,9 +114,6 @@ function formatTime(value: string | Date): string {
     minute: "2-digit",
     hour12: false,
   }).format(new Date(value));
-}
-function formatWallTime(value: Date): string {
-  return `${String(value.getHours()).padStart(2, "0")}:${String(value.getMinutes()).padStart(2, "0")}`;
 }
 function formatDate(value: string): string {
   return new Intl.DateTimeFormat("zh-CN", {
@@ -129,44 +128,8 @@ function splitCalendarSession(
   periodStart: Date,
   periodEnd: Date,
 ): CalendarSessionSegment[] {
-  const originalStart = organizationWallDate(session.startAt);
-  const originalEnd = organizationWallDate(session.endAt);
-  if (
-    Number.isNaN(originalStart.getTime()) ||
-    Number.isNaN(originalEnd.getTime()) ||
-    originalEnd <= periodStart ||
-    originalStart >= periodEnd
-  ) {
-    return [];
-  }
-  const visibleStart = new Date(
-    Math.max(originalStart.getTime(), periodStart.getTime()),
-  );
-  const visibleEnd = new Date(
-    Math.min(originalEnd.getTime(), periodEnd.getTime()),
-  );
-  const segments: CalendarSessionSegment[] = [];
-  for (
-    let date = startOfDay(visibleStart);
-    date < visibleEnd;
-    date = addDays(date, 1)
-  ) {
-    const nextDay = addDays(date, 1);
-    const displayStartAt = new Date(
-      Math.max(visibleStart.getTime(), date.getTime()),
-    );
-    const displayEndAt = new Date(
-      Math.min(visibleEnd.getTime(), nextDay.getTime()),
-    );
-    if (displayEndAt <= displayStartAt) continue;
-    segments.push({
-      key: `${session.id}:${dateKey(date)}`,
-      session,
-      displayStartAt,
-      displayEndAt,
-    });
-  }
-  return segments;
+  return splitCalendarInterval(new Date(session.startAt), new Date(session.endAt), calendarDayBoundary(dateKey(periodStart), getOrganizationTimezone()), calendarDayBoundary(dateKey(periodEnd), getOrganizationTimezone()), getOrganizationTimezone())
+    .map((segment) => ({ ...segment, key: `${session.id}:${segment.day}`, session }));
 }
 function statusLabel(session: CalendarSession): string {
   return session.recordKind === "plan"
@@ -261,20 +224,22 @@ function CalendarEvent({
   item,
   onDragStart,
   onDragEnd,
+  disabled,
 }: {
   item: CalendarSessionSegment;
   onDragStart: (item: CalendarSessionSegment) => void;
   onDragEnd: () => void;
+  disabled: boolean;
 }) {
   const session = item.session;
   const isPlan = session.recordKind === "plan";
-  const movable = session.submissionStatus === "draft";
+  const movable = canReschedule(session) && !disabled;
   const isCrossDayFragment =
-    item.displayStartAt.getTime() !== organizationWallDate(session.startAt).getTime() ||
-    item.displayEndAt.getTime() !== organizationWallDate(session.endAt).getTime();
+    new Date(item.startAt).getTime() !== new Date(session.startAt).getTime() ||
+    new Date(item.endAt).getTime() !== new Date(session.endAt).getTime();
   return (
     <div
-      aria-label={`${session.content}，${formatWallTime(item.displayStartAt)} 至 ${formatWallTime(item.displayEndAt)}${isCrossDayFragment ? "，跨日片段" : ""}${isPlan ? "，云端计划，不计入工时事实" : ""}${movable ? "，可拖拽改期" : ""}`}
+      aria-label={`${session.content}，${item.range.startLabel} ${item.range.startOffset} 至 ${item.range.endLabel} ${item.range.endOffset}${item.range.clockShift ? "，时钟调整" : ""}${isCrossDayFragment ? "，跨日片段" : ""}${isPlan ? "，云端计划，不计入工时事实" : ""}${movable ? "，可拖拽改期" : ""}`}
       className={cn(
         "calendar-event",
         isPlan && "is-plan",
@@ -288,7 +253,7 @@ function CalendarEvent({
         {movable ? <GripVertical size={12} /> : null}
       </span>
       <time>
-        {formatWallTime(item.displayStartAt)} – {formatWallTime(item.displayEndAt)}
+        {item.range.startLabel} – {item.range.endLabel}{item.range.clockShift ? " · 时钟调整" : ""}
       </time>
       <strong className="block truncate">
         {isPlan ? <span className="calendar-event-kind">计划</span> : null}
@@ -361,7 +326,16 @@ export function CalendarPage() {
     },
   });
 
-  const [today] = useState(() => startOfDay(organizationWallDate()));
+  const [today, setToday] = useState(() => startOfDay(organizationWallDate()));
+  useEffect(() => {
+    const update = () => setToday((current) => {
+      const next = startOfDay(organizationWallDate());
+      return dateKey(current) === dateKey(next) ? current : next;
+    });
+    const timer = window.setInterval(update, 60_000);
+    window.addEventListener("focus", update);
+    return () => { window.clearInterval(timer); window.removeEventListener("focus", update); };
+  }, []);
   const dayStart = startOfDay(anchorDate);
   const weekStart = addDays(dayStart, -((dayStart.getDay() + 6) % 7));
   const monthStart = new Date(dayStart.getFullYear(), dayStart.getMonth(), 1);
@@ -371,8 +345,8 @@ export function CalendarPage() {
     view === "month"
       ? new Date(monthStart.getFullYear(), monthStart.getMonth() + 1, 1)
       : addDays(periodStart, view === "day" ? 1 : 7);
-  const periodStartInstant = wallDateToInstant(periodStart);
-  const periodEndInstant = wallDateToInstant(periodEnd);
+  const periodStartInstant = calendarDayBoundary(dateKey(periodStart), getOrganizationTimezone());
+  const periodEndInstant = calendarDayBoundary(dateKey(periodEnd), getOrganizationTimezone());
   const work = useQuery({
     queryKey: [
       "work-sessions",
@@ -380,16 +354,7 @@ export function CalendarPage() {
       periodStartInstant.toISOString(),
       periodEndInstant.toISOString(),
     ],
-    queryFn: () => {
-      const query = new URLSearchParams({
-        limit: "100",
-        from: periodStartInstant.toISOString(),
-        to: periodEndInstant.toISOString(),
-      });
-      return api<{ items: CalendarSession[] }>(
-        `/api/work-sessions?${query.toString()}`,
-      );
-    },
+    queryFn: ({ signal }) => loadCalendarRecords<CalendarSession>(periodStartInstant.toISOString(), periodEndInstant.toISOString(), signal),
   });
   const milestones = useQuery({
     queryKey: [
@@ -412,10 +377,10 @@ export function CalendarPage() {
     (item) =>
       statusFilter === "all" ||
       (statusFilter === "plan" && item.recordKind === "plan") ||
-      (statusFilter === "draft" && item.submissionStatus === "draft") ||
+      (statusFilter === "draft" && canReschedule(item)) ||
       (statusFilter === "submitted" &&
         item.submissionStatus === "submitted" &&
-        item.approvalStatus !== "approved") ||
+        !["approved", "locked"].includes(item.approvalStatus)) ||
       (statusFilter === "approved" &&
         ["approved", "locked"].includes(item.approvalStatus)),
   );
@@ -430,10 +395,13 @@ export function CalendarPage() {
   const plannedPeriodSessions = periodSessions.filter(
     (item) => item.recordKind === "plan",
   );
+  const periodDurations = factualPeriodSessions.map((item) => calendarPeriodSeconds(item, periodStartInstant, periodEndInstant));
+  const hasUnconfirmedDuration = periodDurations.some((value) => value === null);
+  const totalPeriodSeconds = periodDurations.reduce<number>((sum, value) => sum + (value ?? 0), 0);
   const sessionsByDate = new Map<string, CalendarSessionSegment[]>();
   periodSessions.forEach((item) => {
     splitCalendarSession(item, periodStart, periodEnd).forEach((segment) => {
-      const key = dateKey(segment.displayStartAt);
+      const key = segment.day;
       sessionsByDate.set(key, [...(sessionsByDate.get(key) ?? []), segment]);
     });
   });
@@ -454,7 +422,7 @@ export function CalendarPage() {
   const movePeriod = (direction: number) =>
     setAnchorDate((date) => {
       const next = new Date(date);
-      if (view === "month") next.setMonth(next.getMonth() + direction);
+      if (view === "month") return shiftCalendarMonth(date, direction);
       else next.setDate(next.getDate() + direction * (view === "day" ? 1 : 7));
       return next;
     });
@@ -475,24 +443,15 @@ export function CalendarPage() {
   const eventProps = {
     onDragStart: setDragging,
     onDragEnd: () => setDragging(null),
+    disabled: reschedule.isPending,
   };
   const handleDrop = (targetDate: Date) => {
-    if (!dragging || dragging.session.submissionStatus !== "draft") return;
-    const days = dayDelta(dragging.displayStartAt, targetDate);
+    if (!dragging || !canReschedule(dragging.session) || reschedule.isPending) return;
+    const days = dayDelta(new Date(`${dragging.day}T12:00:00`), targetDate);
     if (days !== 0) reschedule.mutate({ item: dragging.session, days });
     setDragging(null);
   };
-  const dayHours = [
-    "00:00",
-    "03:00",
-    "06:00",
-    "09:00",
-    "12:00",
-    "15:00",
-    "18:00",
-    "21:00",
-  ];
-  const daySessions = sessionsByDate.get(dateKey(anchorDate)) ?? [];
+  const daySessions = [...(sessionsByDate.get(dateKey(anchorDate)) ?? [])].sort((a, b) => Date.parse(a.startAt) - Date.parse(b.startAt) || Date.parse(a.endAt) - Date.parse(b.endAt) || a.key.localeCompare(b.key));
   const dayMilestones = milestonesByDate.get(dateKey(anchorDate)) ?? [];
   const listGroups = new Map<string, CalendarSession[]>();
   periodSessions.forEach((item) => {
@@ -558,6 +517,8 @@ export function CalendarPage() {
         <Card>
           <LoadingBlock />
         </Card>
+      ) : work.isError && !work.data ? (
+        <Card><div className="p-5"><ErrorMessage error={work.error} onRetry={() => void work.refetch()} retrying={work.isFetching} /></div></Card>
       ) : (
         <div className="calendar-workbench">
           <aside className="calendar-side-index">
@@ -597,7 +558,7 @@ export function CalendarPage() {
                             ).length ?? 0)
                         : value === "draft"
                           ? (work.data?.items.filter(
-                              (item) => item.submissionStatus === "draft",
+                              (item) => canReschedule(item),
                             ).length ?? 0)
                           : value === "approved"
                             ? (work.data?.items.filter((item) =>
@@ -608,7 +569,7 @@ export function CalendarPage() {
                             : (work.data?.items.filter(
                                 (item) =>
                                   item.submissionStatus === "submitted" &&
-                                  item.approvalStatus !== "approved",
+                                  !["approved", "locked"].includes(item.approvalStatus),
                               ).length ?? 0)}
                     </small>
                   </button>
@@ -639,7 +600,7 @@ export function CalendarPage() {
               <p>
                 <strong>拖拽改期</strong>
                 <span>
-                  仅草稿可拖到日、周或月视图中的另一天；提交后保留审核轨迹。
+                  手工草稿和计划可拖到另一天；计时与导入记录保留原始时间，提交后通过审核、更正流程处理。
                 </span>
               </p>
             </div>
@@ -662,12 +623,7 @@ export function CalendarPage() {
               </div>
               <div>
                 <Badge tone="info">
-                  {formatDuration(
-                    factualPeriodSessions.reduce(
-                      (sum, item) => sum + item.netSeconds,
-                      0,
-                    ),
-                  )}
+                  {hasUnconfirmedDuration ? "范围工时待核对" : formatDuration(totalPeriodSeconds)}
                 </Badge>
                 <span>{factualPeriodSessions.length} 条事实</span>
                 <span>{plannedPeriodSessions.length} 个计划</span>
@@ -811,47 +767,54 @@ export function CalendarPage() {
                     </div>
                   ) : null}
                   <div className="calendar-day-view">
-                    <div className="calendar-day-hours">
-                      {dayHours.map((hour) => (
-                        <span key={hour}>{hour}</span>
-                      ))}
-                    </div>
+                    <p className="calendar-day-explanation">按开始时间逐条展示；色带表示当天的起止区间（含休息），竖线仅标记开始位置。卡片大小不代表工时，点击或按回车展开详情。</p>
                     <div
-                      className={cn(
-                        "calendar-day-track",
-                        dragging && "is-drop-target",
-                      )}
+                      className={cn("calendar-day-track", dragging && "is-drop-target")}
                       onDragOver={(event) => {
-                        if (dragging?.session.submissionStatus === "draft")
+                        if (dragging && canReschedule(dragging.session))
                           event.preventDefault();
                       }}
                       onDrop={() => handleDrop(anchorDate)}
                     >
                       {daySessions.map((item) => {
-                        const start = item.displayStartAt;
-                        const end = item.displayEndAt;
-                        const startHour =
-                          start.getHours() + start.getMinutes() / 60;
-                        const endHour =
-                          startOfDay(start).getTime() ===
-                          startOfDay(end).getTime()
-                            ? end.getHours() + end.getMinutes() / 60
-                            : 24;
-                        const top = Math.max(0, Math.min(100, (startHour / 24) * 100));
-                        const height = Math.max(
-                          6,
-                          Math.min(100, ((endHour - startHour) / 24) * 100),
-                        );
+                        const range = item.range;
+                        const session = item.session;
+                        const movable = canReschedule(session) && !reschedule.isPending;
                         return (
-                          <div
-                            className="calendar-day-event-wrap"
+                          <details
+                            className={cn("calendar-day-entry", session.recordKind === "plan" && "is-plan")}
+                            data-session-id={session.id}
                             key={item.key}
-                            style={{ top: `${top}%`, height: `${height}%` }}
                           >
-                            <CalendarEvent item={item} {...eventProps} />
-                          </div>
+                            <summary
+                              aria-label={`${session.content}，${range.startLabel} ${range.startOffset} 至 ${range.endLabel} ${range.endOffset}，${statusLabel(session)}，记录详情`}
+                              draggable={movable}
+                              onDragStart={() => setDragging(item)}
+                              onDragEnd={() => setDragging(null)}
+                            >
+                              <span className="calendar-day-entry-heading"><strong>{session.content}</strong><Badge tone={statusTone(session)}>{statusLabel(session)}</Badge></span>
+                              <span className="calendar-day-entry-time">{range.startLabel}{range.clockShift ? ` ${range.startOffset}` : ""} – {range.endLabel}{range.clockShift ? ` ${range.endOffset}` : ""}<span><span className="calendar-day-expand-label">查看详情</span><span className="calendar-day-collapse-label">收起详情</span></span></span>
+                              {range.clockShift ? <span className="calendar-day-clock-shift">组织时区时钟发生调整，仅标起止位置；实际经过 {formatDuration(item.elapsedSeconds)}（含休息）。</span> : null}
+                              <span className="calendar-day-axis" aria-hidden="true">
+                                <span className="calendar-day-axis-labels"><span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>24:00</span></span>
+                                <span className="calendar-day-range-track">
+                                  {range.widthPercent !== null ? <span className="calendar-day-range" style={{ left: `${range.startPercent}%`, width: `${range.widthPercent}%` }} /> : null}
+                                  <span className="calendar-day-start-marker" style={{ left: `${range.startPercent}%` }} />
+                                  {range.clockShift ? <span className="calendar-day-end-marker" style={{ left: `${range.endPercent}%` }} /> : null}
+                                </span>
+                              </span>
+                            </summary>
+                            <div className="calendar-day-entry-details">
+                              <p>整条记录：{toZonedInputValue(new Date(session.startAt)).replace("T", " ")} – {toZonedInputValue(new Date(session.endAt)).replace("T", " ")}（{getOrganizationTimezone()}）</p>
+                              <p>本日时间片实际经过 {formatDuration(item.elapsedSeconds)}（含休息）。</p>
+                              <p>{session.recordKind === "plan" ? `计划时长 ${formatDuration(session.netSeconds)}，不计入事实工时` : `整条净工时 ${formatDuration(session.netSeconds)}（已扣除休息）；跨日记录以日期上方的范围汇总为准。`}</p>
+                              <p>工作结果：{session.result || "尚未填写"}</p>
+                              {movable ? <p>可拖动到其他日期，或使用下方记录对账中的“前一天 / 后一天”改期。</p> : null}
+                            </div>
+                          </details>
                         );
                       })}
+                      {!daySessions.length ? <EmptyState title="当天没有记录" description="可切换日期或筛选范围，查看已有工作与计划。" icon={<Clock3 />} /> : null}
                     </div>
                   </div>
                 </>
@@ -953,14 +916,14 @@ export function CalendarPage() {
                             {formatDate(item.startAt)} ·{" "}
                             {formatTime(item.startAt)} –{" "}
                             {formatTime(item.endAt)} ·{" "}
-                            {formatDuration(item.netSeconds)}
+                            整条记录 {formatDuration(item.netSeconds)}
                           </p>
                         </div>
                         <div className="flex items-center gap-2">
                           <Badge tone={statusTone(item)}>
                             {statusLabel(item)}
                           </Badge>
-                          {item.submissionStatus === "draft" ? (
+                          {canReschedule(item) ? (
                             <Button
                               disabled={reschedule.isPending}
                               onClick={() =>
@@ -975,7 +938,7 @@ export function CalendarPage() {
                               前一天
                             </Button>
                           ) : null}
-                          {item.submissionStatus === "draft" ? (
+                          {canReschedule(item) ? (
                             <Button
                               disabled={reschedule.isPending}
                               onClick={() =>
@@ -1008,7 +971,8 @@ export function CalendarPage() {
         </div>
       )}
       <div className="mt-4">
-        <ErrorMessage error={work.error ?? milestones.error} />
+        {work.data ? <ErrorMessage error={work.error} onRetry={() => void work.refetch()} retrying={work.isFetching} /> : null}
+        <ErrorMessage error={milestones.error} onRetry={() => void milestones.refetch()} retrying={milestones.isFetching} />
       </div>
     </>
   );

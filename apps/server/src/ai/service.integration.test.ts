@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
+import { eq } from "drizzle-orm";
 import { afterEach, describe, expect, it } from "vitest";
 import type { Database } from "@workbench/db";
 import {
@@ -17,14 +18,67 @@ import {
   projectMembers,
   projects,
   users,
+  aiJobs,
+  aiReports,
+  auditLogs,
+  organizationAiSettings,
 } from "@workbench/db/schema";
 
 import { AnalyticsService, type AnalyticsActor } from "../analytics/service.js";
 import { PayrollService } from "../payroll/service.js";
-import type { AiConfigurationService } from "./configuration.js";
+import { SearchService } from "../search/service.js";
+import { AiConfigurationService, AiQuotaExceededError } from "./configuration.js";
+import type { ServerConfig } from "../config.js";
 import { AiPayrollAccessError, AiService } from "./service.js";
 
 const clients: PGlite[] = [];
+
+it("charges manual AI retries to quota and refuses to replay team snapshots after permission removal", async () => {
+  const db = await createTestDatabase();
+  const seeded = await seedPayroll(db);
+  const actor: AnalyticsActor = { organizationId: seeded.organization.id, membershipId: seeded.membership.id, grants: [] };
+  await db.insert(organizationAiSettings).values({ organizationId: actor.organizationId, enabled: false, baseUrl: "https://provider.example/v1", model: "safe-model", dailyRequestLimit: 2, monthlyRequestLimit: 2 });
+  const quota = new AiConfigurationService(db, {} as ServerConfig);
+  const configured = Object.assign(configuredAi(), { assertQuota: quota.assertQuota.bind(quota) });
+  const service = new AiService(db, new AnalyticsService(db), configured, new PayrollService(db));
+  const [job] = await db.insert(aiJobs).values({ organizationId: actor.organizationId, requestedBy: actor.membershipId, scope: { scope: "self" }, taskType: "daily_summary", provider: "openai_compatible", model: "safe-model", promptTemplateVersion: "test", inputHash: crypto.randomUUID(), sourceSummary: {}, status: "failed" }).returning();
+  await expect(service.retry(actor, job!.id)).resolves.toMatchObject({ status: "queued", queuedAt: job!.queuedAt });
+  expect(await db.select().from(auditLogs).where(eq(auditLogs.action, "ai.job.manual_retry"))).toHaveLength(1);
+  await db.update(aiJobs).set({ status: "failed" }).where(eq(aiJobs.id, job!.id));
+  await expect(service.retry(actor, job!.id)).rejects.toBeInstanceOf(AiQuotaExceededError);
+  expect((await db.select().from(aiJobs).where(eq(aiJobs.id, job!.id)))[0]?.status).toBe("failed");
+  await db.update(aiJobs).set({ scope: { scope: "team" } }).where(eq(aiJobs.id, job!.id));
+  await expect(service.retry(actor, job!.id)).rejects.toThrow("当前权限已变化");
+});
+
+it("removes inaccessible historical reports from list, detail and subsequent conversation context", async () => {
+  const db = await createTestDatabase();
+  const seeded = await seedPayroll(db);
+  const actor: AnalyticsActor = { organizationId: seeded.organization.id, membershipId: seeded.membership.id, grants: [] };
+  const service = new AiService(db, new AnalyticsService(db), configuredAi(), new PayrollService(db));
+  const [job] = await db.insert(aiJobs).values({ organizationId: actor.organizationId, requestedBy: actor.membershipId, scope: { scope: "team", conversationId: "same-conversation", question: "团队工资细节" }, taskType: "assistant_chat", provider: "openai_compatible", model: "safe-model", promptTemplateVersion: "test", inputHash: crypto.randomUUID(), sourceSummary: {}, status: "completed" }).returning();
+  const [report] = await db.insert(aiReports).values({ aiJobId: job!.id, title: "旧权限报告", summary: "仅旧权限可见的团队摘要", structuredOutput: {}, sourceCount: 0 }).returning();
+  const authorized: AnalyticsActor = { ...actor, grants: [
+    { permission: "ai.team_analysis", scopeKind: "organization", scopeId: null },
+    { permission: "analytics.view_team", scopeKind: "organization", scopeId: null },
+  ] };
+  expect(await service.list(authorized)).toHaveLength(1);
+  expect(await service.detail(authorized, report!.id)).not.toBeNull();
+  const narrowed: AnalyticsActor = { ...actor, grants: [authorized.grants[0]!, { permission: "analytics.view_team", scopeKind: "project", scopeId: seeded.project.id }] };
+  expect(await service.detail(narrowed, report!.id)).toBeNull();
+  expect(await service.list(actor)).toEqual([]);
+  expect(await service.detail(actor, report!.id)).toBeNull();
+  const search = new SearchService(db, new AnalyticsService(db));
+  expect((await search.search(authorized, "旧权限", 10)).filter((item) => item.kind === "ai_report")).toHaveLength(1);
+  expect((await search.search(actor, "旧权限", 10)).filter((item) => item.kind === "ai_report")).toEqual([]);
+  await db.update(aiJobs).set({ scope: { scope: "team", conversationId: "same-conversation", permissionSnapshot: [{ permission: "work.view_full_scope", scopeKind: "organization", scopeId: null }] } }).where(eq(aiJobs.id, job!.id));
+  expect(await service.detail(authorized, report!.id)).toBeNull();
+  const next = await service.requestReport(actor, { taskType: "assistant_chat", scope: "self", question: "继续解释我自己的工作", conversationId: "same-conversation", from: new Date("2026-09-01"), to: new Date("2026-09-23") });
+  expect(next.sourceSummary).toMatchObject({ conversationHistory: [] });
+  expect(JSON.stringify(next.sourceSummary)).not.toContain("仅旧权限可见");
+  await db.update(aiJobs).set({ scope: { scope: "self" }, sourceSummary: { payroll: { amount: "100" } } }).where(eq(aiJobs.id, job!.id));
+  expect(await service.detail(actor, report!.id)).toBeNull();
+});
 
 async function createTestDatabase(): Promise<Database> {
   const client = new PGlite();

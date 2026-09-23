@@ -1,10 +1,11 @@
-import { and, desc, eq, inArray, isNull, or } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, isNull, lt, or } from "drizzle-orm";
 import { z } from "zod";
 import type { Database } from "@workbench/db";
 import {
   auditLogs,
   outboxEvents,
   projectNodes,
+  projectMembers,
   projects,
   timerEvents,
   timerStates,
@@ -15,12 +16,14 @@ import {
 } from "@workbench/db/schema";
 import {
   timerEventTypes,
+  timezoneSchema,
   transitionTimerState,
   type TimerEventType,
   workDurationAnomalyFlags,
 } from "@workbench/shared";
 
 import type { WorkActor } from "../work/service.js";
+import { lockPayrollInputs } from "../payroll/input-lock.js";
 
 const timerMetadataSchema = z
   .object({
@@ -33,7 +36,7 @@ const timerMetadataSchema = z
     visibility: z
       .enum(["private", "management_only", "project_visible"])
       .default("management_only"),
-    timezone: z.string().min(1).max(100).default("Asia/Shanghai"),
+    timezone: timezoneSchema.default("Asia/Shanghai"),
   })
   .superRefine(({ primaryProjectNodeId, projectNodeIds }, context) => {
     if (new Set(projectNodeIds).size !== projectNodeIds.length) {
@@ -142,6 +145,11 @@ export class TimerService {
         .select({ id: projectNodes.id })
         .from(projectNodes)
         .innerJoin(projects, eq(projects.id, projectNodes.projectId))
+        .innerJoin(projectMembers, and(
+          eq(projectMembers.projectId, projects.id),
+          eq(projectMembers.membershipId, actor.membershipId),
+          isNull(projectMembers.leftAt),
+        ))
         .where(
           and(
             inArray(projectNodes.id, linkedNodeIds),
@@ -222,6 +230,7 @@ export class TimerService {
     }
 
     return this.db.transaction(async (tx) => {
+      await lockPayrollInputs(tx, actor.organizationId);
       const [current] = await tx
         .select()
         .from(timerStates)
@@ -305,11 +314,16 @@ export class TimerService {
       if (grossSeconds < transition.accumulatedSeconds || grossSeconds <= 0) {
         throw new TimerEventConflictError("计时事件时间序列不合法。");
       }
-      const anomalyFlags = workDurationAnomalyFlags({
+      const [overlap] = await tx.select({ id: workSessions.id }).from(workSessions).where(and(
+        eq(workSessions.organizationId, actor.organizationId), eq(workSessions.membershipId, actor.membershipId),
+        eq(workSessions.recordKind, "fact"), isNull(workSessions.deletedAt),
+        lt(workSessions.startAt, event.occurredAt), gt(workSessions.endAt, current.startedAt),
+      )).limit(1);
+      const anomalyFlags = [...workDurationAnomalyFlags({
         grossSeconds,
         breakSeconds: grossSeconds - transition.accumulatedSeconds,
         netSeconds: transition.accumulatedSeconds,
-      });
+      }), ...(overlap ? ["overlapping_work_requires_review"] : [])];
       const metadata = timerMetadataSchema.parse(current.metadata);
       const [session] = await tx
         .insert(workSessions)

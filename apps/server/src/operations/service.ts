@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import { and, desc, eq, gte, inArray, isNull, lt } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import type { Database } from "@workbench/db";
 import {
@@ -10,6 +10,7 @@ import {
   orgMemberships,
   outboxEvents,
   users,
+  workSessionProjectLinks,
   workSessions,
 } from "@workbench/db/schema";
 import {
@@ -53,6 +54,10 @@ function sha256(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
+function safeSpreadsheetCell(value: unknown): unknown {
+  return typeof value === "string" && /^[\t\r\n ]*[=+\-@]/u.test(value) ? `'${value}` : value;
+}
+
 const requiredHeaders = ["startAt", "endAt", "content"] as const;
 
 export interface ImportPreview {
@@ -67,10 +72,18 @@ export function previewWorkSessionCsv(csv: string): ImportPreview {
   if (Buffer.byteLength(csv, "utf8") > 5 * 1024 * 1024) {
     throw new ImportValidationError("CSV 文件不能超过 5 MB。")
   }
-  const rows = parseCsv(csv);
+  let rows: string[][];
+  try { rows = parseCsv(csv.replace(/^\uFEFF/u, "")); }
+  catch (error) {
+    if (error instanceof SyntaxError) throw new ImportValidationError("CSV 引号未闭合，请检查文件格式后重新预览。");
+    throw error;
+  }
   if (rows.length === 0) throw new ImportValidationError("CSV 内容为空。")
   if (rows.length > 10_001) throw new ImportValidationError("单次最多导入 10,000 条记录。")
   const headers = rows[0]!.map((value) => value.trim());
+  if (headers.some((header) => !header) || new Set(headers).size !== headers.length) {
+    throw new ImportValidationError("CSV 列名不能为空或重复，请修正表头后重新预览。");
+  }
   for (const header of requiredHeaders) {
     if (!headers.includes(header)) throw new ImportValidationError(`缺少必需列 ${header}。`);
   }
@@ -78,7 +91,16 @@ export function previewWorkSessionCsv(csv: string): ImportPreview {
   const records: ImportedWorkSessionInput[] = [];
   for (let index = 1; index < rows.length; index += 1) {
     const row = rows[index]!;
+    if (row.length !== headers.length) {
+      errors.push({ row: index + 1, field: "row", message: `本行有 ${row.length} 列，与表头的 ${headers.length} 列不一致；含逗号的内容需用双引号包围。` });
+      continue;
+    }
     const value = (name: string) => row[headers.indexOf(name)]?.trim() ?? "";
+    const parallelWork = value("parallelWork").toLowerCase();
+    if (!["", "true", "1", "yes", "false", "0", "no"].includes(parallelWork)) {
+      errors.push({ row: index + 1, field: "parallelWork", message: "并行工作标记必须为 true/false、1/0、yes/no，或留空。" });
+      continue;
+    }
     const membershipIdValue = value("membershipId");
     const membershipId = membershipIdValue
       ? z.uuid().safeParse(membershipIdValue)
@@ -102,7 +124,7 @@ export function previewWorkSessionCsv(csv: string): ImportPreview {
       nextStep: value("nextStep"),
       primaryProjectNodeId: value("primaryProjectNodeId") || null,
       visibility: value("visibility") || "management_only",
-      parallelWork: ["true", "1", "yes"].includes(value("parallelWork").toLowerCase()),
+      parallelWork: ["true", "1", "yes"].includes(parallelWork),
       breaks: [],
     });
     if (parsed.success) {
@@ -411,6 +433,13 @@ export class OperationsService {
     const job = await this.ownedBackgroundExport(actor, exportId);
     const exportScope = z
       .object({
+        organizationWide: z.boolean(),
+        orgUnitIds: z.array(z.uuid()),
+        projectIds: z.array(z.uuid()),
+        includeContent: z.boolean(),
+        contentOrganizationWide: z.boolean(),
+        contentOrgUnitIds: z.array(z.uuid()),
+        contentProjectIds: z.array(z.uuid()),
         exportOrganizationWide: z.boolean(),
         exportSelf: z.boolean(),
         exportOrgUnitIds: z.array(z.uuid()),
@@ -453,6 +482,26 @@ export class OperationsService {
       throw new ExportJobError(
         "export_scope_revoked",
         "当前导出权限已不能覆盖该任务的原始范围，请重新创建任务。",
+        403,
+      );
+    }
+    const stillCovers = (
+      permissions: string[],
+      organizationWide: boolean,
+      orgUnits: string[],
+      projects: string[],
+    ) => {
+      const grants = actor.grants.filter((grant) => permissions.includes(grant.permission));
+      return grants.some((grant) => grant.scopeKind === "organization") ||
+        (!organizationWide &&
+          orgUnits.every((id) => grants.some((grant) => grant.scopeKind === "org_unit" && grant.scopeId === id)) &&
+          projects.every((id) => grants.some((grant) => grant.scopeKind === "project" && grant.scopeId === id)));
+    };
+    if (!stillCovers(["work.view_full_scope", "analytics.view_team"], snapshot.organizationWide, snapshot.orgUnitIds, snapshot.projectIds) ||
+        !stillCovers(["work.view_full_scope"], snapshot.includeContent || snapshot.contentOrganizationWide, snapshot.contentOrgUnitIds, snapshot.contentProjectIds)) {
+      throw new ExportJobError(
+        "export_scope_revoked",
+        "当前数据或敏感字段查看权限已变化，请按现有权限重新创建导出任务。",
         403,
       );
     }
@@ -505,14 +554,15 @@ export class OperationsService {
       .from(workSessions)
       .innerJoin(orgMemberships, eq(orgMemberships.id, workSessions.membershipId))
       .innerJoin(users, eq(users.id, orgMemberships.userId))
-      .where(and(access, gte(workSessions.startAt, from), lt(workSessions.startAt, to), eq(workSessions.recordKind, "fact"), isNull(workSessions.deletedAt)))
+      .where(and(access, this.exportAccessCondition(actor), gte(workSessions.startAt, from), lt(workSessions.startAt, to), eq(workSessions.recordKind, "fact"), isNull(workSessions.deletedAt)))
       .orderBy(workSessions.startAt);
     const includeContent = actor.grants.some((grant) => grant.permission === "work.view_full_scope" && grant.scopeKind === "organization");
     const csv = stringifyCsv([
       ["id", "membershipId", "member", "startAt", "endAt", "timezone", "grossSeconds", "breakSeconds", "netSeconds", "source", "content", "result", "visibility", "submissionStatus", "approvalStatus", "version"],
       ...rows.map(({ session, membershipId, displayName }) => [session.id, membershipId, displayName, session.startAt.toISOString(), session.endAt.toISOString(), session.timezone, session.grossSeconds, session.breakSeconds, session.netSeconds, session.source, includeContent || session.membershipId === actor.membershipId ? session.content : "[按字段策略隐藏]", includeContent || session.membershipId === actor.membershipId ? session.result : "[按字段策略隐藏]", session.visibility, session.submissionStatus, session.approvalStatus, session.version]),
-    ]);
-    const digest = sha256(csv);
+    ].map((row) => row.map(safeSpreadsheetCell)));
+    // The HTTP response includes a UTF-8 BOM for spreadsheet compatibility.
+    const digest = sha256(`\uFEFF${csv}`);
     const [job] = await this.db.insert(exportJobs).values({ organizationId: actor.organizationId, requestedBy: actor.membershipId, format: "csv", exportType: "work_sessions", scope: { from, to }, fieldPolicySnapshot: { includeContent }, status: "completed", sha256: digest, completedAt: new Date(), expiresAt: new Date(Date.now() + 24 * 60 * 60_000) }).returning();
     if (job) await this.db.insert(auditLogs).values({ organizationId: actor.organizationId, actorMembershipId: actor.membershipId, action: "export.work_sessions", entityType: "export", entityId: job.id, after: { rowCount: rows.length, sha256: digest, includeContent } });
     return { csv, sha256: digest, rowCount: rows.length };
@@ -525,7 +575,7 @@ export class OperationsService {
       .from(workSessions)
       .innerJoin(orgMemberships, eq(orgMemberships.id, workSessions.membershipId))
       .innerJoin(users, eq(users.id, orgMemberships.userId))
-      .where(and(access, gte(workSessions.startAt, from), lt(workSessions.startAt, to), eq(workSessions.recordKind, "fact"), isNull(workSessions.deletedAt)))
+      .where(and(access, this.exportAccessCondition(actor), gte(workSessions.startAt, from), lt(workSessions.startAt, to), eq(workSessions.recordKind, "fact"), isNull(workSessions.deletedAt)))
       .orderBy(workSessions.startAt);
     const includeContent = actor.grants.some((grant) => grant.permission === "work.view_full_scope" && grant.scopeKind === "organization");
     const payload = {
@@ -557,6 +607,21 @@ export class OperationsService {
     const [job] = await this.db.insert(exportJobs).values({ organizationId: actor.organizationId, requestedBy: actor.membershipId, format: "json", exportType: "work_sessions", scope: { from, to }, fieldPolicySnapshot: { includeContent }, status: "completed", sha256: digest, completedAt: new Date(), expiresAt: new Date(Date.now() + 24 * 60 * 60_000) }).returning();
     if (job) await this.db.insert(auditLogs).values({ organizationId: actor.organizationId, actorMembershipId: actor.membershipId, action: "export.work_sessions_json", entityType: "export", entityId: job.id, after: { rowCount: rows.length, sha256: digest, includeContent } });
     return { json, sha256: digest, rowCount: rows.length };
+  }
+
+  private exportAccessCondition(actor: AnalyticsActor) {
+    const grants = actor.grants.filter((grant) => grant.permission === "export.scope");
+    if (grants.some((grant) => grant.scopeKind === "organization")) {
+      return eq(workSessions.organizationId, actor.organizationId);
+    }
+    const conditions = grants.some((grant) => grant.scopeKind === "self")
+      ? [eq(workSessions.membershipId, actor.membershipId)]
+      : [];
+    const unitIds = grants.filter((grant) => grant.scopeKind === "org_unit" && grant.scopeId).map((grant) => grant.scopeId!);
+    const projectIds = grants.filter((grant) => grant.scopeKind === "project" && grant.scopeId).map((grant) => grant.scopeId!);
+    if (unitIds.length > 0) conditions.push(inArray(workSessions.membershipId, this.db.select({ id: orgMemberships.id }).from(orgMemberships).where(and(eq(orgMemberships.organizationId, actor.organizationId), inArray(orgMemberships.orgUnitId, unitIds)))));
+    if (projectIds.length > 0) conditions.push(inArray(workSessions.id, this.db.select({ id: workSessionProjectLinks.workSessionId }).from(workSessionProjectLinks).where(inArray(workSessionProjectLinks.projectId, projectIds))));
+    return and(eq(workSessions.organizationId, actor.organizationId), or(...conditions) ?? sql`false`);
   }
 
   async createImportPreview(actor: AnalyticsActor, csv: string) {

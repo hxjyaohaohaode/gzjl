@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button, Card, CardContent } from "@workbench/ui";
 import { api } from "./api.js";
-import { EvidencePanel, ReadOnlyEvidenceList } from "./pages.js";
+import { ErrorMessage, EvidencePanel, LoadingBlock, ReadOnlyEvidenceList } from "./pages.js";
 
 interface Claim {
   id: string; title: string; description: string; expenseDate: string; amount: string; currency: string;
@@ -40,23 +40,26 @@ export function ReimbursementPanel({ reviewOnly = false }: { reviewOnly?: boolea
     api(`/api/reimbursements/${claim.id}/actions`, { method: "POST", body: { action, expectedVersion: claim.version,
       ...(reviews[claim.id]?.note ? { note: reviews[claim.id]!.note } : {}),
       ...(reviews[claim.id]?.payPeriodId ? { payPeriodId: reviews[claim.id]!.payPeriodId } : {}) } }), onSuccess: refresh });
+  if (claims.isPending) return <Card><LoadingBlock /></Card>;
+  if (claims.isError && !claims.data) return <Card><CardContent><ErrorMessage error={claims.error} onRetry={() => void claims.refetch()} retrying={claims.isFetching} /></CardContent></Card>;
   if (reviewOnly && !claims.data?.canReview) return null;
   const items = (claims.data?.items ?? []).filter((claim) => !reviewOnly || claim.status === "pending");
   return <Card className="reimbursement-panel">
     <CardContent>
       <div className="reimbursement-heading"><div><h2>{reviewOnly ? "报销审批" : "报销申请与进度"}</h2>
         <p>凭证核验后提交，由其他有薪资结算权限的人员审批，通过后计入选定周期的薪资调整。</p></div>
-        {!reviewOnly && <Button onClick={() => setCreating(!creating)} variant="secondary" type="button">{creating ? "收起申请" : "申请报销"}</Button>}
+        {!reviewOnly && <Button aria-expanded={creating} disabled={create.isPending} onClick={() => setCreating(!creating)} variant="secondary" type="button">{creating ? "收起申请" : "申请报销"}</Button>}
       </div>
-      {creating && <form className="reimbursement-form" onSubmit={(event) => { event.preventDefault(); create.mutate(); }}>
+      {creating && <form onSubmit={(event) => { event.preventDefault(); if (!create.isPending) create.mutate(); }}><fieldset disabled={create.isPending} className="reimbursement-form" style={{ minWidth: 0 }}>
         <label>报销事项<input className={field} required minLength={2} maxLength={120} value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} /></label>
         <label>发生日期<input className={field} required type="date" value={form.expenseDate} onChange={(e) => setForm({ ...form, expenseDate: e.target.value })} /></label>
         <label>报销金额<input className={field} required type="number" min="0.000001" step="0.000001" inputMode="decimal" value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} /></label>
         <label>币种<select className={field} value={form.currency} onChange={(e) => setForm({ ...form, currency: e.target.value })}>{["CNY", "USD", "EUR", "HKD"].map((value) => <option key={value}>{value}</option>)}</select></label>
         <label className="reimbursement-wide">用途说明<textarea className={field} required minLength={2} maxLength={4000} value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} /></label>
         <Button disabled={create.isPending} type="submit">{create.isPending ? "正在保存…" : "保存草稿并添加凭证"}</Button>
-      </form>}
-      {(create.error || action.error || claims.error) && <p role="alert" className="reimbursement-error">{(create.error || action.error || claims.error)?.message}</p>}
+      </fieldset></form>}
+      {(create.error || action.error) && <p role="alert" className="reimbursement-error">{(create.error || action.error)?.message}</p>}
+      <ErrorMessage error={claims.error} onRetry={() => void claims.refetch()} retrying={claims.isFetching} />
       {claims.isPending ? <p role="status">正在读取报销记录…</p> : !items.length ? <p className="reimbursement-empty">{reviewOnly ? "暂无待审批报销。" : "暂无报销申请，可先填写事项，再上传发票或添加凭证链接。"}</p> : null}
       <div className="reimbursement-list">{items.map((claim) => {
         const own = claim.membershipId === claims.data?.membershipId;
@@ -72,12 +75,12 @@ export function ReimbursementPanel({ reviewOnly = false }: { reviewOnly?: boolea
               {claim.status === "draft" && <Button disabled={action.isPending} onClick={() => action.mutate({ claim, action: "submit" })}>提交报销审批</Button>}
               {["draft", "pending"].includes(claim.status) && <Button variant="secondary" disabled={action.isPending} onClick={() => action.mutate({ claim, action: "cancel" })}>撤回申请</Button>}
             </div>}
-            {!own && claims.data?.canReview && claim.status === "pending" && <div className="reimbursement-form">
+            {!own && claims.data?.canReview && claim.status === "pending" && <fieldset disabled={action.isPending} className="reimbursement-form" style={{ minWidth: 0 }}>
               <label>计入薪资周期<select className={field} value={review.payPeriodId} onChange={(e) => setReviews({ ...reviews, [claim.id]: { ...review, payPeriodId: e.target.value } })}><option value="">请选择开放周期</option>{claims.data.periods.map((period) => <option key={period.id} value={period.id}>{period.name}</option>)}</select></label>
               <label>审批说明<input className={field} placeholder="驳回时必填" maxLength={2000} value={review.note} onChange={(e) => setReviews({ ...reviews, [claim.id]: { ...review, note: e.target.value } })} /></label>
               <div className="reimbursement-actions"><Button disabled={action.isPending || !review.payPeriodId} onClick={() => action.mutate({ claim, action: "approve" })}>批准并计入薪资</Button><Button variant="secondary" disabled={action.isPending || !review.note.trim()} onClick={() => action.mutate({ claim, action: "reject" })}>驳回申请</Button></div>
               {!claims.data.periods.length && <p>暂无开放周期，请先在薪资管理创建周期或取消未结算的计算批次。</p>}
-            </div>}
+            </fieldset>}
           </div>}
         </article>;
       })}</div>

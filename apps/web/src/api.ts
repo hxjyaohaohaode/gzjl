@@ -1,4 +1,6 @@
 let csrfToken: string | null = null;
+let csrfRequest: Promise<string> | null = null;
+let csrfGeneration = 0;
 const SESSION_CHANGE_STORAGE_KEY = "workbench-session-change";
 
 const RETRYABLE_READ_STATUSES = new Set([429, 502, 503, 504]);
@@ -18,15 +20,15 @@ function retryDelay(response: Response | null, attempt: number): number {
 async function sleep(ms: number, signal?: AbortSignal | null): Promise<void> {
   if (signal?.aborted) throw signal.reason;
   await new Promise<void>((resolve, reject) => {
-    const timer = window.setTimeout(resolve, ms);
-    signal?.addEventListener(
-      "abort",
-      () => {
-        window.clearTimeout(timer);
-        reject(signal.reason);
-      },
-      { once: true },
-    );
+    const onAbort = () => {
+      window.clearTimeout(timer);
+      reject(signal?.reason);
+    };
+    const timer = window.setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
   });
 }
 
@@ -67,52 +69,96 @@ export class ApiError extends Error {
 
 async function getCsrfToken(): Promise<string> {
   if (csrfToken) return csrfToken;
-  const response = await fetch("/api/auth/csrf", { credentials: "include" });
-  if (!response.ok) throw new ApiError(response.status, "csrf_unavailable", "无法建立安全请求上下文。")
-  const payload = (await response.json()) as { csrfToken: string };
-  csrfToken = payload.csrfToken;
-  return csrfToken;
+  // Concurrent writes must share one cookie/token handshake. A late response
+  // from the previous session must never restore that session's token.
+  if (csrfRequest) return csrfRequest;
+  const generation = csrfGeneration;
+  const pending = api<{ csrfToken: string }>("/api/auth/csrf", { timeoutMs: 15_000 }).then((payload) => {
+    if (typeof payload.csrfToken !== "string" || !payload.csrfToken) {
+      throw new ApiError(502, "csrf_unavailable", "无法建立安全请求上下文，请重试。");
+    }
+    if (generation !== csrfGeneration) {
+      throw new ApiError(409, "session_changed", "登录状态已变化，请确认当前账号后重新操作。");
+    }
+    csrfToken = payload.csrfToken;
+    return csrfToken;
+  }).finally(() => { if (csrfRequest === pending) csrfRequest = null; });
+  csrfRequest = pending;
+  return pending;
 }
 
 export async function api<T>(
   path: string,
-  options: Omit<RequestInit, "body"> & { body?: unknown } = {},
+  options: Omit<RequestInit, "body"> & { body?: unknown; timeoutMs?: number } = {},
 ): Promise<T> {
-  const { body, ...requestOptions } = options;
+  const { body, timeoutMs = 45_000, signal, ...requestOptions } = options;
+  signal?.throwIfAborted();
   const method = (options.method ?? "GET").toUpperCase();
   const writes = !["GET", "HEAD", "OPTIONS"].includes(method);
   const headers = new Headers(options.headers);
   if (writes) headers.set("x-csrf-token", await getCsrfToken());
+  signal?.throwIfAborted();
   if (body !== undefined) headers.set("content-type", "application/json");
+  const controller = new AbortController();
+  const onAbort = () => controller.abort(signal?.reason);
+  signal?.addEventListener("abort", onAbort, { once: true });
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
   const init: RequestInit = {
     ...requestOptions,
     method,
     headers,
     credentials: "include",
+    signal: controller.signal,
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   };
   // Mutations are never retried automatically because the client cannot know
   // whether a disconnected response was committed. Safe reads absorb short
   // Render wake-ups, gateway resets and Retry-After rate-limit windows.
-  const response = writes
-    ? await fetch(path, init)
-    : await fetchReadWithRecovery(path, init);
-  if (response.status === 204) return undefined as T;
-  const payload = (await response.json().catch(() => ({}))) as Record<string, unknown>;
-  if (!response.ok) {
-    if (response.status === 403 && payload.error === "FST_CSRF_INVALID_TOKEN") csrfToken = null;
-    throw new ApiError(
-      response.status,
-      typeof payload.error === "string" ? payload.error : "request_failed",
-      typeof payload.message === "string" ? payload.message : "请求失败，请稍后重试。",
-      payload.issues,
-    );
+  try {
+    const response = writes ? await fetch(path, init) : await fetchReadWithRecovery(path, init);
+    if (response.ok && (response.status === 204 || method === "HEAD")) return undefined as T;
+    const payload: unknown = await response.json().catch(() => null);
+    // Gateways may return HTML with status 200. Treating it as {} turns a
+    // recoverable connection problem into an unrelated render exception.
+    if (response.ok && (payload === null || typeof payload !== "object")) {
+      throw new ApiError(502, "invalid_response", "服务返回的数据不完整，请重新加载。");
+    }
+    if (!response.ok) {
+      const problem = payload && typeof payload === "object" ? payload as Record<string, unknown> : {};
+      if (response.status === 403 && ["FST_CSRF_INVALID_TOKEN", "FST_CSRF_MISSING_SECRET"].includes(String(problem.error))) resetCsrfToken();
+      const fallback = response.status === 401 ? "登录已失效，请重新登录后继续。"
+        : response.status === 403 ? "当前操作未获授权，请确认权限后重试。"
+          : response.status === 409 ? "数据已发生变化，请刷新后核对再操作。"
+            : response.status === 429 ? "请求较多，请稍候再试。"
+              : "服务暂时不可用，请稍后重试。";
+      throw new ApiError(response.status, typeof problem.error === "string" ? problem.error : "request_failed",
+        typeof problem.message === "string" ? problem.message : fallback, problem.issues);
+    }
+    return payload as T;
+  } catch (error) {
+    if (signal?.aborted) throw signal.reason;
+    if (controller.signal.aborted) {
+      throw new ApiError(408, "request_timeout", writes
+        ? "请求超时，尚未确认是否保存成功。请先刷新核对结果，再决定是否重新提交。"
+        : "连接超时，请检查网络后重新加载。");
+    }
+    if (error instanceof TypeError) {
+      // Preserve the TypeError contract used by the idempotent timer queue.
+      throw new TypeError(writes
+        ? "网络连接中断，尚未确认是否保存成功。请先核对结果，再决定是否重新提交。"
+        : "网络连接中断，请检查网络后重新加载。", { cause: error });
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timer);
+    signal?.removeEventListener("abort", onAbort);
   }
-  return payload as T;
 }
 
 export function resetCsrfToken(): void {
   csrfToken = null;
+  csrfRequest = null;
+  csrfGeneration += 1;
 }
 
 /**

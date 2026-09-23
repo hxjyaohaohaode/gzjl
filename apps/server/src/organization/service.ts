@@ -713,12 +713,15 @@ export class OrganizationService {
       leaderMembershipId?: string | null | undefined;
     },
   ) {
-    await this.assertUnitParent(actor.organizationId, null, input.parentId);
+    return this.db.transaction(async (tx) => {
+    await tx.select({ id: organizations.id }).from(organizations).where(eq(organizations.id, actor.organizationId)).for("update");
+    await this.assertUnitParent(actor.organizationId, null, input.parentId, tx);
     await this.assertMember(
       actor.organizationId,
       input.leaderMembershipId ?? null,
+      tx,
     );
-    const [unit] = await this.db
+    const [unit] = await tx
       .insert(orgUnits)
       .values({
         organizationId: actor.organizationId,
@@ -729,7 +732,7 @@ export class OrganizationService {
       })
       .returning();
     if (!unit) throw new Error("Failed to create organization unit");
-    await this.db.insert(auditLogs).values({
+    await tx.insert(auditLogs).values({
       organizationId: actor.organizationId,
       actorMembershipId: actor.membershipId,
       action: "org_unit.created",
@@ -738,6 +741,7 @@ export class OrganizationService {
       after: unit,
     });
     return unit;
+    });
   }
 
   async updateUnit(
@@ -752,6 +756,7 @@ export class OrganizationService {
     },
   ) {
     return this.db.transaction(async (tx) => {
+      await tx.select({ id: organizations.id }).from(organizations).where(eq(organizations.id, actor.organizationId)).for("update");
       const [current] = await tx
         .select()
         .from(orgUnits)
@@ -774,8 +779,8 @@ export class OrganizationService {
         input.leaderMembershipId === undefined
           ? current.leaderMembershipId
           : input.leaderMembershipId;
-      await this.assertUnitParent(actor.organizationId, unitId, parentId);
-      await this.assertMember(actor.organizationId, leaderMembershipId);
+      await this.assertUnitParent(actor.organizationId, unitId, parentId, tx);
+      await this.assertMember(actor.organizationId, leaderMembershipId, tx);
       const [updated] = await tx
         .update(orgUnits)
         .set({
@@ -816,6 +821,7 @@ export class OrganizationService {
     expectedVersion: number,
   ) {
     return this.db.transaction(async (tx) => {
+      await tx.select({ id: organizations.id }).from(organizations).where(eq(organizations.id, actor.organizationId)).for("update");
       const [current] = await tx
         .select()
         .from(orgUnits)
@@ -890,6 +896,7 @@ export class OrganizationService {
     },
   ) {
     return this.db.transaction(async (tx) => {
+      await tx.select({ id: organizations.id }).from(organizations).where(eq(organizations.id, actor.organizationId)).for("update");
       const [current] = await tx
         .select()
         .from(orgMemberships)
@@ -2245,7 +2252,7 @@ export class OrganizationService {
   private async assertMember(
     organizationId: string,
     membershipId: string | null,
-    db: Database = this.db,
+    db: Pick<Database, "select"> = this.db,
   ) {
     if (!membershipId) return;
     const [member] = await db
@@ -2269,7 +2276,7 @@ export class OrganizationService {
     organizationId: string,
     unitId: string | null,
     parentId: string | null,
-    db: Database = this.db,
+    db: Pick<Database, "select"> = this.db,
   ) {
     if (!parentId) return;
     if (parentId === unitId)
@@ -2287,9 +2294,11 @@ export class OrganizationService {
     if (!parentById.has(parentId))
       throw new OrganizationConflictError("父组织单元不存在或已归档。");
     let cursor: string | null = parentId;
+    const visited = new Set<string>();
     while (cursor) {
-      if (cursor === unitId)
+      if (cursor === unitId || visited.has(cursor))
         throw new OrganizationConflictError("移动会造成组织结构循环。");
+      visited.add(cursor);
       cursor = parentById.get(cursor) ?? null;
     }
   }

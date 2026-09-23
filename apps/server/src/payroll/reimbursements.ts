@@ -4,6 +4,7 @@ import { attachmentLinks, attachments, auditLogs, compensationPlans, compensatio
 import { hasPermission } from "@workbench/shared";
 import type { AuthContext } from "../auth/service.js";
 import { PayrollConflictError, PayrollNotFoundError } from "./service.js";
+import { lockPayrollInputs } from "./input-lock.js";
 
 export const canReviewReimbursements = (actor: AuthContext) =>
   hasPermission(actor.grants, "payroll.settle", { scopeKind: "organization" });
@@ -41,6 +42,7 @@ export class ReimbursementService {
 
   async act(actor: AuthContext, id: string, input: { action: "submit" | "cancel" | "approve" | "reject"; expectedVersion: number; note?: string | undefined; payPeriodId?: string | undefined }) {
     return this.db.transaction(async (tx) => {
+      await lockPayrollInputs(tx, actor.organizationId);
       const [request] = await tx.select().from(reimbursementRequests)
         .where(and(eq(reimbursementRequests.id, id), eq(reimbursementRequests.organizationId, actor.organizationId)))
         .for("update");

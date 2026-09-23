@@ -2,11 +2,29 @@ import { describe, expect, it } from "vitest";
 
 import {
   calculateHourlyPayroll,
+  mergePayableIntervals,
   localDateKeysForIntervals,
   prorateDecimalAmount,
 } from "./payroll-engine.js";
 
 describe("calculateHourlyPayroll", () => {
+  it("unions overlapping approved and pending seconds before pay and weekly thresholds", () => {
+    const approved = { sourceId: "approved", startAt: new Date("2026-09-22T08:00Z"), endAt: new Date("2026-09-22T10:00Z"), approvalStatus: "approved" as const };
+    const pending = { sourceId: "pending", startAt: new Date("2026-09-22T09:00Z"), endAt: new Date("2026-09-22T11:00Z"), approvalStatus: "pending_review" as const };
+    const result = calculateHourlyPayroll({ hourlyRate: "100", timezone: "UTC", intervals: [pending, approved, { ...approved, sourceId: "duplicate" }],
+      includePendingAsEstimate: true, rules: [{ id: "weekly", type: "weekly_bonus", priority: 1, multiplier: "1", thresholdSeconds: 4 * 3600, rewardSeconds: 3600 }] });
+    expect(result).toMatchObject({ approvedSeconds: 7200, pendingSeconds: 3600, grossAmount: "300.000000", weeklyBonusSeconds: 0 });
+    expect(mergePayableIntervals([pending, approved])).toEqual(mergePayableIntervals([approved, pending]));
+    expect(pending.startAt.toISOString()).toBe("2026-09-22T09:00:00.000Z");
+  });
+
+  it("preserves gaps and adjacent coverage while removing nested duplicates", () => {
+    const interval = (sourceId: string, start: number, end: number) => ({ sourceId, startAt: new Date(start * 1000), endAt: new Date(end * 1000), approvalStatus: "approved" as const });
+    const merged = mergePayableIntervals([interval("wide", 0, 10), interval("nested", 1, 9), interval("adjacent", 10, 20), interval("later", 30, 40)]);
+    expect(merged.map((item) => [item.startAt.getTime() / 1000, item.endAt.getTime() / 1000])).toEqual([[0, 10], [10, 20], [30, 40]]);
+    expect(mergePayableIntervals([])).toEqual([]);
+    expect(() => mergePayableIntervals([interval("invalid", 1, 0)])).toThrow("positive duration");
+  });
   it("prorates fixed money with deterministic six-decimal rounding", () => {
     expect(prorateDecimalAmount("10000", 10, 30)).toBe("3333.333333");
     expect(prorateDecimalAmount("10000", 20, 30)).toBe("6666.666667");
