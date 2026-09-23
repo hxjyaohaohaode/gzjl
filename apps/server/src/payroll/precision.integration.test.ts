@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
 import { eq } from "drizzle-orm";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import type { Database } from "@workbench/db";
 import { calculateWorkDuration } from "@workbench/shared";
 import {
@@ -24,9 +24,11 @@ import {
 } from "@workbench/db/schema";
 import { PayrollService } from "./service.js";
 import { WorkSessionService } from "../work/service.js";
+import { TimerService } from "../timer/service.js";
 
 const clients: PGlite[] = [];
 afterEach(async () => {
+  vi.useRealTimers();
   await Promise.all(clients.splice(0).map((client) => client.close()));
 });
 
@@ -195,6 +197,76 @@ it.each(["current", "legacy"] as const)("counts real elapsed work around fractio
   const [snapshot] = await db.select().from(payrollSnapshots).where(eq(payrollSnapshots.payrollRunId, run.id));
   const payload = snapshot!.payload as { sessions: Array<{ id: string; netSeconds: number }> };
   expect(payload.sessions.find((entry) => entry.id === session.id)?.netSeconds).toBe(stored.netSeconds);
+});
+
+it("loads owner payroll and charges elapsed work for an older segment-rounded timer fact", async () => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(new Date("2026-09-23T12:00:00Z"));
+  const { db, service, actor, work, calculate } = await fixture();
+  const session = await work("08:00:00.100", "08:00:10.100");
+  await db.insert(workBreaks).values({ workSessionId: session.id,
+    startAt: new Date("2026-09-22T08:00:04.700Z"), endAt: new Date("2026-09-22T08:00:05.500Z"),
+  });
+  // The historical timer saved floor(4.6) + floor(4.6) = 8 seconds.
+  await db.update(workSessions).set({ grossSeconds: 10, breakSeconds: 2, netSeconds: 8 })
+    .where(eq(workSessions.id, session.id));
+  const overview = await service.managementOverview(actor);
+  expect(overview.liveItemIssues).toEqual([]);
+  expect(overview.liveItems).toHaveLength(1);
+  expect(overview.liveItems[0]?.preview.approvedSeconds).toBe(9);
+  const { item } = await calculate();
+  expect(item).toMatchObject({ approvedSeconds: 9, grossAmount: "9.000000" });
+  const [unchanged] = await db.select().from(workSessions).where(eq(workSessions.id, session.id));
+  expect(unchanged).toMatchObject({ netSeconds: 8, breakSeconds: 2 });
+});
+
+it("persists new timer sessions with the same duration as their exact break intervals", async () => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(new Date("2026-09-23T12:00:00Z"));
+  const { db, service, actor, employee, calculate } = await fixture();
+  const timerService = new TimerService(db);
+  const started = await timerService.start(employee, {
+    eventId: crypto.randomUUID(), occurredAt: new Date("2026-09-22T08:00:00.100Z"),
+    content: "分段计时", timezone: "UTC",
+  });
+  for (const [eventType, time] of [
+    ["pause", "08:00:04.700"], ["resume", "08:00:05.500"], ["stop", "08:00:10.100"],
+  ] as const) {
+    await timerService.transition(employee, started.id, {
+      eventId: crypto.randomUUID(), eventType, occurredAt: new Date(`2026-09-22T${time}Z`),
+    });
+  }
+  const [session] = await db.select().from(workSessions);
+  expect(session).toMatchObject({ source: "timer", grossSeconds: 10, breakSeconds: 1, netSeconds: 9, billableSeconds: 9 });
+  const [rest] = await db.select().from(workBreaks);
+  expect(rest).toMatchObject({ startAt: new Date("2026-09-22T08:00:04.700Z"), endAt: new Date("2026-09-22T08:00:05.500Z") });
+  await db.update(workSessions).set({ submissionStatus: "submitted", approvalStatus: "pending_review" })
+    .where(eq(workSessions.id, session!.id));
+  const overview = await service.managementOverview(actor);
+  expect(overview.liveItemIssues).toEqual([]);
+  expect(overview.liveItems[0]?.preview.pendingSeconds).toBe(9);
+  const { item } = await calculate();
+  expect(item).toMatchObject({ pendingSeconds: 9, grossAmount: "9.000000" });
+});
+
+it("keeps owner controls available while identifying an unrelated invalid fact", async () => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(new Date("2026-09-23T12:00:00Z"));
+  const { db, service, actor, work, calculate } = await fixture();
+  const session = await work("08:00:00.100", "08:00:10.100");
+  await db.insert(workBreaks).values({ workSessionId: session.id,
+    startAt: new Date("2026-09-22T08:00:04.700Z"), endAt: new Date("2026-09-22T08:00:05.500Z"),
+  });
+  await db.update(workSessions).set({ source: "manual", breakSeconds: 2, netSeconds: 8 })
+    .where(eq(workSessions.id, session.id));
+  const overview = await service.managementOverview(actor);
+  expect(overview.members).toHaveLength(2);
+  expect(overview.periods).toHaveLength(1);
+  expect(overview.liveItems).toEqual([]);
+  expect(overview.liveItemIssues).toEqual([expect.objectContaining({
+    message: expect.stringContaining(session.id),
+  })]);
+  await expect(calculate()).rejects.toThrow(/净时长与休息区间不一致/);
 });
 
 it("does not treat genuinely corrupt stored work duration as a legacy rounding difference", async () => {

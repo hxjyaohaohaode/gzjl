@@ -15,6 +15,7 @@ import {
   workSessionVersions,
 } from "@workbench/db/schema";
 import {
+  calculateWorkDuration,
   timerEventTypes,
   timezoneSchema,
   transitionTimerState,
@@ -305,15 +306,55 @@ export class TimerService {
       });
 
       if (transition.status !== "stopped") return updated;
-      if (transition.accumulatedSeconds <= 0) {
+      const allEvents = await tx
+        .select({
+          eventType: timerEvents.eventType,
+          occurredAt: timerEvents.occurredAt,
+        })
+        .from(timerEvents)
+        .where(eq(timerEvents.timerStateId, current.id))
+        .orderBy(timerEvents.occurredAt);
+      let nonWorkStart: Date | null = null;
+      const breakIntervals: Array<{ startAt: Date; endAt: Date }> = [];
+      for (const timerEvent of allEvents) {
+        if (
+          (timerEvent.eventType === "pause" ||
+            timerEvent.eventType === "break_start") &&
+          nonWorkStart === null
+        ) {
+          nonWorkStart = timerEvent.occurredAt;
+        }
+        if (
+          (timerEvent.eventType === "resume" ||
+            timerEvent.eventType === "break_end") &&
+          nonWorkStart
+        ) {
+          breakIntervals.push({
+            startAt: nonWorkStart,
+            endAt: timerEvent.occurredAt,
+          });
+          nonWorkStart = null;
+        }
+      }
+      if (nonWorkStart) {
+        breakIntervals.push({ startAt: nonWorkStart, endAt: event.occurredAt });
+      }
+      const validBreakIntervals = breakIntervals.filter(
+        (interval) => interval.endAt > interval.startAt,
+      );
+      let duration: ReturnType<typeof calculateWorkDuration>;
+      try {
+        duration = calculateWorkDuration(
+          { startAt: current.startedAt, endAt: event.occurredAt },
+          validBreakIntervals,
+        );
+      } catch {
+        throw new TimerEventConflictError("计时事件时间序列不合法，请同步后重试。");
+      }
+      if (duration.netSeconds <= 0) {
         throw new TimerEventConflictError("有效计时时长必须大于 0 秒。");
       }
-      const grossSeconds = Math.floor(
-        (event.occurredAt.getTime() - current.startedAt.getTime()) / 1_000,
-      );
-      if (grossSeconds < transition.accumulatedSeconds || grossSeconds <= 0) {
-        throw new TimerEventConflictError("计时事件时间序列不合法。");
-      }
+      const { grossSeconds, breakSeconds, netSeconds } = duration;
       const [overlap] = await tx.select({ id: workSessions.id }).from(workSessions).where(and(
         eq(workSessions.organizationId, actor.organizationId), eq(workSessions.membershipId, actor.membershipId),
         eq(workSessions.recordKind, "fact"), isNull(workSessions.deletedAt),
@@ -321,8 +362,8 @@ export class TimerService {
       )).limit(1);
       const anomalyFlags = [...workDurationAnomalyFlags({
         grossSeconds,
-        breakSeconds: grossSeconds - transition.accumulatedSeconds,
-        netSeconds: transition.accumulatedSeconds,
+        breakSeconds,
+        netSeconds,
       }), ...(overlap ? ["overlapping_work_requires_review"] : [])];
       const metadata = timerMetadataSchema.parse(current.metadata);
       const [session] = await tx
@@ -334,9 +375,9 @@ export class TimerService {
           endAt: event.occurredAt,
           timezone: metadata.timezone,
           grossSeconds,
-          breakSeconds: grossSeconds - transition.accumulatedSeconds,
-          netSeconds: transition.accumulatedSeconds,
-          billableSeconds: transition.accumulatedSeconds,
+          breakSeconds,
+          netSeconds,
+          billableSeconds: netSeconds,
           source: "timer",
           content: metadata.content,
           result: metadata.result,
@@ -408,47 +449,12 @@ export class TimerService {
         await tx.insert(workSessionProjectLinks).values(projectLinks);
       }
 
-      await tx
+      const [finalizedTimer] = await tx
         .update(timerStates)
-        .set({ workSessionId: session.id })
-        .where(eq(timerStates.id, current.id));
-
-      const allEvents = await tx
-        .select({
-          eventType: timerEvents.eventType,
-          occurredAt: timerEvents.occurredAt,
-        })
-        .from(timerEvents)
-        .where(eq(timerEvents.timerStateId, current.id))
-        .orderBy(timerEvents.occurredAt);
-      let nonWorkStart: Date | null = null;
-      const breakIntervals: Array<{ startAt: Date; endAt: Date }> = [];
-      for (const timerEvent of allEvents) {
-        if (
-          (timerEvent.eventType === "pause" ||
-            timerEvent.eventType === "break_start") &&
-          nonWorkStart === null
-        ) {
-          nonWorkStart = timerEvent.occurredAt;
-        }
-        if (
-          (timerEvent.eventType === "resume" ||
-            timerEvent.eventType === "break_end") &&
-          nonWorkStart
-        ) {
-          breakIntervals.push({
-            startAt: nonWorkStart,
-            endAt: timerEvent.occurredAt,
-          });
-          nonWorkStart = null;
-        }
-      }
-      if (nonWorkStart) {
-        breakIntervals.push({ startAt: nonWorkStart, endAt: event.occurredAt });
-      }
-      const validBreakIntervals = breakIntervals.filter(
-        (interval) => interval.endAt > interval.startAt,
-      );
+        .set({ workSessionId: session.id, accumulatedSeconds: netSeconds })
+        .where(eq(timerStates.id, current.id))
+        .returning();
+      if (!finalizedTimer) throw new Error("Failed to finalize timer");
       if (validBreakIntervals.length > 0) {
         await tx.insert(workBreaks).values(
           validBreakIntervals.map((interval) => ({
@@ -476,7 +482,7 @@ export class TimerService {
         action: "timer.stopped",
         entityType: "timer_state",
         entityId: current.id,
-        after: { ...updated, workSessionId: session.id, workSession: snapshot },
+        after: { ...finalizedTimer, workSession: snapshot },
       });
       await tx.insert(outboxEvents).values({
         organizationId: actor.organizationId,
@@ -486,7 +492,7 @@ export class TimerService {
         entityVersion: session.version,
         payload: { change: "timer_stopped" },
       });
-      return { ...updated, workSessionId: session.id, workSession: snapshot };
+      return { ...finalizedTimer, workSession: snapshot };
     });
   }
 }

@@ -48,7 +48,7 @@ import {
   type InputHTMLAttributes,
   type ReactNode,
 } from "react";
-import { Link, useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { Badge, Button, Card, CardContent, CardHeader } from "@workbench/ui";
 
 import {
@@ -8160,6 +8160,11 @@ interface PayrollManagementOverview {
     displayName: string;
     preview: NonNullable<PayrollOwnResponse["livePreview"]>;
   }>;
+  liveItemIssues: Array<{
+    membershipId: string;
+    displayName: string;
+    message: string;
+  }>;
   settings: {
     timezone: string;
     payrollCutoffDay: number;
@@ -8549,6 +8554,19 @@ function PayrollManagementPanel() {
   };
   return (
     <section className="mb-6 space-y-5" aria-label="薪资管理">
+      {management.data?.liveItemIssues?.length ? (
+        <Card>
+          <CardContent>
+            <p className="font-semibold text-[var(--warning)]">部分成员的实时薪资预估暂不可用</p>
+            <p className="mt-1 text-sm text-[var(--text-muted)]">请核对以下计薪数据后重新计算。其他成员的薪资方案与结算控制仍可查看；未通过校验的批次不能结算。</p>
+            <ul className="mt-2 list-disc space-y-1 break-words pl-5 text-sm">
+              {management.data.liveItemIssues.map((issue) => (
+                <li key={issue.membershipId}>{issue.displayName}：{issue.message}</li>
+              ))}
+            </ul>
+          </CardContent>
+        </Card>
+      ) : null}
       {currentTeamPayroll.length ? (
         <Card className="analytics-chart-card">
           <CardHeader>
@@ -12174,12 +12192,6 @@ export function AiPage({ me }: { me: Me }) {
   const queryClient = useQueryClient();
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
-  const location = useLocation();
-  const currentLocationKey = useRef<string | null>(location.key);
-  useEffect(() => {
-    currentLocationKey.current = location.key;
-    return () => { currentLocationKey.current = null; };
-  }, [location.key]);
   const requestedConversationId = searchParams.get("conversation") ?? "primary";
   const conversationId = /^[a-zA-Z0-9_-]{1,64}$/.test(requestedConversationId)
     ? requestedConversationId
@@ -12215,7 +12227,13 @@ export function AiPage({ me }: { me: Me }) {
   const [taskType, setTaskType] = useState<AiTaskType>("weekly_summary");
   const [questionDrafts, setQuestionDrafts] = useState<Record<string, string>>({});
   const question = questionDrafts[conversationId] ?? "";
-  const setQuestion = (value: string) => setQuestionDrafts((current) => ({ ...current, [conversationId]: value }));
+  const setQuestion = (value: string) => {
+    // History changes before React renders the new conversation. Read the
+    // current URL so an immediate keystroke cannot overwrite the old draft.
+    const requestedId = new URLSearchParams(window.location.search).get("conversation") ?? "primary";
+    const targetId = /^[a-zA-Z0-9_-]{1,64}$/.test(requestedId) ? requestedId : "primary";
+    setQuestionDrafts((current) => ({ ...current, [targetId]: value }));
+  };
   const activeReportId = searchParams.get("report");
   const setActiveReportId = (id: string) => {
     const next = new URLSearchParams(searchParams);
@@ -12246,7 +12264,7 @@ export function AiPage({ me }: { me: Me }) {
     },
     onSuccess: async (response) => {
       // A late creation must not change a conversation or page the user opened meanwhile.
-      if (response.job?.id && currentLocationKey.current === response.origin) setActiveReportId(response.job.id);
+      if (response.job?.id && window.location.href === response.origin) setActiveReportId(response.job.id);
       await queryClient.invalidateQueries({ queryKey: ["ai-reports"] });
     },
   });
@@ -12582,7 +12600,7 @@ export function AiPage({ me }: { me: Me }) {
                 <div className="mt-4 flex flex-wrap items-center gap-3">
                   <Button
                     disabled={create.isPending}
-                    onClick={() => create.mutate(location.key)}
+                    onClick={() => create.mutate(window.location.href)}
                   >
                     {create.isPending ? "正在提交任务…" : "生成所选洞察"}
                     <ArrowUpRight size={16} />
@@ -12730,7 +12748,7 @@ export function AiPage({ me }: { me: Me }) {
               <Card className="ai-report-card mt-5">
                 <EmptyState
                   action={
-                    <Button disabled={create.isPending} onClick={() => create.mutate(location.key)}>
+                    <Button disabled={create.isPending} onClick={() => create.mutate(window.location.href)}>
                       <Bot size={17} />
                       生成第一份报告
                     </Button>

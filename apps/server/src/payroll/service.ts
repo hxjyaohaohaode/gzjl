@@ -253,7 +253,15 @@ function payableIntervals(
   const legacyNetSeconds = actual.grossSeconds - legacyBreakSeconds;
   const matchesCurrent = session.netSeconds === actual.netSeconds && session.breakSeconds === actual.breakSeconds;
   const matchesLegacy = session.netSeconds === legacyNetSeconds && session.breakSeconds === legacyBreakSeconds;
-  if (session.grossSeconds !== actual.grossSeconds || (!matchesCurrent && !matchesLegacy)) {
+  // Older timer sessions rounded every running segment before persisting its
+  // duration. Reconstruct that exact value only for timer facts; payroll still
+  // charges the timestamp-backed effective interval, not the rounded value.
+  const legacyTimerNetSeconds = raw.reduce((sum, interval) =>
+    sum + Math.floor((interval.endAt.getTime() - interval.startAt.getTime()) / 1_000), 0);
+  const matchesLegacyTimer = session.source === "timer" &&
+    session.netSeconds === legacyTimerNetSeconds &&
+    session.breakSeconds === actual.grossSeconds - legacyTimerNetSeconds;
+  if (session.grossSeconds !== actual.grossSeconds || (!matchesCurrent && !matchesLegacy && !matchesLegacyTimer)) {
     throw new PayrollConflictError(`工时 ${session.id} 的净时长与休息区间不一致。`);
   }
   // Keep exact factual timestamps. Legacy independently rounded break values
@@ -1172,7 +1180,7 @@ export class PayrollService {
       payrollCutoffDay: organizationSettings.payrollCutoffDay,
       payrollCutoffMinute: payrollCutoffMinute(organizationSettings.settings),
     };
-    const liveItems = (
+    const liveResults = (
       await Promise.all(
         members
           .filter(
@@ -1183,18 +1191,39 @@ export class PayrollService {
           .map(async (member) => {
             const plan = plansByMember.get(member.membershipId);
             if (!plan) return null;
-            return {
-              membershipId: member.membershipId,
-              displayName: member.displayName,
-              preview: await this.buildLivePreview(
-                { ...actor, membershipId: member.membershipId },
-                plan,
-                normalizedOrganizationSettings,
-              ),
-            };
+            try {
+              return {
+                membershipId: member.membershipId,
+                displayName: member.displayName,
+                preview: await this.buildLivePreview(
+                  { ...actor, membershipId: member.membershipId },
+                  plan,
+                  normalizedOrganizationSettings,
+                ),
+                issue: null,
+              };
+            } catch (error) {
+              if (!(error instanceof PayrollConflictError)) throw error;
+              return {
+                membershipId: member.membershipId,
+                displayName: member.displayName,
+                preview: null,
+                issue: error.message,
+              };
+            }
           }),
       )
     ).filter((item): item is NonNullable<typeof item> => item !== null);
+    const liveItems = liveResults.filter((item) => item.preview !== null).map((item) => ({
+      membershipId: item.membershipId,
+      displayName: item.displayName,
+      preview: item.preview!,
+    }));
+    const liveItemIssues = liveResults.filter((item) => item.issue !== null).map((item) => ({
+      membershipId: item.membershipId,
+      displayName: item.displayName,
+      message: item.issue!,
+    }));
     return {
       members: members.map((member) => ({
         ...member,
@@ -1205,6 +1234,7 @@ export class PayrollService {
       runs,
       latestItems: [...latestPayrollItems.values()],
       liveItems,
+      liveItemIssues,
       settings: normalizedOrganizationSettings,
     };
   }

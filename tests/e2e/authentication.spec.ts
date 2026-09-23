@@ -886,6 +886,26 @@ test("Owner can configure a versioned hourly plan and create a pay period", asyn
   ).toBe("09:30");
 });
 
+test("Owner payroll keeps settlement controls visible when one live estimate has invalid work", async ({ page }) => {
+  await mockAuthenticatedWorkspace(page);
+  await page.route("**/api/payroll/me", (route) => route.fulfill({ json: { items: [], currentPlan: null, livePreview: null } }));
+  await page.route("**/api/payroll/management", (route) => route.fulfill({ json: {
+    members: [{ membershipId: "00000000-0000-4000-8000-000000000099", displayName: "陈远航", status: "active", isOwner: false, plan: null }],
+    periods: [], runs: [], latestItems: [], liveItems: [],
+    liveItemIssues: [{ membershipId: "00000000-0000-4000-8000-000000000099", displayName: "陈远航", message: "工时 00000000-0000-4000-8000-000000000456 的净时长与休息区间不一致。" }],
+    settings: { timezone: "Asia/Shanghai", payrollCutoffDay: 10, payrollCutoffMinute: 1080 },
+  } }));
+  await page.goto("/login");
+  await page.getByLabel("邮箱或手机号").fill("owner@example.test");
+  await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+  await page.goto("/payroll");
+  await expect(page.getByText("部分成员的实时薪资预估暂不可用")).toBeVisible();
+  await expect(page.getByText(/00000000-0000-4000-8000-000000000456/)).toBeVisible();
+  await expect(page.getByRole("heading", { name: "成员薪资方案" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "薪资周期与批次" })).toBeVisible();
+});
+
 test("Owner can undo an unexported calculation and remove an accidental period", async ({
   page,
 }) => {
