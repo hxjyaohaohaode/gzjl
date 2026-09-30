@@ -107,11 +107,14 @@ test("real API, database and file bytes connect the employee and management work
     })).period;
     await employee.goto("/payroll");
     await owner.goto("/payroll");
+    // Wait for management data to render before temporarily exercising the
+    // browser's text fallback. React's initial data commit restores input.type.
+    await expect(owner.getByRole("heading", { name: "本月实时预估", exact: true })).toBeVisible();
     const monthInput = owner.getByLabel("结算月份", { exact: true });
     const savedMonth = await monthInput.inputValue();
     await monthInput.evaluate((element) => { (element as HTMLInputElement).type = "text"; });
-    await monthInput.fill("2026-"); await expect(owner.getByRole("button", { name: "创建薪资周期" })).toBeDisabled();
-    await monthInput.fill(savedMonth); await expect(owner.getByRole("button", { name: "创建薪资周期" })).toBeEnabled();
+    await monthInput.fill("2026-"); await expect(owner.getByRole("button", { name: "保存老板指定周期" })).toBeDisabled();
+    await monthInput.fill(savedMonth); await expect(owner.getByRole("button", { name: "保存老板指定周期" })).toBeEnabled();
     await employee.getByRole("button", { name: "申请报销", exact: true }).click();
     await employee.getByLabel("报销事项", { exact: true }).fill(`交通报销${suffix}`);
     await employee.getByLabel("发生日期").fill(new Date().toISOString().slice(0, 10));

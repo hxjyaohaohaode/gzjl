@@ -1,6 +1,6 @@
 import { afterEach, expect, it } from "vitest";
 import { setOrganizationTimezone, zonedInputToDate } from "./timezone.js";
-import { isSalaryMonth, previousSalaryMonth, salaryMonthForm, salaryPeriodMatchesMonth } from "./payroll-month.js";
+import { isSalaryMonth, previousSalaryMonth, salaryMonthForm, salaryPeriodMatchesMonth, suggestedPeriodCutoff } from "./payroll-month.js";
 
 afterEach(() => setOrganizationTimezone(null));
 it("selects the last complete organization-local month across New Year", () => {
@@ -23,4 +23,10 @@ it("creates a full leap month and uses exclusive end when filtering export batch
 it("accounts for DST when creating an organization calendar month", () => {
   setOrganizationTimezone("America/New_York"); const month = salaryMonthForm("2026-03");
   expect((zonedInputToDate(month.endsAt).getTime() - zonedInputToDate(month.startsAt).getTime()) / 3600000).toBe(31 * 24 - 1);
+});
+
+it("suggests handoff after a boss-defined cross-month range without changing its boundaries", () => {
+  expect(suggestedPeriodCutoff("2026-10-19T18:00:00", 10, 570)).toBe("2026-11-10T09:30:00");
+  expect(suggestedPeriodCutoff("2026-10-01T00:00:00", 10, 570)).toBe("2026-10-10T09:30:00");
+  expect(suggestedPeriodCutoff("2026-12-20T18:00:00", 10, 570)).toBe("2027-01-10T09:30:00");
 });

@@ -8762,3 +8762,5 @@ body,
 .project-overview-copy > .project-description-preview { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; white-space: pre-wrap; overflow: hidden; }
 .project-description-full summary { cursor: pointer; min-height: 44px; display: flex; align-items: center; color: var(--accent-strong); font-size: 0.75rem; }
 .project-description-full p { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 0.85rem; }
+
+.payroll-preview-anchor { min-width: 0; scroll-margin-top: 5rem; }

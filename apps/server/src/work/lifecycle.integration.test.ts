@@ -37,7 +37,7 @@ function proposal(index = 0) {
   const start = new Date(Date.parse("2026-09-28T01:00:00Z") + index * 7_200_000);
   return { startAt: start.toISOString(), endAt: new Date(start.getTime() + 3_600_000).toISOString(), timezone: "Asia/Shanghai", source: "manual" as const, content: "事实" + index, result: "已完成", blockers: "", nextStep: "", primaryProjectNodeId: null, projectNodeIds: [] as string[], visibility: "management_only" as const, parallelWork: false, breaks: [] as Array<{ startAt: string; endAt: string }> };
 }
-async function preparedHandoff() {
+async function preparedHandoff(periodName = "正式九月") {
   const f = await fixture();
   const owner = f.actors[0]!;
   for (const actor of f.actors.slice(1)) {
@@ -45,7 +45,7 @@ async function preparedHandoff() {
     const session = await f.work.createManual(actor, proposal());
     await f.db.update(workSessions).set({ submissionStatus: "submitted", approvalStatus: "approved" }).where(eq(workSessions.id, session.id));
   }
-  const period = await f.payroll.createPeriod(owner, { name: "正式九月", timezone: "Asia/Shanghai", startsAt: new Date("2026-09-01T00:00:00Z"), endsAt: new Date("2026-10-01T00:00:00Z"), cutoffAt: new Date("2026-10-02T10:00:00Z") });
+  const period = await f.payroll.createPeriod(owner, { name: periodName, timezone: "Asia/Shanghai", startsAt: new Date("2026-09-01T00:00:00Z"), endsAt: new Date("2026-10-01T00:00:00Z"), cutoffAt: new Date("2026-10-02T10:00:00Z") });
   await f.db.insert(payrollAdjustments).values({ organizationId: owner.organizationId, membershipId: f.actors[1]!.membershipId, payPeriodId: period.id, amount: "-1.000000", currency: "CNY", reason: "验收负数调整", createdBy: owner.membershipId, approvedBy: owner.membershipId, approvedAt: new Date() });
   const run = await f.payroll.calculate(owner, period.id);
   return { ...f, owner, run, period };
@@ -140,6 +140,7 @@ describe("full cycle facts, repair and immutable handoff", () => {
     await f.handoff.profile(f.owner, f.actors[1]!.membershipId, "new-external-id");
     expect((await f.payroll.financeExport(f.owner, f.run.id)).csv).toBe(file.csv);
     expect((await f.handoff.workbook(f.owner, f.run.id)).body.equals(workbook.body)).toBe(true);
+    expect((await f.handoff.report(f.owner, f.run.id)).body.equals(workbook.body)).toBe(true);
     expect((await f.handoff.confirm(f.owner, f.run.id, preview.previewHash)).id).toBe(batch.id);
     expect(await f.db.select().from(payrollExportBatches)).toHaveLength(1);
     await expect(f.handoff.preview({ ...f.owner, organizationId: crypto.randomUUID() }, f.run.id)).rejects.toThrow();
@@ -174,9 +175,42 @@ describe("full cycle facts, repair and immutable handoff", () => {
   it("allows calculation previews but prevents incomplete salary cycles from being frozen as complete exports", async () => {
     const f = await preparedHandoff(); vi.setSystemTime(new Date("2026-09-30T12:00:00Z"));
     const preview = await f.handoff.preview(f.owner, f.run.id);
-    expect(preview.blockers.join()).toContain("结算周期尚未结束");
-    await expect(f.handoff.confirm(f.owner, f.run.id, preview.previewHash)).rejects.toThrow("结算周期尚未结束");
+    expect(preview.blockers.join()).toContain("周期尚未结束");
+    await expect(f.handoff.confirm(f.owner, f.run.id, preview.previewHash)).rejects.toThrow("周期尚未结束");
     expect(await f.db.select().from(payrollExportBatches)).toHaveLength(0);
     vi.setSystemTime(f.period.endsAt); expect((await f.handoff.preview(f.owner, f.run.id)).blockers).toEqual([]);
   });
+  it("downloads unconfirmed statistics with missing plans and pending work, rejects stale amounts and never locks facts", async () => {
+    const f = await preparedHandoff("结".repeat(99) + "🚀末"); vi.setSystemTime(new Date("2026-09-30T12:00:00Z"));
+    const [person] = await f.db.insert(users).values({ displayName: "缺方案不能写零元" }).returning();
+    await f.db.insert(orgMemberships).values({ organizationId: f.owner.organizationId, userId: person!.id, status: "active", joinedAt: new Date("2026-09-29") });
+    const pending = await f.work.createManual(f.actors[1]!, proposal(1));
+    await f.db.update(workSessions).set({ approvalStatus: "pending_review", submissionStatus: "submitted" }).where(eq(workSessions.id, pending.id));
+    const run = await f.payroll.calculate(f.owner, f.period.id);
+    const preview = await f.handoff.preview(f.owner, run.id);
+    expect(preview.blockers.join()).toContain("待审"); expect(preview.missingPlans).toHaveLength(1);
+    expect(preview.rows[0]?.amounts).toBeDefined();
+    const exported = await f.handoff.report(f.owner, run.id);
+    expect(createHash("sha256").update(exported.body).digest("hex")).toBe(exported.sha256);
+    expect(exported.fileName).toContain("未确认");
+    expect(() => encodeURIComponent(exported.fileName)).not.toThrow(); expect(exported.fileName).toContain("🚀");
+    const book = new ExcelJS.Workbook(); await book.xlsx.load(exported.body as unknown as Parameters<typeof book.xlsx.load>[0]);
+    expect(JSON.stringify(book.getWorksheet("薪资汇总")!.getSheetValues())).toContain("缺方案不能写零元");
+    const last = book.getWorksheet("薪资汇总")!.lastRow!;
+    expect(last.getCell(18).value).toBeNull(); expect(last.getCell(22).value).toBe("缺计薪方案 · 无法计算");
+    expect(JSON.stringify(book.getWorksheet("工作提交单")!.getSheetValues())).toContain("待审核");
+    expect(JSON.stringify(book.getWorksheet("规则与来源")!.getSheetValues())).toContain("未确认统计表");
+    expect(await f.db.select().from(payrollExportBatches)).toHaveLength(0);
+    expect((await f.db.select().from(workSessions)).some((r) => r.approvalStatus === "locked")).toBe(false);
+    const count = (await f.db.select().from(payrollRuns)).length;
+    await f.db.update(workSessions).set({ endAt: new Date("2026-09-28T05:00:00Z"), grossSeconds: 7200, netSeconds: 7200, version: 2 }).where(eq(workSessions.id, pending.id));
+    await expect(f.handoff.report(f.owner, run.id)).rejects.toThrow("更新计算并查看");
+    expect(await f.db.select().from(payrollRuns)).toHaveLength(count);
+    const updated = await f.payroll.calculate(f.owner, f.period.id);
+    expect(updated.id).not.toBe(run.id); expect((await f.handoff.report(f.owner, updated.id)).body.length).toBeGreaterThan(100);
+    await f.payroll.cancelCalculation(f.owner, updated.id);
+    await expect(f.handoff.report(f.owner, updated.id)).rejects.toThrow("已撤销");
+    await expect(f.handoff.report({ ...f.owner, organizationId: crypto.randomUUID() }, run.id)).rejects.toThrow();
+  });
+
 });

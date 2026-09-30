@@ -1,5 +1,5 @@
 import { HistoricalRangePicker, type HistoricalRange } from "./history-range.js";
-import { isSalaryMonth, previousSalaryMonth, salaryMonthForm, salaryPeriodMatchesMonth } from "./payroll-month.js";
+import { isSalaryMonth, previousSalaryMonth, salaryMonthForm, salaryPeriodMatchesMonth, suggestedPeriodCutoff } from "./payroll-month.js";
 import { WorkPolicyPanel } from "./submission-policy.js";
 import { aiGenerationOptionsSchema, type AiGenerationOptions } from "@workbench/shared";
 import { AiDraftEditor, AiFactAnswer, CycleOverview, WorkFactContext, PayrollHandoffPanel, CitedText, type CycleOverviewData } from "./lifecycle-workbench.js";
@@ -8265,12 +8265,24 @@ function formatPayrollAxis(currency: string, value: number): string {
 }
 
 function PayrollManagementPanel({ me }: { me: Me }) {
+  const [handoffSearch, setHandoffSearch] = useSearchParams();
+  const handoffRunId = handoffSearch.get("handoff");
+  const setHandoffRunId = (id: string | null) => { const next = new URLSearchParams(handoffSearch); if (id) next.set("handoff", id); else next.delete("handoff"); setHandoffSearch(next, { replace: true }); };
   const queryClient = useQueryClient();
   const chartPalette = useChartPalette();
   const management = useQuery({
     queryKey: ["payroll-management"],
     queryFn: () => api<PayrollManagementOverview>("/api/payroll/management"),
   });
+  const visibleRuns = useMemo(() => {
+    const newest = new Map<string, PayrollManagementOverview["runs"][number]>();
+    for (const entry of management.data?.runs ?? []) {
+      if (!["ready", "review_required", "settled"].includes(entry.run.status)) continue;
+      const previous = newest.get(entry.period.id);
+      if (!previous || entry.run.runNumber > previous.run.runNumber) newest.set(entry.period.id, entry);
+    }
+    return [...newest.values()];
+  }, [management.data?.runs]);
   const [periodMonth, setPeriodMonth] = useState("");
   const activeMembers = useMemo(
     () =>
@@ -8318,9 +8330,7 @@ function PayrollManagementPanel({ me }: { me: Me }) {
     cutoffMinuteOverride ?? management.data?.settings?.payrollCutoffMinute ?? 18 * 60;
   const [periodCutoffTouched, setPeriodCutoffTouched] = useState(false);
   const defaultPeriodCutoffAt = useMemo(() => {
-    const month = periodForm.endsAt.match(/^(\d{4}-\d{2})-/)?.[1];
-    if (!month) return periodForm.cutoffAt;
-    return `${month}-${String(cutoffDay).padStart(2, "0")}T${cutoffTimeValue(cutoffMinute)}:00`;
+    return suggestedPeriodCutoff(periodForm.endsAt, cutoffDay, cutoffMinute) || periodForm.cutoffAt;
   }, [cutoffDay, cutoffMinute, periodForm.cutoffAt, periodForm.endsAt]);
   const effectivePeriodCutoffAt = periodCutoffTouched
     ? periodForm.cutoffAt
@@ -8507,7 +8517,7 @@ function PayrollManagementPanel({ me }: { me: Me }) {
   });
   const createPeriod = useMutation({
     mutationFn: () =>
-      api("/api/payroll/periods", {
+      api<{ period: { id: string } }>("/api/payroll/periods", {
         method: "POST",
         body: {
           name: periodForm.name,
@@ -8517,7 +8527,7 @@ function PayrollManagementPanel({ me }: { me: Me }) {
           cutoffAt: zonedInputToDate(effectivePeriodCutoffAt).toISOString(),
         },
       }),
-    onSuccess: refresh,
+    onSuccess: async () => { await refresh(); setPeriodMonth(""); setHandoffRunId(null); },
   });
   const saveSettings = useMutation({
     mutationFn: () =>
@@ -8532,10 +8542,9 @@ function PayrollManagementPanel({ me }: { me: Me }) {
   });
   const calculatePeriod = useMutation({
     mutationFn: (periodId: string) =>
-      api(`/api/pay-periods/${periodId}/calculate`, { method: "POST" }),
-    onSuccess: refresh,
+      api<{ run: { id: string } }>(`/api/pay-periods/${periodId}/calculate`, { method: "POST" }),
+    onSuccess: async (response: { run: { id: string } }) => { await refresh(); setHandoffRunId(response.run.id); },
   });
-  const [handoffRunId, setHandoffRunId] = useState<string | null>(null);
   const reopenRun = useMutation({
     mutationFn: (runId: string) =>
       api(`/api/payroll-runs/${runId}/reopen`, { method: "POST" }),
@@ -8554,7 +8563,151 @@ function PayrollManagementPanel({ me }: { me: Me }) {
   return (
     <section className="mb-6 space-y-5" aria-label="薪资管理">
       {me.user.isOwner ? <WorkPolicyPanel editable /> : null}
-      {handoffRunId ? <PayrollHandoffPanel runId={handoffRunId} onClose={() => setHandoffRunId(null)} /> : null}
+      <Card>
+        <CardHeader>
+          <label className="history-month">查看 / 导出指定月份<input aria-label="查看 / 导出指定月份" type="month" value={periodMonth} onChange={(e) => { setPeriodMonth(e.target.value); setHandoffRunId(null); }} /><Button variant="ghost" onClick={() => { setPeriodMonth(""); setHandoffRunId(null); }}>显示所有周期</Button></label>
+          <div><p className="app-page-kicker">结算控制</p><h2 className="mt-1 text-lg font-bold">薪资周期与批次</h2></div>
+        </CardHeader>
+        <CardContent>
+          <form
+            className="mb-5 flex flex-wrap items-end gap-3"
+            onSubmit={(event) => {
+              event.preventDefault();
+              saveSettings.mutate();
+            }}
+          >
+            <Field hint="计划导出日期的默认值，可在每个周期中单独指定；不会限定工作统计的起止时间，实际付款由外部平台办理。" label="结算截止日（每月）">
+              <input
+                className={`${fieldClass} w-32`}
+                max="28"
+                min="1"
+                onChange={(event) => {
+                  const value = Number(event.target.value);
+                  setCutoffDayOverride(value);
+                  setPeriodCutoffTouched(false);
+                }}
+                required
+                type="number"
+                value={cutoffDay}
+              />
+            </Field>
+            <Field hint="计划核对时间，与工作统计范围和最晚工时提交时间分别设置。" label="结算截止 / 计划导出时间">
+              <input
+                aria-label="结算截止 / 计划导出时间"
+                className={`${fieldClass} w-36`}
+                onChange={(event) => {
+                  setCutoffMinuteOverride(cutoffTimeMinutes(event.target.value));
+                  setPeriodCutoffTouched(false);
+                }}
+                required
+                type="time"
+                value={cutoffTimeValue(cutoffMinute)}
+              />
+            </Field>
+            <Button disabled={saveSettings.isPending} size="compact" type="submit" variant="secondary">
+              {saveSettings.isPending ? "保存中…" : "保存结算截止 / 计划导出时间"}
+            </Button>
+          </form>
+          <form className="grid gap-4 lg:grid-cols-4" onSubmit={(event) => { event.preventDefault(); if (customPeriod || isSalaryMonth(settlementMonth)) createPeriod.mutate(); }}>
+            <Field hint="月份仅用于快捷填入整月范围，最终以老板指定的起止时间为准，可跨月或使用其他周期。" label="结算月份"><input aria-label="结算月份" aria-invalid={!customPeriod && !isSalaryMonth(settlementMonth)} min="0100-01" max="9998-12" placeholder="YYYY-MM，例如 2026-09" className={fieldClass} required={!customPeriod} type="month" value={settlementMonth} onChange={(event) => { const month = event.target.value; setSettlementMonth(month); if (isSalaryMonth(month)) { setPeriodForm(salaryMonthForm(month)); setPeriodCutoffTouched(false); setPeriodMonth(month); setHandoffRunId(null); setCustomPeriod(false); } }} /></Field>
+            <Field label="周期名称"><input className={fieldClass} onChange={(event) => setPeriodForm({ ...periodForm, name: event.target.value })} required value={periodForm.name} /></Field>
+            <Field label="本周期结算截止 / 计划导出时间"><input aria-label="本周期结算截止 / 计划导出时间" className={fieldClass} onChange={(event) => { setPeriodCutoffTouched(true); setPeriodForm({ ...periodForm, cutoffAt: event.target.value }); }} required type="datetime-local" value={effectivePeriodCutoffAt} /></Field>
+            <div className="lg:col-span-4">{!customPeriod && !isSalaryMonth(settlementMonth) ? <p role="alert">请填写完整有效的结算月份，格式为 YYYY-MM，例如 2026-09。</p> : null}<p className="lifecycle-caption">结算范围：{periodForm.startsAt.replace("T", " ")}（含）至 {periodForm.endsAt.replace("T", " ")}（不含） · {getOrganizationTimezone()}。导出完整周期的工资、补贴、报销及工作提交单。</p><label className="flex items-center gap-2"><input type="checkbox" checked={customPeriod} onChange={(event) => { setCustomPeriod(event.target.checked); if (!event.target.checked && isSalaryMonth(settlementMonth)) { setPeriodForm(salaryMonthForm(settlementMonth)); setPeriodCutoffTouched(false); } }} />由老板自定义起止时间</label></div>
+            <><Field label="周期开始（含）"><input aria-label="周期开始（含）" className={fieldClass} onChange={(event) => { setCustomPeriod(true); setPeriodForm({ ...periodForm, startsAt: event.target.value }); }} required step="1" type="datetime-local" value={periodForm.startsAt} /></Field><Field hint="到这个时刻之前为止。整月填写下月 1 日 00:00，自动包含本月最后一天的全部时间。" label="周期结束（不含）"><input aria-label="周期结束（不含）" className={fieldClass} onChange={(event) => { setCustomPeriod(true); setPeriodForm({ ...periodForm, endsAt: event.target.value }); }} required step="1" type="datetime-local" value={periodForm.endsAt} /></Field></>
+            <div className="lg:col-span-4"><Button disabled={createPeriod.isPending || (!customPeriod && !isSalaryMonth(settlementMonth))} type="submit">保存老板指定周期</Button></div>
+          </form>
+          {createPeriod.isSuccess ? <p role="status">老板指定周期已保存。点击该周期的“计算并查看薪资总览”，即可下载总览和工作明细。</p> : null}
+          <div className="mt-5 space-y-2">
+            {management.data?.periods.filter((period) => salaryPeriodMatchesMonth(period, periodMonth)).map((period) => (
+              <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl bg-[var(--surface-subtle)] px-4 py-3" key={period.id}>
+                <div><p className="font-semibold">{period.name}</p><p className="text-xs text-[var(--text-muted)]">{formatDateTime(period.startsAt)} – {formatDateTime(period.endsAt)} · {payPeriodStatusLabels[period.status] ?? period.status} · 计划导出 {formatDateTime(period.cutoffAt)}</p></div>
+                {["open", "pending_confirmation"].includes(period.status) ? (
+                  <div className="flex flex-wrap gap-2">
+                    <Button disabled={calculatePeriod.isPending} onClick={() => calculatePeriod.mutate(period.id)} type="button" variant="secondary">计算并查看薪资总览</Button>
+                    <Button
+                      disabled={deletePeriod.isPending}
+                      onClick={() => {
+                        if (window.confirm("撤销这个误建周期？只会移除尚未导出、尚未锁定的周期和已撤销计算，不会删除任何工作记录；曾锁定的历史周期不能删除。")) deletePeriod.mutate(period.id);
+                      }}
+                      type="button"
+                      variant="ghost"
+                    >
+                      撤销误建周期
+                    </Button>
+                  </div>
+                ) : null}
+              </div>
+            ))}
+          </div>
+          {visibleRuns.length ? (
+            <div className="mt-5 space-y-2">
+              {visibleRuns.filter((entry) => salaryPeriodMatchesMonth(entry.period, periodMonth)).map((entry) => (
+                <div className={`flex flex-wrap items-center justify-between gap-3 rounded-xl px-4 py-3 ${entry.run.status === "settled" ? "bg-[var(--success-soft)]" : "bg-[var(--warning-soft)]"}`} key={entry.run.id}>
+                  <div>
+                    <p className="text-sm font-semibold">{entry.period.name} · 批次 #{entry.run.runNumber} · {payrollRunStatusLabels[entry.run.status] ?? entry.run.status}</p>
+                    {entry.run.status !== "settled" ? <p className="mt-1 text-xs text-[var(--text-muted)]">可下载统计表核对；尚未正式交接、尚未锁定。确认交接后保留不可变原文件。</p> : null}
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {entry.run.status === "ready" ? (
+                      <>
+                        <Button
+                          disabled={false}
+                          onClick={() => {
+                            setHandoffRunId(entry.run.id);
+                          }}
+                          type="button"
+                        >
+                          核对导出预览
+                        </Button>
+                        <Button
+                          disabled={cancelRun.isPending}
+                          onClick={() => {
+                            if (window.confirm("撤销这次尚未导出、尚未锁定的计算？周期会恢复为可计算，工作记录不会删除，计算快照仍保留审计。")) cancelRun.mutate(entry.run.id);
+                          }}
+                          type="button"
+                          variant="ghost"
+                        >
+                          撤销本次计算
+                        </Button>
+                      </>
+                    ) : entry.run.status === "review_required" ? (
+                      <>
+                        <Badge tone="warning">需先复核，不能锁定</Badge><Button onClick={() => setHandoffRunId(entry.run.id)} type="button">核对导出预览</Button>
+                        <Button
+                          disabled={cancelRun.isPending}
+                          onClick={() => {
+                            if (window.confirm("撤销这次待复核计算？周期会恢复为可计算，工作记录不会删除，计算快照仍保留审计。")) cancelRun.mutate(entry.run.id);
+                          }}
+                          type="button"
+                          variant="ghost"
+                        >
+                          撤销本次计算
+                        </Button>
+                      </>
+                    ) : (
+                      <>
+                        <Button onClick={() => setHandoffRunId(entry.run.id)} type="button" variant="secondary">重新导出账单</Button>
+                        <Button
+                          disabled={reopenRun.isPending}
+                          onClick={() => {
+                            if (window.confirm("撤销后会恢复本周期和对应工时的可编辑计薪状态，历史批次仍保留审计。确认撤销？")) reopenRun.mutate(entry.run.id);
+                          }}
+                          type="button"
+                          variant="ghost"
+                        >
+                          撤销导出锁定
+                        </Button>
+                      </>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : null}
+          <ErrorMessage error={saveSettings.error ?? createPeriod.error ?? calculatePeriod.error ?? reopenRun.error ?? cancelRun.error ?? deletePeriod.error} />
+        </CardContent>
+      </Card>
+      {handoffRunId ? <PayrollHandoffPanel key={handoffRunId} runId={handoffRunId} onClose={() => setHandoffRunId(null)} onRecalculate={(id) => calculatePeriod.mutate(id)} canExportWork={hasGrant(me, "work.view_full_scope")} /> : null}
       {activeMembers.filter((m) => !m.plan).length ? <Card><CardHeader><h2>已加入但缺计薪方案</h2></CardHeader><CardContent><p>请在导出前补齐方案与生效日期。</p><div className="fact-project-links">{activeMembers.filter((m) => !m.plan).map((m) => <Button variant="secondary" key={m.membershipId} onClick={() => selectMember(m.membershipId)}>{m.displayName} · 配置方案</Button>)}</div></CardContent></Card> : null}
       {management.data?.liveItemIssues?.length ? (
         <Card>
@@ -8844,149 +8997,6 @@ function PayrollManagementPanel({ me }: { me: Me }) {
             </div>
           </form>
           <ErrorMessage error={management.error ?? savePlan.error} />
-        </CardContent>
-      </Card>
-      <Card>
-        <CardHeader>
-          <label className="history-month">查看 / 导出指定月份<input aria-label="查看 / 导出指定月份" type="month" value={periodMonth} onChange={(e) => { setPeriodMonth(e.target.value); setHandoffRunId(null); }} /><Button variant="ghost" onClick={() => { setPeriodMonth(""); setHandoffRunId(null); }}>显示所有周期</Button></label>
-          <div><p className="app-page-kicker">结算控制</p><h2 className="mt-1 text-lg font-bold">薪资周期与批次</h2></div>
-        </CardHeader>
-        <CardContent>
-          <form
-            className="mb-5 flex flex-wrap items-end gap-3"
-            onSubmit={(event) => {
-              event.preventDefault();
-              saveSettings.mutate();
-            }}
-          >
-            <Field hint="由所有者设置：每月该日计划核对并导出上一个自然月薪资依据；实际付款时间由外部平台确认。" label="结算截止日（每月）">
-              <input
-                className={`${fieldClass} w-32`}
-                max="28"
-                min="1"
-                onChange={(event) => {
-                  const value = Number(event.target.value);
-                  setCutoffDayOverride(value);
-                  setPeriodCutoffTouched(false);
-                }}
-                required
-                type="number"
-                value={cutoffDay}
-              />
-            </Field>
-            <Field hint="该时间会同步显示在员工的本月薪资中。" label="结算截止 / 计划导出时间">
-              <input
-                aria-label="结算截止 / 计划导出时间"
-                className={`${fieldClass} w-36`}
-                onChange={(event) => {
-                  setCutoffMinuteOverride(cutoffTimeMinutes(event.target.value));
-                  setPeriodCutoffTouched(false);
-                }}
-                required
-                type="time"
-                value={cutoffTimeValue(cutoffMinute)}
-              />
-            </Field>
-            <Button disabled={saveSettings.isPending} size="compact" type="submit" variant="secondary">
-              {saveSettings.isPending ? "保存中…" : "保存结算截止 / 计划导出时间"}
-            </Button>
-          </form>
-          <form className="grid gap-4 lg:grid-cols-4" onSubmit={(event) => { event.preventDefault(); if (customPeriod || isSalaryMonth(settlementMonth)) createPeriod.mutate(); }}>
-            <Field hint="默认核对上一个完整自然月。月初 00:00 开始，下月月初 00:00 结束（不含），按组织时区计算。" label="结算月份"><input aria-label="结算月份" aria-invalid={!customPeriod && !isSalaryMonth(settlementMonth)} min="0100-01" max="9998-12" placeholder="YYYY-MM，例如 2026-09" className={fieldClass} required={!customPeriod} type="month" value={settlementMonth} onChange={(event) => { const month = event.target.value; setSettlementMonth(month); if (isSalaryMonth(month)) { setPeriodForm(salaryMonthForm(month)); setPeriodCutoffTouched(false); setPeriodMonth(month); setHandoffRunId(null); setCustomPeriod(false); } }} /></Field>
-            <Field label="周期名称"><input className={fieldClass} onChange={(event) => setPeriodForm({ ...periodForm, name: event.target.value })} required value={periodForm.name} /></Field>
-            <Field label="本周期结算截止 / 计划导出时间"><input aria-label="本周期结算截止 / 计划导出时间" className={fieldClass} onChange={(event) => { setPeriodCutoffTouched(true); setPeriodForm({ ...periodForm, cutoffAt: event.target.value }); }} required type="datetime-local" value={effectivePeriodCutoffAt} /></Field>
-            <div className="lg:col-span-4">{!customPeriod && !isSalaryMonth(settlementMonth) ? <p role="alert">请填写完整有效的结算月份，格式为 YYYY-MM，例如 2026-09。</p> : null}<p className="lifecycle-caption">结算范围：{periodForm.startsAt.replace("T", " ")}（含）至 {periodForm.endsAt.replace("T", " ")}（不含） · {getOrganizationTimezone()}。导出完整周期的工资、补贴、报销及工作提交单。</p><label className="flex items-center gap-2"><input type="checkbox" checked={customPeriod} onChange={(event) => { setCustomPeriod(event.target.checked); if (!event.target.checked && isSalaryMonth(settlementMonth)) { setPeriodForm(salaryMonthForm(settlementMonth)); setPeriodCutoffTouched(false); } }} />使用特殊自定义结算周期</label></div>
-            {customPeriod && <><Field label="开始"><input className={fieldClass} onChange={(event) => setPeriodForm({ ...periodForm, startsAt: event.target.value })} required type="datetime-local" value={periodForm.startsAt} /></Field><Field label="结束（不含）"><input className={fieldClass} onChange={(event) => setPeriodForm({ ...periodForm, endsAt: event.target.value })} required type="datetime-local" value={periodForm.endsAt} /></Field></>}
-            <div className="lg:col-span-4"><Button disabled={createPeriod.isPending || (!customPeriod && !isSalaryMonth(settlementMonth))} type="submit">创建薪资周期</Button></div>
-          </form>
-          <div className="mt-5 space-y-2">
-            {management.data?.periods.filter((period) => salaryPeriodMatchesMonth(period, periodMonth)).map((period) => (
-              <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl bg-[var(--surface-subtle)] px-4 py-3" key={period.id}>
-                <div><p className="font-semibold">{period.name}</p><p className="text-xs text-[var(--text-muted)]">{formatDateTime(period.startsAt)} – {formatDateTime(period.endsAt)} · {payPeriodStatusLabels[period.status] ?? period.status} · 计划导出 {formatDateTime(period.cutoffAt)}</p></div>
-                {period.status === "open" ? (
-                  <div className="flex flex-wrap gap-2">
-                    <Button disabled={calculatePeriod.isPending} onClick={() => calculatePeriod.mutate(period.id)} type="button" variant="secondary">计算本周期</Button>
-                    <Button
-                      disabled={deletePeriod.isPending}
-                      onClick={() => {
-                        if (window.confirm("撤销这个误建周期？只会移除尚未导出、尚未锁定的周期和已撤销计算，不会删除任何工作记录；曾锁定的历史周期不能删除。")) deletePeriod.mutate(period.id);
-                      }}
-                      type="button"
-                      variant="ghost"
-                    >
-                      撤销误建周期
-                    </Button>
-                  </div>
-                ) : null}
-              </div>
-            ))}
-          </div>
-          {management.data?.runs.some((entry) => ["ready", "review_required", "settled"].includes(entry.run.status)) ? (
-            <div className="mt-5 space-y-2">
-              {management.data.runs.filter((entry) => ["ready", "review_required", "settled"].includes(entry.run.status) && salaryPeriodMatchesMonth(entry.period, periodMonth)).map((entry) => (
-                <div className={`flex flex-wrap items-center justify-between gap-3 rounded-xl px-4 py-3 ${entry.run.status === "settled" ? "bg-[var(--success-soft)]" : "bg-[var(--warning-soft)]"}`} key={entry.run.id}>
-                  <div>
-                    <p className="text-sm font-semibold">{entry.period.name} · 批次 #{entry.run.runNumber} · {payrollRunStatusLabels[entry.run.status] ?? entry.run.status}</p>
-                    {entry.run.status !== "settled" ? <p className="mt-1 text-xs text-[var(--text-muted)]">尚未导出、尚未锁定；只有点击“确认导出并锁定”后才会生效。</p> : null}
-                  </div>
-                  <div className="flex flex-wrap gap-2">
-                    {entry.run.status === "ready" ? (
-                      <>
-                        <Button
-                          disabled={false}
-                          onClick={() => {
-                            setHandoffRunId(entry.run.id);
-                          }}
-                          type="button"
-                        >
-                          核对导出预览
-                        </Button>
-                        <Button
-                          disabled={cancelRun.isPending}
-                          onClick={() => {
-                            if (window.confirm("撤销这次尚未导出、尚未锁定的计算？周期会恢复为可计算，工作记录不会删除，计算快照仍保留审计。")) cancelRun.mutate(entry.run.id);
-                          }}
-                          type="button"
-                          variant="ghost"
-                        >
-                          撤销本次计算
-                        </Button>
-                      </>
-                    ) : entry.run.status === "review_required" ? (
-                      <>
-                        <Badge tone="warning">需先复核，不能锁定</Badge>
-                        <Button
-                          disabled={cancelRun.isPending}
-                          onClick={() => {
-                            if (window.confirm("撤销这次待复核计算？周期会恢复为可计算，工作记录不会删除，计算快照仍保留审计。")) cancelRun.mutate(entry.run.id);
-                          }}
-                          type="button"
-                          variant="ghost"
-                        >
-                          撤销本次计算
-                        </Button>
-                      </>
-                    ) : (
-                      <>
-                        <Button onClick={() => setHandoffRunId(entry.run.id)} type="button" variant="secondary">重新导出账单</Button>
-                        <Button
-                          disabled={reopenRun.isPending}
-                          onClick={() => {
-                            if (window.confirm("撤销后会恢复本周期和对应工时的可编辑计薪状态，历史批次仍保留审计。确认撤销？")) reopenRun.mutate(entry.run.id);
-                          }}
-                          type="button"
-                          variant="ghost"
-                        >
-                          撤销导出锁定
-                        </Button>
-                      </>
-                    )}
-                  </div>
-                </div>
-              ))}
-            </div>
-          ) : null}
-          <ErrorMessage error={saveSettings.error ?? createPeriod.error ?? calculatePeriod.error ?? reopenRun.error ?? cancelRun.error ?? deletePeriod.error} />
         </CardContent>
       </Card>
     </section>

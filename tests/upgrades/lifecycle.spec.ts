@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
 
 async function call(client: APIRequestContext, method: string, path: string, data?: unknown) {
@@ -57,9 +58,35 @@ test("long content, evidence queue, restoration, contextual approval and exact h
     await expect(owner.getByText("审核依据与历次退回原因", { exact: true })).toBeVisible();
     await expect(owner.getByText("提交人：同名成员与多附件长文本验收", { exact: true })).toBeVisible();
     await expect(owner.getByText("图片证据.png", { exact: true }).first()).toBeVisible();
+    // A boss-defined partial cycle must be usable through the actual form.
+    await owner.goto("/payroll");
+    const localInput = (date: Date) => new Intl.DateTimeFormat("sv-SE", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" }).format(date).replace(" ", "T");
+    await owner.getByLabel("周期名称", { exact: true }).fill("老板指定非自然月交接验收");
+    await owner.getByLabel("周期开始（含）", { exact: true }).fill(localInput(new Date(Date.now() - 86400_000)));
+    await owner.getByLabel("周期结束（不含）", { exact: true }).fill(localInput(new Date(Date.now() - 1000)));
+    const createdResponse = owner.waitForResponse((r) => r.url().endsWith("/api/payroll/periods") && r.request().method() === "POST");
+    await owner.getByRole("button", { name: "保存老板指定周期", exact: true }).click();
+    const period = (await (await createdResponse).json()).period;
+    expect(period).toBeTruthy();
+    await owner.getByRole("button", { name: "计算并查看薪资总览", exact: true }).click();
+    await expect(owner.getByRole("heading", { name: "老板核对：每人薪资总览 + 本周期工作明细" })).toBeVisible();
+    await expect(owner).toHaveURL(/handoff=/);
+    await expect(owner.getByRole("button", { name: "确认导出并锁定", exact: true })).toBeDisabled();
+    const statisticsResponse = owner.waitForResponse((r) => r.url().endsWith("/report.xlsx"));
+    const statisticsDownload = owner.waitForEvent("download");
+    await owner.getByRole("button", { name: "下载薪资总览及工作明细 Excel", exact: true }).click();
+    const statistics = await statisticsDownload; const statisticsFile = await statistics.path();
+    expect(statistics.suggestedFilename()).toContain("未确认");
+    const response = await statisticsResponse; expect(response.ok()).toBeTruthy();
+    expect(createHash("sha256").update(await readFile(statisticsFile!)).digest("hex")).toBe(response.headers()["x-content-sha256"]);
+    const pendingRunId = new URL(owner.url()).searchParams.get("handoff");
+    expect((await call(owner.request, "GET", `/api/payroll-runs/${pendingRunId}/handoff`)).batch).toBeNull();
+    expect((await member.request.get(`/api/payroll-runs/${pendingRunId}/report.xlsx`)).status()).toBe(403);
+    await owner.reload(); await expect(owner.getByRole("heading", { name: "老板核对：每人薪资总览 + 本周期工作明细" })).toBeVisible();
+    await owner.goto("/approvals");
     await owner.getByRole("button", { name: "批准", exact: true }).click();
     await expect.poll(async () => (await call(owner.request, "GET", `/api/work-facts/${session.id}`)).session.approvalStatus).toBe("approved");
-    const period = (await call(owner.request, "POST", "/api/payroll/periods", { name: "正式交接验收", timezone: "Asia/Shanghai", startsAt: new Date(Date.now() - 86400_000).toISOString(), endsAt: new Date().toISOString(), cutoffAt: new Date(Date.now() + 7_200_000).toISOString() })).period;
+
     const { run } = await call(owner.request, "POST", `/api/pay-periods/${period.id}/calculate`); expect(run.status).toBe("ready");
     expect((await owner.request.get(`/api/payroll-runs/${run.id}/finance-export.csv`)).status()).toBe(409);
     await owner.goto(`/projects/${createdProject.project.id}?node=${createdProject.root.id}`);
@@ -104,6 +131,7 @@ test("long content, evidence queue, restoration, contextual approval and exact h
     await owner.goto("/payroll"); await owner.getByRole("button", { name: "核对导出预览", exact: true }).click();
     const preview = await call(owner.request, "GET", `/api/payroll-runs/${run.id}/handoff`);
     expect(preview.blockers).toEqual([]);
+    await owner.getByText("正式交接：核对外部人员编号和方案版本", { exact: true }).click();
     const identity = owner.getByLabel("同名成员与多附件长文本验收 外部人员编号"); await identity.fill("external-platform-member-001");
     await owner.getByRole("button", { name: "保存映射", exact: true }).click();
     await expect.poll(async () => (await call(owner.request, "GET", `/api/payroll-runs/${run.id}/handoff`)).previewHash).not.toBe(preview.previewHash);

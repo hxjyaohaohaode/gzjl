@@ -74,3 +74,5 @@ docs           架构、权限、薪资、分析、部署与运维文档
 - [`docs/security.md`](./docs/security.md)：认证、Scope 授权、附件与密钥处置。
 - [`docs/deployment.md`](./docs/deployment.md)：Render Blueprint 配置与首次初始化。
 - [`docs/operations.md`](./docs/operations.md)：健康检查、备份、恢复演练与事故恢复。
+
+老板指定结算周期、直接下载薪资总览及工作明细、与正式交接的区别，见 [本次修复说明](docs/boss-period-export-2026-10-01.md)。
