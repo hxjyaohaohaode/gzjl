@@ -35,6 +35,10 @@ export class PayrollHandoffService {
       if (!member) throw new PayrollNotFoundError();
       const [duplicate] = await tx.select().from(payrollExportProfiles).where(and(eq(payrollExportProfiles.organizationId, actor.organizationId), eq(payrollExportProfiles.externalId, externalId), ne(payrollExportProfiles.membershipId, membershipId)));
       if (duplicate) throw new PayrollConflictError("外部人员编号已被其他成员使用，请核对同名成员和外部平台账号。");
+      if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(externalId)) {
+        const [defaultIdentity] = await tx.select({ id: orgMemberships.id }).from(orgMemberships).leftJoin(payrollExportProfiles, eq(payrollExportProfiles.membershipId, orgMemberships.id)).where(and(eq(orgMemberships.organizationId, actor.organizationId), eq(orgMemberships.id, externalId), ne(orgMemberships.id, membershipId), isNull(payrollExportProfiles.membershipId))).limit(1);
+        if (defaultIdentity) throw new PayrollConflictError("外部人员编号与另一成员正在使用的默认 UUID 重复，请先核对并分别保存唯一编号。");
+      }
       await tx.insert(payrollExportProfiles).values({ membershipId, organizationId: actor.organizationId, externalId, updatedBy: actor.membershipId }).onConflictDoUpdate({ target: payrollExportProfiles.membershipId, set: { externalId, updatedBy: actor.membershipId, updatedAt: new Date() } });
       await tx.insert(auditLogs).values({ organizationId: actor.organizationId, actorMembershipId: actor.membershipId, action: "payroll.external_identity.updated", entityType: "organization_membership", entityId: membershipId, after: { externalId } });
       return { membershipId, externalId };
@@ -64,6 +68,9 @@ export class PayrollHandoffService {
     const anomalies = facts.filter((f) => Array.isArray(f.anomalyFlags) && f.anomalyFlags.length);
     const previewRows = rows.map((r) => ({ membershipId: r.item.membershipId, displayName: r.displayName, externalId: r.externalId ?? r.item.membershipId, identityMode: r.externalId ? "external" : "membership", currency: r.item.currency, approvedSeconds: r.item.approvedSeconds, pendingSeconds: r.item.pendingSeconds, grossAmount: r.item.grossAmount, adjustmentAmount: r.item.adjustmentAmount, finalAmount: r.item.finalAmount, estimate: r.item.estimate, needsReview: r.item.needsReview, planVersionId: r.item.compensationPlanVersionId, amountChange: previous.has(r.item.membershipId) ? addDecimalAmounts(r.item.finalAmount, previous.get(r.item.membershipId)!.finalAmount.startsWith("-") ? previous.get(r.item.membershipId)!.finalAmount.slice(1) : `-${previous.get(r.item.membershipId)!.finalAmount}`) : null }));
     const blockers = [...(record.run.status === "ready" || record.run.status === "settled" ? [] : ["批次未就绪，请先复核并重新计算。"]), ...(missingPlans.length ? [`${missingPlans.length} 位已加入成员在本周期缺少计薪方案。`] : []), ...(pending.length ? [`${pending.length} 条记录仍待审。`] : []), ...(previewRows.some((r) => r.needsReview || r.estimate) ? ["存在预估或待复核金额。"] : []), ...(rows.length ? [] : ["当前批次没有可导出人员行。"])];
+    const externalIds = new Set<string>(); const repeatedExternalIds = new Set<string>();
+    for (const row of previewRows) { if (externalIds.has(row.externalId)) repeatedExternalIds.add(row.externalId); externalIds.add(row.externalId); }
+    if (repeatedExternalIds.size) blockers.push("导出行存在重复的外部人员编号，请分别保存唯一映射后重新核对。");
     if (corrections.length) blockers.push(`${corrections.length} 条更正申请尚待处理，请先核对更正，避免锁定旧事实。`);
     const previewHash = hash(JSON.stringify({ run: record.run, period: record.period, rows: previewRows, facts, missingPlans, corrections }));
     return { ...record, rows: batch ? (batch.manifest as { rows: typeof previewRows }).rows : previewRows, missingPlans, pending, drafts, anomalies, corrections, blockers, previewHash, batch: batch ? { id: batch.id, fileName: batch.fileName, sha256: batch.sha256, ruleVersion: batch.ruleVersion, createdAt: batch.createdAt, manifest: publicManifest(batch.manifest) } : null };

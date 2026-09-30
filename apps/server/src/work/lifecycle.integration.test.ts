@@ -7,7 +7,7 @@ import { drizzle } from "drizzle-orm/pglite";
 import { eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Database } from "@workbench/db";
-import { organizationOwners, organizations, orgMemberships, payrollAdjustments, payrollExportBatches, users, workSessions, workSessionVersions } from "@workbench/db/schema";
+import { organizationOwners, organizations, orgMemberships, payrollAdjustments, payrollExportBatches, payrollExportProfiles, payrollRuns, users, workSessions, workSessionVersions } from "@workbench/db/schema";
 import { AnalyticsService, type AnalyticsActor } from "../analytics/service.js";
 import { PayrollService } from "../payroll/service.js";
 import { PayrollHandoffService } from "../payroll/handoff.js";
@@ -157,5 +157,18 @@ describe("full cycle facts, repair and immutable handoff", () => {
     const [later] = await f.db.insert(users).values({ displayName: "历史周期结束后才加入" }).returning();
     await f.db.insert(orgMemberships).values({ organizationId: f.owner.organizationId, userId: later!.id, status: "active", joinedAt: new Date("2026-10-02") });
     expect((await f.handoff.preview(f.owner, f.run.id)).missingPlans.map((m) => m.displayName)).not.toContain("历史周期结束后才加入");
+  });
+  it("rejects identities colliding with another member's default UUID and blocks legacy duplicate export rows", async () => {
+    const f = await preparedHandoff(); const first = f.actors[1]!; const second = f.actors[2]!;
+    await expect(f.handoff.profile(f.owner, first.membershipId, second.membershipId)).rejects.toThrow("默认 UUID 重复");
+    expect(await f.db.select().from(payrollExportProfiles)).toHaveLength(0);
+    await f.db.insert(payrollExportProfiles).values({ organizationId: f.owner.organizationId, membershipId: first.membershipId, externalId: second.membershipId, updatedBy: f.owner.membershipId });
+    const preview = await f.handoff.preview(f.owner, f.run.id);
+    expect(preview.blockers.join()).toContain("重复的外部人员编号");
+    await expect(f.handoff.confirm(f.owner, f.run.id, preview.previewHash)).rejects.toThrow("重复的外部人员编号");
+    expect(await f.db.select().from(payrollExportBatches)).toHaveLength(0);
+    expect((await f.db.select().from(payrollRuns).where(eq(payrollRuns.id, f.run.id)))[0]?.status).toBe("ready");
+    await f.handoff.profile(f.owner, second.membershipId, "external-two");
+    expect((await f.handoff.preview(f.owner, f.run.id)).blockers).toEqual([]);
   });
 });
