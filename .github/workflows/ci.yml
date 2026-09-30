@@ -69,6 +69,8 @@ jobs:
         run: pnpm exec playwright install --with-deps chromium firefox webkit
 
       - name: Run browser end-to-end tests
+        env:
+          PLAYWRIGHT_PREVIEW: "true"
         run: pnpm test:e2e
 
       - name: Verify real API and database workflows across screen sizes

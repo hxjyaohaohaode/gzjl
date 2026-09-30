@@ -1,9 +1,11 @@
 import { HistoricalRangePicker, type HistoricalRange } from "./history-range.js";
+import { isSalaryMonth, previousSalaryMonth, salaryMonthForm, salaryPeriodMatchesMonth } from "./payroll-month.js";
 import { WorkPolicyPanel } from "./submission-policy.js";
 import { aiGenerationOptionsSchema, type AiGenerationOptions } from "@workbench/shared";
 import { AiDraftEditor, AiFactAnswer, CycleOverview, WorkFactContext, PayrollHandoffPanel, CitedText, type CycleOverviewData } from "./lifecycle-workbench.js";
 import { DraftArchiveButton, ArchivedDrafts } from "./work-recovery.js";
-import { FactExplorer, RecordReadiness } from "./fact-explorer.js";
+import { RecordReadiness } from "./fact-explorer.js";
+import { WorkReviewDraft } from "./work-review.js";
 import { sourceHref } from "@workbench/shared";
 import { WorkProgressReporter } from "./work-progress-reporter.js";
 import { ReimbursementPanel } from "./reimbursement-panel.js";
@@ -5825,6 +5827,7 @@ export function WorkPage() {
       />
       <CycleOverview compact /><WorkPolicyPanel />
       <HistoricalRangePicker onChange={(range) => { const params = new URLSearchParams(workSearch); params.delete("record"); params.delete("version"); if (range) { params.set("from", range.from.toISOString()); params.set("to", range.to.toISOString()); } else { params.delete("from"); params.delete("to"); params.delete("status"); } setWorkSearch(params); }} />
+      <WorkReviewDraft key={`${workSearch.get("from")}|${workSearch.get("to")}`} from={workSearch.get("from")} to={workSearch.get("to")} />
       {selectedWorkStatus ? <p className="lifecycle-caption">正在查看所选周期与状态：{selectedWorkStatus}。<Link to="/work">清除筛选</Link></p> : null}
       {focusedRecord && /^[a-f0-9-]{36}$/i.test(focusedRecord) ? <Card className="mb-5"><CardHeader><h2>定位工作记录与引用版本</h2><Link to="/work">关闭定位</Link></CardHeader><CardContent><WorkFactContext id={focusedRecord} expectedVersion={workSearch.get("version")}><ReadOnlyEvidenceList sessionId={focusedRecord} /></WorkFactContext><div className="flex flex-wrap gap-2">{focusedWork.data?.ownRecord ? focusedWork.data.session.approvalStatus === "pending_review" ? <Button variant="secondary" onClick={() => withdraw.mutate(focusedWork.data!.session)} disabled={withdraw.isPending}>撤回此记录以修改</Button> : ["approved", "locked"].includes(focusedWork.data.session.approvalStatus) || focusedWork.data.session.source !== "manual" ? <Button variant="secondary" onClick={() => openCorrectionEditor(focusedWork.data!.session)}>申请更正此记录</Button> : <Button onClick={() => openDraftEditor(focusedWork.data!.session)}>编辑定位到的草稿</Button> : null}</div></CardContent></Card> : null}
       {saveMessage ? (
@@ -8166,7 +8169,7 @@ interface PayrollManagementOverview {
   }>;
   runs: Array<{
     run: { id: string; runNumber: number; status: string; createdAt: string };
-    period: { id: string; name: string };
+    period: { id: string; name: string; startsAt: string; endsAt: string; timezone: string };
   }>;
   latestItems: Array<{
     item: {
@@ -8304,21 +8307,9 @@ function PayrollManagementPanel({ me }: { me: Me }) {
     weeklyBonusThresholdHours: 30,
     weeklyBonusRewardHours: 5,
   }));
-  const [periodForm, setPeriodForm] = useState(() => {
-    const currentWall = localInput(new Date());
-    const year = Number(currentWall.slice(0, 4));
-    const month = Number(currentWall.slice(5, 7));
-    const nextYear = month === 12 ? year + 1 : year;
-    const nextMonth = month === 12 ? 1 : month + 1;
-    const currentMonthKey = `${year}-${String(month).padStart(2, "0")}`;
-    const nextMonthKey = `${nextYear}-${String(nextMonth).padStart(2, "0")}`;
-    return {
-      name: `${year} 年 ${month} 月`,
-      startsAt: `${currentMonthKey}-01T00:00:00`,
-      endsAt: `${nextMonthKey}-01T00:00:00`,
-      cutoffAt: `${nextMonthKey}-10T18:00:00`,
-    };
-  });
+  const [settlementMonth, setSettlementMonth] = useState(() => previousSalaryMonth());
+  const [customPeriod, setCustomPeriod] = useState(false);
+  const [periodForm, setPeriodForm] = useState(() => salaryMonthForm(previousSalaryMonth()));
   const [cutoffDayOverride, setCutoffDayOverride] = useState<number | null>(null);
   const cutoffDay =
     cutoffDayOverride ?? management.data?.settings?.payrollCutoffDay ?? 10;
@@ -8857,7 +8848,7 @@ function PayrollManagementPanel({ me }: { me: Me }) {
       </Card>
       <Card>
         <CardHeader>
-          <label className="history-month">查看 / 导出指定月份<input type="month" value={periodMonth} onChange={(e) => setPeriodMonth(e.target.value)} /><Button variant="ghost" onClick={() => setPeriodMonth("")}>显示所有周期</Button></label>
+          <label className="history-month">查看 / 导出指定月份<input aria-label="查看 / 导出指定月份" type="month" value={periodMonth} onChange={(e) => { setPeriodMonth(e.target.value); setHandoffRunId(null); }} /><Button variant="ghost" onClick={() => { setPeriodMonth(""); setHandoffRunId(null); }}>显示所有周期</Button></label>
           <div><p className="app-page-kicker">结算控制</p><h2 className="mt-1 text-lg font-bold">薪资周期与批次</h2></div>
         </CardHeader>
         <CardContent>
@@ -8900,15 +8891,16 @@ function PayrollManagementPanel({ me }: { me: Me }) {
               {saveSettings.isPending ? "保存中…" : "保存结算截止 / 计划导出时间"}
             </Button>
           </form>
-          <form className="grid gap-4 lg:grid-cols-4" onSubmit={(event) => { event.preventDefault(); createPeriod.mutate(); }}>
+          <form className="grid gap-4 lg:grid-cols-4" onSubmit={(event) => { event.preventDefault(); if (customPeriod || isSalaryMonth(settlementMonth)) createPeriod.mutate(); }}>
+            <Field hint="默认核对上一个完整自然月。月初 00:00 开始，下月月初 00:00 结束（不含），按组织时区计算。" label="结算月份"><input aria-label="结算月份" aria-invalid={!customPeriod && !isSalaryMonth(settlementMonth)} min="0100-01" max="9998-12" placeholder="YYYY-MM，例如 2026-09" className={fieldClass} required={!customPeriod} type="month" value={settlementMonth} onChange={(event) => { const month = event.target.value; setSettlementMonth(month); if (isSalaryMonth(month)) { setPeriodForm(salaryMonthForm(month)); setPeriodCutoffTouched(false); setPeriodMonth(month); setHandoffRunId(null); setCustomPeriod(false); } }} /></Field>
             <Field label="周期名称"><input className={fieldClass} onChange={(event) => setPeriodForm({ ...periodForm, name: event.target.value })} required value={periodForm.name} /></Field>
-            <Field label="开始"><input className={fieldClass} onChange={(event) => setPeriodForm({ ...periodForm, startsAt: event.target.value })} required type="datetime-local" value={periodForm.startsAt} /></Field>
-            <Field label="结束（不含）"><input className={fieldClass} onChange={(event) => setPeriodForm({ ...periodForm, endsAt: event.target.value })} required type="datetime-local" value={periodForm.endsAt} /></Field>
             <Field label="本周期结算截止 / 计划导出时间"><input aria-label="本周期结算截止 / 计划导出时间" className={fieldClass} onChange={(event) => { setPeriodCutoffTouched(true); setPeriodForm({ ...periodForm, cutoffAt: event.target.value }); }} required type="datetime-local" value={effectivePeriodCutoffAt} /></Field>
-            <div className="lg:col-span-4"><Button disabled={createPeriod.isPending} type="submit">创建薪资周期</Button></div>
+            <div className="lg:col-span-4">{!customPeriod && !isSalaryMonth(settlementMonth) ? <p role="alert">请填写完整有效的结算月份，格式为 YYYY-MM，例如 2026-09。</p> : null}<p className="lifecycle-caption">结算范围：{periodForm.startsAt.replace("T", " ")}（含）至 {periodForm.endsAt.replace("T", " ")}（不含） · {getOrganizationTimezone()}。导出完整周期的工资、补贴、报销及工作提交单。</p><label className="flex items-center gap-2"><input type="checkbox" checked={customPeriod} onChange={(event) => { setCustomPeriod(event.target.checked); if (!event.target.checked && isSalaryMonth(settlementMonth)) { setPeriodForm(salaryMonthForm(settlementMonth)); setPeriodCutoffTouched(false); } }} />使用特殊自定义结算周期</label></div>
+            {customPeriod && <><Field label="开始"><input className={fieldClass} onChange={(event) => setPeriodForm({ ...periodForm, startsAt: event.target.value })} required type="datetime-local" value={periodForm.startsAt} /></Field><Field label="结束（不含）"><input className={fieldClass} onChange={(event) => setPeriodForm({ ...periodForm, endsAt: event.target.value })} required type="datetime-local" value={periodForm.endsAt} /></Field></>}
+            <div className="lg:col-span-4"><Button disabled={createPeriod.isPending || (!customPeriod && !isSalaryMonth(settlementMonth))} type="submit">创建薪资周期</Button></div>
           </form>
           <div className="mt-5 space-y-2">
-            {management.data?.periods.filter((period) => !periodMonth || (toZonedInputValue(new Date(period.startsAt)).slice(0, 7) <= periodMonth && toZonedInputValue(new Date(Date.parse(period.endsAt) - 1)).slice(0, 7) >= periodMonth)).map((period) => (
+            {management.data?.periods.filter((period) => salaryPeriodMatchesMonth(period, periodMonth)).map((period) => (
               <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl bg-[var(--surface-subtle)] px-4 py-3" key={period.id}>
                 <div><p className="font-semibold">{period.name}</p><p className="text-xs text-[var(--text-muted)]">{formatDateTime(period.startsAt)} – {formatDateTime(period.endsAt)} · {payPeriodStatusLabels[period.status] ?? period.status} · 计划导出 {formatDateTime(period.cutoffAt)}</p></div>
                 {period.status === "open" ? (
@@ -8931,7 +8923,7 @@ function PayrollManagementPanel({ me }: { me: Me }) {
           </div>
           {management.data?.runs.some((entry) => ["ready", "review_required", "settled"].includes(entry.run.status)) ? (
             <div className="mt-5 space-y-2">
-              {management.data.runs.filter((entry) => ["ready", "review_required", "settled"].includes(entry.run.status)).map((entry) => (
+              {management.data.runs.filter((entry) => ["ready", "review_required", "settled"].includes(entry.run.status) && salaryPeriodMatchesMonth(entry.period, periodMonth)).map((entry) => (
                 <div className={`flex flex-wrap items-center justify-between gap-3 rounded-xl px-4 py-3 ${entry.run.status === "settled" ? "bg-[var(--success-soft)]" : "bg-[var(--warning-soft)]"}`} key={entry.run.id}>
                   <div>
                     <p className="text-sm font-semibold">{entry.period.name} · 批次 #{entry.run.runNumber} · {payrollRunStatusLabels[entry.run.status] ?? entry.run.status}</p>
@@ -10743,7 +10735,7 @@ function BackgroundExportPanel({ from, to, filters }: { from: Date; to: Date; fi
         </div>
       </CardHeader>
       <CardContent>
-        <p className="mb-3 text-xs leading-6 text-[var(--text-muted)]">导出所选时间范围内、当前权限可见的工时明细。项目、成员等图表筛选不应用于此文件。</p>
+        <p className="mb-3 text-xs leading-6 text-[var(--text-muted)]">导出所选时间范围内、当前权限可见的工时明细，使用当前项目、成员、组织单元、工作类型、审批状态和来源筛选。正式薪资账单请在薪资管理按完整结算周期核对后导出。</p>
         {downloadMessage ? <p className="mb-3 text-sm text-[var(--success)]" role="status">{downloadMessage}</p> : null}
         {capabilities.isPending || jobs.isPending ? <LoadingBlock /> : null}
         {capabilities.data && !capabilities.data.available ? (
@@ -11390,7 +11382,6 @@ export function AnalyticsPage({ me }: { me: Me }) {
         </Card>
       ) : analytics.data ? (
         <>
-          <FactExplorer from={from} to={to} filters={filters} />
           {canExport ? <BackgroundExportPanel from={from} to={to} filters={filters} /> : null}
           <div className="analytics-metrics-grid mt-5 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
             <Metric

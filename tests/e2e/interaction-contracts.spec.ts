@@ -130,7 +130,7 @@ test("reimbursement saving locks the submitted snapshot and failures preserve in
   await workspace(page);
   let release!: () => void;
   let submitted = false;
-  await page.route("**/api/reimbursements", async (route) => {
+  await page.route(/\/api\/reimbursements(?:\?.*)?$/, async (route) => {
     if (route.request().method() !== "POST") return route.fulfill({ json: { items: [], periods: [], canReview: false, membershipId: memberId } });
     submitted = true;
     await new Promise<void>((resolve) => { release = resolve; });
@@ -167,4 +167,53 @@ test("closing a deep-linked member stays closed after background updates", async
   await refresh();
   await expect(page.getByText("刷新后的成员", { exact: true }).first()).toBeVisible();
   await expect(page.getByRole("button", { name: "关闭成员详情", exact: true })).toHaveCount(0);
+});
+
+test("reimbursement history selects the requested month and notification links locate the original claim", async ({ page }) => {
+  await page.clock.setFixedTime(new Date("2026-10-02T12:00:00Z")); await workspace(page);
+  const oldId = "00000000-0000-4000-8000-000000000921", currentId = "00000000-0000-4000-8000-000000000922";
+  const claim = (id: string, title: string) => ({ id, title, description: "凭证完整，归属周期已确认", expenseDate: "2026-09-03", amount: "128.350000", currency: "CNY", status: "approved", version: 3, membershipId: memberId, memberName: "审查成员", reviewNote: null, payPeriodId: "period", periodName: title, periodStatus: "locked" });
+  const requests: URL[] = [];
+  await page.route(/\/api\/reimbursements(?:\?.*)?$/, (route) => {
+    const url = new URL(route.request().url()); requests.push(url);
+    const old = url.searchParams.get("from") === "2026-09-01" || url.searchParams.get("id") === oldId;
+    return route.fulfill({ json: { items: [old ? claim(oldId, "九月已批准报销") : claim(currentId, "十月归属报销")], canReview: false, membershipId: memberId, periods: [], nextCursor: null, range: { from: old ? "2026-09-01" : "2026-10-01", to: old ? "2026-10-01" : "2026-11-01", timezone: "Asia/Shanghai" } } });
+  });
+  await page.goto("/payroll"); const panel = page.locator(".reimbursement-panel");
+  await expect(panel.getByText("十月归属报销", { exact: true })).toBeVisible(); await expect(panel.getByText("九月已批准报销", { exact: true })).toHaveCount(0);
+  await panel.locator(".reimbursement-history > summary").click(); await panel.getByLabel("历史月份", { exact: true }).fill("2026-09");
+  await panel.getByRole("button", { name: "应用历史范围" }).click();
+  await expect(panel.getByText("九月已批准报销", { exact: true })).toBeVisible(); await expect(panel.getByText("十月归属报销", { exact: true })).toHaveCount(0);
+  expect(requests.at(-1)?.searchParams.get("to")).toBe("2026-10-01");
+  await panel.getByRole("button", { name: "恢复默认范围" }).click(); await expect(panel.getByText("十月归属报销", { exact: true })).toBeVisible();
+  await page.goto(`/payroll#reimbursement-${oldId}`); await expect(panel.getByText("九月已批准报销", { exact: true })).toBeVisible();
+  await expect(panel.getByText("凭证完整，归属周期已确认", { exact: true })).toBeVisible();
+  expect(requests.at(-1)?.searchParams.get("id")).toBe(oldId);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true);
+});
+
+test("salary export month filters both periods and their ready or settled batches", async ({ page }) => {
+  await page.clock.setFixedTime(new Date("2026-10-02T12:00:00Z")); await workspace(page);
+  await page.route("**/api/me", (route) => route.fulfill({ json: { user: { id: memberId, membershipId: memberId, organizationId: "org", displayName: "负责人", isOwner: true, timezone: "Asia/Shanghai" }, permissions: ["payroll.configure", "payroll.settle", "payroll.view_own"].map((permission) => ({ permission, scopeKind: "organization", scopeId: null })) } }));
+  const periods = [
+    { id: "july", name: "七月账单", startsAt: "2026-06-30T16:00:00Z", endsAt: "2026-07-31T16:00:00Z", timezone: "Asia/Shanghai", cutoffAt: "2026-08-10T10:00:00Z", status: "locked" },
+    { id: "august", name: "八月账单", startsAt: "2026-07-31T16:00:00Z", endsAt: "2026-08-31T16:00:00Z", timezone: "Asia/Shanghai", cutoffAt: "2026-09-10T10:00:00Z", status: "pending_confirmation" },
+  ];
+  await page.route("**/api/payroll/management", (route) => route.fulfill({ json: { members: [], periods, runs: periods.map((period, i) => ({ period, run: { id: period.id, runNumber: 1, status: i ? "ready" : "settled", createdAt: period.endsAt } })), latestItems: [], liveItems: [], liveItemIssues: [], settings: { timezone: "Asia/Shanghai", payrollCutoffDay: 10, payrollCutoffMinute: 1080 } } }));
+  await page.goto("/payroll"); await expect(page.getByLabel("结算月份", { exact: true })).toHaveValue("2026-09");
+  await page.getByLabel("查看 / 导出指定月份", { exact: true }).fill("2026-07");
+  await expect(page.getByText("七月账单 · 批次 #1 · 已导出并锁定", { exact: true })).toBeVisible(); await expect(page.getByText("八月账单 · 批次 #1 · 可导出锁定", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "重新导出账单", exact: true })).toBeVisible(); await expect(page.getByRole("button", { name: "核对导出预览", exact: true })).toHaveCount(0);
+  await page.getByLabel("查看 / 导出指定月份", { exact: true }).fill("2026-08");
+  await expect(page.getByRole("button", { name: "核对导出预览", exact: true })).toBeVisible(); await expect(page.getByRole("button", { name: "重新导出账单", exact: true })).toHaveCount(0);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true);
+});
+
+test("a failed reimbursement query keeps the date selector available and does not claim the month is empty", async ({ page }) => {
+  await workspace(page);
+  await page.route(/\/api\/reimbursements(?:\?.*)?$/, (route) => route.fulfill({ status: 503, json: { error: "unavailable", message: "报销暂时无法读取" } }));
+  await page.goto("/payroll"); const panel = page.locator(".reimbursement-panel");
+  await expect(panel.getByText("报销暂时无法读取", { exact: true })).toBeVisible();
+  await expect(panel.getByText("暂无报销申请，可先填写事项，再上传发票或添加凭证链接。", { exact: true })).toHaveCount(0);
+  await panel.locator(".reimbursement-history > summary").click(); await expect(panel.getByLabel("历史月份", { exact: true })).toBeVisible();
 });

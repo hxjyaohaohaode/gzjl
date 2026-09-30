@@ -3,7 +3,7 @@ import { Button } from "@workbench/ui";
 import { zonedInputToDate, getOrganizationTimezone } from "./timezone.js";
 
 export interface HistoricalRange { from: Date; to: Date }
-export function HistoricalRangePicker({ onChange }: { onChange: (range: HistoricalRange | null) => void }) {
+export function HistoricalRangePicker({ onChange, description = "统计与数据导出使用同一范围。" }: { onChange: (range: HistoricalRange | null) => void; description?: string }) {
   const [mode, setMode] = useState("month");
   const [start, setStart] = useState("");
   const [end, setEnd] = useState("");
@@ -28,5 +28,5 @@ export function HistoricalRangePicker({ onChange }: { onChange: (range: Historic
     <label>{mode === "month" ? "历史月份" : mode === "day" ? "历史日期" : "开始日期"}<input required type={mode === "month" ? "month" : "date"} value={start} onChange={(e) => setStart(e.target.value)} /></label>
     {mode === "range" ? <label>结束日期（包含当天）<input required type="date" value={end} onChange={(e) => setEnd(e.target.value)} /></label> : null}
     <Button onClick={apply}>应用历史范围</Button><Button variant="ghost" onClick={() => { onChange(null); setApplied(""); setError(""); }}>恢复默认范围</Button>
-  </div><p>{applied ? `已选：${applied}。` : "可查看任意历史月份、单日或范围。"}按组织时区 {getOrganizationTimezone()} 的自然日，结束日期包含当天；统计与数据导出使用同一范围。</p>{error ? <p role="alert">{error}</p> : null}</section>;
+  </div><p>{applied ? `已选：${applied}。` : "可查看任意历史月份、单日或范围。"}按组织时区 {getOrganizationTimezone()} 的自然日，结束日期包含当天；{description}</p>{error ? <p role="alert">{error}</p> : null}</section>;
 }

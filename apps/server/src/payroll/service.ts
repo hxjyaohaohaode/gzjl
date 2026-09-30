@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import { and, asc, desc, eq, gt, inArray, isNull, lt, lte, ne, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, gte, inArray, isNull, lt, ne, or, sql } from "drizzle-orm";
 import type { Database } from "@workbench/db";
 import {
   auditLogs,
@@ -777,11 +777,11 @@ export class PayrollService {
       .where(and(eq(payrollAdjustments.organizationId, actor.organizationId),
         eq(payrollAdjustments.membershipId, actor.membershipId), eq(payrollAdjustments.sourceEntityType, "reimbursement"),
         eq(payrollAdjustments.currency, currentPlan.plan.currency), sql`${payrollAdjustments.approvedAt} is not null`,
-        gt(payPeriods.endsAt, startsAt), lte(payPeriods.endsAt, endsAt)));
+        gte(payPeriods.startsAt, startsAt), lt(payPeriods.startsAt, endsAt)));
     const approvedReimbursementAmount = addDecimalAmounts(...approvedExpenses.map((expense) => expense.amount));
     estimatedAmount = addDecimalAmounts(estimatedAmount, approvedReimbursementAmount);
     for (const expense of approvedExpenses) {
-      const date = localDateKey(new Date(expense.endsAt.getTime() - 1), organization.timezone);
+      const date = localDateKey(new Date(Math.min(expense.endsAt.getTime(), endsAt.getTime()) - 1), organization.timezone);
       const day = daily.get(date);
       if (day) {
         day.approvedAmount += decimalMicros(expense.amount);

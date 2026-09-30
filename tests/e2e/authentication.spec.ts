@@ -7,7 +7,7 @@ test("reimbursements save evidence and submit without creating fictitious work",
   const claimId = "00000000-0000-4000-8000-000000000321";
   let claim: Record<string, unknown> | null = null;
   const proofs: Record<string, unknown>[] = [];
-  await page.route("**/api/reimbursements", async (route) => {
+  await page.route(/\/api\/reimbursements(?:\?.*)?$/, async (route) => {
     if (route.request().method() === "POST") {
       claim = { ...route.request().postDataJSON(), id: claimId, membershipId: memberId, memberName: "林知夏", status: "draft", version: 1 };
       return route.fulfill({ status: 201, json: { request: claim } });
@@ -85,7 +85,7 @@ async function mockAuthenticatedWorkspace(
     canManageProjects?: boolean;
   } = {},
 ): Promise<void> {
-  await page.route("**/api/reimbursements", (route) => route.fulfill({ json: { items: [], periods: [], canReview: false, membershipId: "00000000-0000-4000-8000-000000000002" } }));
+  await page.route(/\/api\/reimbursements(?:\?.*)?$/, (route) => route.fulfill({ json: { items: [], periods: [], canReview: false, membershipId: "00000000-0000-4000-8000-000000000002" } }));
   let authenticated = false;
   await page.routeWebSocket("**/api/realtime", (socket) => {
     socket.send(JSON.stringify({ type: "realtime.ready" }));
@@ -673,6 +673,7 @@ test("an Owner session cannot swallow an employee invitation link", async ({
   await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
   await page.getByRole("button", { name: "登录", exact: true }).click();
 
+  await expect(page.getByRole("heading", { name: "林知夏，今天好" })).toBeVisible();
   await page.goto(`/invite#token=${token}`);
   await expect(page).not.toHaveURL(new RegExp(token));
   await expect(page.getByRole("heading", { name: "接受组织邀请" })).toBeVisible();
@@ -884,6 +885,17 @@ test("Owner can configure a versioned hourly plan and create a pay period", asyn
       hourCycle: "h23",
     }).format(new Date(String(periodPayload?.cutoffAt))),
   ).toBe("09:30");
+  await page.getByLabel("结算月份", { exact: true }).fill("2028-02");
+  await expect(page.getByText(/2028-02-01 00:00:00.*2028-03-01 00:00:00/)).toBeVisible();
+  await page.getByRole("button", { name: "创建薪资周期" }).click();
+  await expect.poll(() => periodPayload?.startsAt).toBe("2028-01-31T16:00:00.000Z");
+  expect(periodPayload?.endsAt).toBe("2028-02-29T16:00:00.000Z");
+  expect(periodPayload?.cutoffAt).toBe("2028-03-15T01:30:00.000Z");
+  const monthInput = page.getByLabel("结算月份", { exact: true });
+  await monthInput.evaluate((element) => { (element as HTMLInputElement).type = "text"; });
+  await monthInput.fill("2026-"); await expect(page.getByRole("button", { name: "创建薪资周期" })).toBeDisabled();
+  await expect(page.getByText("请填写完整有效的结算月份，格式为 YYYY-MM，例如 2026-09。", { exact: true })).toBeVisible();
+  await monthInput.fill("2026-09"); await expect(page.getByRole("button", { name: "创建薪资周期" })).toBeEnabled();
 });
 
 test("Owner payroll keeps settlement controls visible when one live estimate has invalid work", async ({ page }) => {
@@ -2578,8 +2590,10 @@ test("analytics uses accessible, server-backed responsive chart containers", asy
 }, testInfo) => {
   await mockAuthenticatedWorkspace(page);
   const analyticsUrls: string[] = [];
+  const factUrls: string[] = [];
   page.on("request", (request) => {
     if (request.url().includes("/api/analytics/summary?")) analyticsUrls.push(request.url());
+    if (request.url().includes("/api/analytics/records?")) factUrls.push(request.url());
   });
   await page.goto("/login");
   await page.getByLabel("邮箱或手机号").fill("owner@example.test");
@@ -2590,6 +2604,8 @@ test("analytics uses accessible, server-backed responsive chart containers", asy
   await expect(
     page.getByRole("img", { name: "每日净工时趋势图" }),
   ).toBeVisible();
+  await expect(page.locator(".fact-explorer")).toHaveCount(0);
+  expect(factUrls).toEqual([]);
   await expect(
     page.getByRole("button", { name: "下载每日净工时趋势图图片" }),
   ).toBeVisible();
