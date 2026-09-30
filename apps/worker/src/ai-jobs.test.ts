@@ -5,7 +5,7 @@ import { drizzle } from "drizzle-orm/pglite";
 import { eq } from "drizzle-orm";
 import { afterEach, expect, it, vi } from "vitest";
 import { encryptSecret, type Database } from "@workbench/db";
-import { aiJobs, aiReports, organizationAiSettings, organizations, orgMemberships, users } from "@workbench/db/schema";
+import { aiJobs, aiReports, aiReportSources, organizationAiSettings, organizations, orgMemberships, users } from "@workbench/db/schema";
 import { createAiJobProcessor, recoverStaleAiJobs } from "./ai-jobs.js";
 
 const clients: PGlite[] = [];
@@ -137,4 +137,30 @@ it("rejects a late response after cancellation and a manual retry resets the att
   await oldAttempt;
   expect(await readJob()).toMatchObject({ status: "running", attempt: 1 });
   expect(await db.select().from(aiReports)).toHaveLength(0);
+});
+
+
+it.each(["invented", "malformed", "missing"])("rejects %s source markers instead of publishing untraceable AI conclusions", async (kind) => {
+  const { db, job, readJob } = await setup();
+  const id = crypto.randomUUID();
+  await db.update(aiJobs).set({ promptTemplateVersion: "structured-work-intelligence-v6-provenance", sourceSummary: { sources: [{ entityType: "work_session", entityId: id, entityVersion: "2", label: "事实" }] } }).where(eq(aiJobs.id, job.id));
+  const summary = kind === "invented" ? `完成工作 [source:${crypto.randomUUID()}]` : kind === "malformed" ? "完成工作 [source:unknown]" : "完成工作，未标注来源。";
+  const fetcher = vi.fn(async () => new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ title: "来源验证", summary, highlights: [], risks: [], suggestions: [] }) } }] }))) as typeof fetch;
+  await createAiJobProcessor(db, config, async () => false, fetcher)(job.id);
+  expect(await readJob()).toMatchObject({ status: "failed", errorSummary: expect.stringContaining("来源") });
+  expect(await db.select().from(aiReports)).toHaveLength(0);
+});
+
+it("persists the complete manifest across insert chunks while sending only bounded authorized provider facts", async () => {
+  const { db, job } = await setup();
+  const manifest = Array.from({ length: 610 }, (_, i) => ({ entityType: "work_session", entityId: crypto.randomUUID(), entityVersion: String(i + 1), label: "事实 " + i }));
+  const known = manifest[0]!;
+  await db.update(aiJobs).set({ promptTemplateVersion: "structured-work-intelligence-v6-provenance", sourceSummary: { sources: [known], sourceManifest: manifest } }).where(eq(aiJobs.id, job.id));
+  const fetcher = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+    expect(String(init?.body)).not.toContain("sourceManifest");
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ title: "完整来源验收", summary: `事实可核对 [source:${known.entityId}]`, highlights: [`已批准工作 [source:${known.entityId}]`], risks: [], suggestions: [] }) } }] }));
+  }) as typeof fetch;
+  await createAiJobProcessor(db, config, async () => false, fetcher)(job.id);
+  expect((await db.select().from(aiReports))[0]!.sourceCount).toBe(610);
+  expect(await db.select().from(aiReportSources)).toHaveLength(610);
 });

@@ -20,6 +20,8 @@ import {
   users,
   aiJobs,
   aiReports,
+  aiReportSources,
+  workSessions,
   auditLogs,
   organizationAiSettings,
 } from "@workbench/db/schema";
@@ -291,7 +293,7 @@ describe("AI payroll provenance", () => {
       sources?: Array<{ entityType: string; entityId: string; label: string }>;
     };
 
-    expect(job.promptTemplateVersion).toBe("structured-work-intelligence-v5-payroll");
+    expect(job.promptTemplateVersion).toBe("structured-work-intelligence-v6-provenance");
     expect(summary.payroll?.privacyScope).toBe("self_only");
     expect(summary.payroll?.items).toEqual([
       expect.objectContaining({
@@ -464,4 +466,27 @@ describe("AI payroll provenance", () => {
       unauthorizedProjectId,
     );
   });
+});
+
+
+it("marks changed versions, newly added range facts and export-state changes as stale without leaking old permissions", async () => {
+  const db = await createTestDatabase(); const seeded = await seedPayroll(db);
+  const actor: AnalyticsActor = { organizationId: seeded.organization.id, membershipId: seeded.membership.id, grants: [{ permission: "payroll.view_own", scopeKind: "self", scopeId: seeded.membership.id }] };
+  const [fact] = await db.insert(workSessions).values({ organizationId: actor.organizationId, membershipId: actor.membershipId, source: "manual", startAt: new Date("2026-09-04T01:00:00Z"), endAt: new Date("2026-09-04T02:00:00Z"), timezone: "Asia/Shanghai", grossSeconds: 3600, netSeconds: 3600, content: "源记录", approvalStatus: "approved" }).returning();
+  const [run] = await db.select().from(payrollRuns).where(eq(payrollRuns.id, seeded.item.payrollRunId));
+  const sources = [{ entityType: "work_session", entityId: fact!.id, entityVersion: "1", label: "已批准事实" }, { entityType: "payroll_item", entityId: seeded.item.id, entityVersion: `${run!.status}:${run!.inputHash}`, label: "薪资行" }, { entityType: "pay_period", entityId: seeded.period.id, entityVersion: `${seeded.period.status}:${seeded.period.updatedAt.toISOString()}`, label: "结算周期" }];
+  const [job] = await db.insert(aiJobs).values({ organizationId: actor.organizationId, requestedBy: actor.membershipId, scope: { scope: "self", from: "2026-09-01T00:00:00Z", to: "2026-10-01T00:00:00Z" }, taskType: "salary_explanation", provider: "openai_compatible", model: "test", promptTemplateVersion: "structured-work-intelligence-v6-provenance", inputHash: crypto.randomUUID(), sourceSummary: { payroll: {}, sources, sourceManifest: sources }, status: "completed" }).returning();
+  const [report] = await db.insert(aiReports).values({ aiJobId: job!.id, title: "历史结论", summary: "待核对", structuredOutput: {}, sourceCount: 3 }).returning();
+  await db.insert(aiReportSources).values(sources.map((source) => ({ ...source, aiReportId: report!.id })));
+  const service = new AiService(db, new AnalyticsService(db), configuredAi(), new PayrollService(db));
+  expect((await service.detail(actor, report!.id))!.stale).toBe(false);
+  await db.update(workSessions).set({ version: 2, content: "已更正" }).where(eq(workSessions.id, fact!.id));
+  expect((await service.detail(actor, report!.id))!.sources.find((source) => source.entityId === fact!.id)!.stale).toBe(true);
+  await db.update(workSessions).set({ version: 1 }).where(eq(workSessions.id, fact!.id));
+  const [added] = await db.insert(workSessions).values({ organizationId: actor.organizationId, membershipId: actor.membershipId, source: "manual", startAt: new Date("2026-09-05T01:00:00Z"), endAt: new Date("2026-09-05T02:00:00Z"), timezone: "Asia/Shanghai", grossSeconds: 3600, netSeconds: 3600, content: "后加入范围的新事实" }).returning();
+  expect((await service.detail(actor, report!.id))!.rangeChanged).toBe(true);
+  await db.update(workSessions).set({ deletedAt: new Date() }).where(eq(workSessions.id, added!.id));
+  await db.update(payrollRuns).set({ status: "settled" }).where(eq(payrollRuns.id, run!.id));
+  expect((await service.detail(actor, report!.id))!.sources.find((source) => source.entityId === seeded.item.id)!.stale).toBe(true);
+  expect(await service.detail({ ...actor, grants: [] }, report!.id)).toBeNull();
 });

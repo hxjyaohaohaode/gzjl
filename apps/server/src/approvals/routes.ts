@@ -7,7 +7,7 @@ import {
   type ApprovalService,
 } from "./service.js";
 
-const listSchema = z.object({ limit: z.coerce.number().int().min(1).max(100).default(50) });
+const listSchema = z.object({ sort: z.enum(["export", "waiting", "anomaly"]).default("export"), limit: z.coerce.number().int().min(1).max(100).default(50), offset: z.coerce.number().int().min(0).max(1_000_000).default(0) });
 const paramsSchema = z.object({ requestId: z.uuid() });
 const decisionSchema = z.object({
   decision: z.enum(["approved", "returned"]),
@@ -44,8 +44,9 @@ export async function registerApprovalRoutes(
   const writeHooks = [app.csrfProtection, authenticate, requireReviewer];
 
   app.get("/api/approvals", { preHandler: readHooks }, async (request) => {
-    const { limit } = listSchema.parse(request.query);
-    return { items: await service.listPending(request.auth!, limit) };
+    const { limit, offset, sort } = listSchema.parse(request.query);
+    const rows = await service.listPending(request.auth!, limit + 1, offset, sort);
+    return { items: rows.slice(0, limit), nextOffset: rows.length > limit ? offset + limit : null };
   });
 
   app.post("/api/approvals/:requestId/decision", { preHandler: writeHooks }, async (request, reply) => {

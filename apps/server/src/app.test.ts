@@ -178,3 +178,12 @@ describe("service probes", () => {
     }
   });
 });
+
+
+it("does not charge static navigation against the API budget while preserving the API limit", async () => {
+  const app = await buildApp({ config, readiness: { check: async () => undefined } }); apps.push(app);
+  app.get("/api/rate-limit-acceptance", async () => ({ ok: true }));
+  for (let i = 0; i < 610; i++) expect((await app.inject({ method: "GET", url: "/static-not-found.png" })).statusCode).toBe(404);
+  for (let i = 0; i < 600; i++) expect((await app.inject({ method: "GET", url: "/api/rate-limit-acceptance" })).statusCode).toBe(200);
+  expect((await app.inject({ method: "GET", url: "/api/rate-limit-acceptance" })).statusCode).toBe(429);
+});

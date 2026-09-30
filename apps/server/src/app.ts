@@ -1,3 +1,4 @@
+import { registerWorkPolicyRoutes } from "./work/policy.js";
 import { existsSync } from "node:fs";
 import { extname, resolve } from "node:path";
 
@@ -53,6 +54,8 @@ import { registerWorkCorrectionRoutes } from "./work/correction-routes.js";
 import { WorkCorrectionService } from "./work/correction-service.js";
 import { registerWorkRoutes } from "./work/routes.js";
 import { WorkSessionService } from "./work/service.js";
+import { WorkLifecycleService, registerLifecycleRoutes } from "./work/lifecycle.js";
+import { PayrollHandoffService } from "./payroll/handoff.js";
 
 export interface ReadinessProbe {
   check(): Promise<void>;
@@ -167,7 +170,10 @@ export async function buildApp({
     max: 600,
     timeWindow: "1 minute",
     ban: 3,
-    allowList: (request) => request.url === "/healthz" || request.url === "/readyz",
+    allowList: (request) => {
+      const path = request.url.split("?")[0]!;
+      return path === "/healthz" || path === "/readyz" || (["GET", "HEAD"].includes(request.method) && !path.startsWith("/api/") && !path.startsWith("/ws"));
+    },
     keyGenerator: (request) => {
       const cookieName =
         config.NODE_ENV === "production"
@@ -287,8 +293,10 @@ export async function buildApp({
       authenticate,
     );
     const payrollService = new PayrollService(database);
-    await registerPayrollRoutes(app, payrollService, authenticate, new ReimbursementService(database));
+    await registerPayrollRoutes(app, payrollService, authenticate, new ReimbursementService(database), new PayrollHandoffService(database));
     const analyticsService = new AnalyticsService(database);
+    registerWorkPolicyRoutes(app, database, authenticate);
+    await registerLifecycleRoutes(app, new WorkLifecycleService(database, analyticsService), authenticate);
     await registerAnalyticsRoutes(
       app,
       analyticsService,

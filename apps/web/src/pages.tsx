@@ -1,4 +1,10 @@
+import { HistoricalRangePicker, type HistoricalRange } from "./history-range.js";
+import { WorkPolicyPanel } from "./submission-policy.js";
 import { aiGenerationOptionsSchema, type AiGenerationOptions } from "@workbench/shared";
+import { AiDraftEditor, AiFactAnswer, CycleOverview, WorkFactContext, PayrollHandoffPanel, CitedText, type CycleOverviewData } from "./lifecycle-workbench.js";
+import { DraftArchiveButton, ArchivedDrafts } from "./work-recovery.js";
+import { FactExplorer, RecordReadiness } from "./fact-explorer.js";
+import { sourceHref } from "@workbench/shared";
 import { WorkProgressReporter } from "./work-progress-reporter.js";
 import { ReimbursementPanel } from "./reimbursement-panel.js";
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -65,6 +71,7 @@ import { fetchExportFile } from "./export-download.js";
 import { endCurrentSession } from "./session.js";
 import { clearSubmittedWorkEditorBackup, flushWorkEditorBackup, hasWorkEditorBackupContent, readWorkEditorBackup, sameWorkEditorBackup, WORK_EDITOR_SUBMITTED_EVENT, type WorkEditorBackup, type WorkEditorSubmittedEvent } from "./work-editor-backup.js";
 import { getWorkEntryActionTime } from "./work-entry-clock.js";
+import { hashEvidenceFile } from "./evidence-hash.js";
 import { completeEvidenceUpload, putEvidenceFile, type EvidenceUploadReceipt } from "./evidence-upload.js";
 import { discardQueuedTimerEvents, getOfflineTimerStatus, queuedTimerEventsForReview, replayOfflineTimerEvents, sendQueueableTimerEvent, subscribeOfflineTimerStatus } from "./offline.js";
 import {
@@ -200,13 +207,13 @@ export function PageHeader({
   actions?: ReactNode;
 }) {
   return (
-    <header className="app-page-header flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
-      <div>
+    <header className="app-page-header flex flex-col gap-4 sm:flex-row sm:flex-wrap sm:items-end sm:justify-between">
+      <div className="app-page-title">
         <h1 className="text-[28px] leading-none md:text-[34px]">{title}</h1>
         {description ? <p className="sr-only">{description}</p> : null}
       </div>
       {actions ? (
-        <div className="flex shrink-0 flex-wrap items-center gap-2">
+        <div className="app-page-actions flex flex-wrap items-center gap-2">
           {actions}
         </div>
       ) : null}
@@ -2770,6 +2777,7 @@ interface WorkSessionProjectLink {
 }
 interface WorkSession {
   id: string;
+  membershipId?: string;
   startAt: string;
   endAt: string;
   timezone: string;
@@ -3009,6 +3017,7 @@ type EvidenceUploadState =
   | "failed";
 
 interface QueuedEvidenceFile {
+  progress?: number;
   id: string;
   file: File;
   state: EvidenceUploadState;
@@ -3059,10 +3068,7 @@ async function uploadNewWorkEvidenceFile(
   if (!crypto.subtle) {
     throw new Error("当前浏览器不支持文件完整性校验。 ");
   }
-  const digest = await crypto.subtle.digest("SHA-256", await file.arrayBuffer());
-  const sha256 = Array.from(new Uint8Array(digest), (byte) =>
-    byte.toString(16).padStart(2, "0"),
-  ).join("");
+  const sha256 = await hashEvidenceFile(file);
   const intent = receipt.attachmentId
     ? await api<EvidenceUploadIntent>(`/api/attachments/${receipt.attachmentId}/upload-url`, { method: "POST" })
     : await api<EvidenceUploadIntent>(
@@ -3290,14 +3296,14 @@ export function HomePage({ me }: { me: Me }) {
   const factualWork = (work.data?.items ?? []).filter(
     (item) => item.recordKind !== "plan",
   );
-  const pendingCount =
-    factualWork.filter((item) => item.approvalStatus === "pending_review")
-      .length;
+  const cycle = useQuery({ queryKey: ["work-sessions", "cycle-overview"], queryFn: () => api<CycleOverviewData>("/api/work-lifecycle/me") });
+  const pendingCount = cycle.data?.counts?.pending_review ?? 0;
   const activeTimer = timer.data?.timer;
 
   return (
     <div className="home-page">
       <PageHeader title={`${me.user.displayName}，今天好`} />
+      <CycleOverview onboarding />
       <div className="home-layout">
         <section className="home-primary">
           <Card className="home-focus-card">
@@ -3395,10 +3401,10 @@ export function HomePage({ me }: { me: Me }) {
             <Card className="home-stat-card">
               <CardContent>
                 <p className="text-xs font-semibold text-[var(--text-muted)]">
-                  最近 5 条待审核
+                  本结算周期待审核
                 </p>
                 <p className="text-2xl font-extrabold tracking-[-0.04em] tabular-nums">
-                  {work.isPending || work.isError ? "—" : pendingCount}
+                  {cycle.isPending || cycle.isError ? "—" : pendingCount}
                   <span className="ml-1 text-sm font-semibold text-[var(--text-muted)]">
                     条
                   </span>
@@ -3984,11 +3990,7 @@ export function EvidencePanel({
       throw new Error("当前浏览器不支持文件完整性校验，请使用受支持的现代浏览器。 ");
     }
     updateQueuedFile(queued.id, { state: "hashing" });
-    const bytes = await queued.file.arrayBuffer();
-    const digest = await crypto.subtle.digest("SHA-256", bytes);
-    const sha256 = Array.from(new Uint8Array(digest), (byte) =>
-      byte.toString(16).padStart(2, "0"),
-    ).join("");
+    const sha256 = await hashEvidenceFile(queued.file, (progress) => updateQueuedFile(queued.id, { progress }));
     const fileInput = {
       originalName: queued.file.name,
       // Empty browser types are common for code and specialized artefacts.
@@ -4028,7 +4030,7 @@ export function EvidencePanel({
       state: "uploading",
       attachmentId: intent.attachment.id,
     });
-    await putEvidenceFile(intent.uploadUrl, intent.requiredHeaders, queued.file);
+    await putEvidenceFile(intent.uploadUrl, intent.requiredHeaders, queued.file, { onProgress: (progress) => updateQueuedFile(queued.id, { progress }) });
     updateQueuedFile(queued.id, { state: "verifying", bytesUploaded: true });
     await completeEvidenceUpload(intent.attachment.id);
     updateQueuedFile(queued.id, { state: "complete" });
@@ -4360,7 +4362,7 @@ export function EvidencePanel({
                     <span className="min-w-0 flex-1">
                       <strong>{queued.file.name}</strong>
                       <small>
-                        {formatFileSize(queued.file.size)} · {evidenceUploadStateLabel(queued.state)}
+                        {formatFileSize(queued.file.size)} · {evidenceUploadStateLabel(queued.state)}{["hashing", "uploading"].includes(queued.state) && queued.progress !== undefined ? ` ${queued.progress}%` : ""}
                         {queued.error ? `：${queued.error}` : ""}
                       </small>
                     </span>
@@ -4908,6 +4910,10 @@ function TimerProjectAssociation({
 }
 
 export function WorkPage() {
+  const [workSearch, setWorkSearch] = useSearchParams();
+  const focusedRecord = workSearch.get("record");
+  const focusedWork = useQuery({ queryKey: ["work-sessions", "focused", focusedRecord], queryFn: () => api<{ session: WorkSession; ownRecord: boolean }>(`/api/work-facts/${focusedRecord}`), enabled: Boolean(focusedRecord && /^[a-f0-9-]{36}$/i.test(focusedRecord)) });
+  const selectedWorkStatus = workSearch.get("status");
   const queryClient = useQueryClient();
   const membershipId = queryClient.getQueryData<Me>(["me"])?.user.membershipId;
   const manualPrefillStorageKey = `workbench:manual-work-prefill:v2:${membershipId}`;
@@ -5041,9 +5047,9 @@ export function WorkPage() {
     return () => window.clearTimeout(debounceTimer);
   }, [manual.content, manual.result, projectNodeSearch]);
   const workPages = useInfiniteQuery({
-    queryKey: ["work-sessions", "work-editor", "all", 100],
+    queryKey: ["work-sessions", "work-editor", "all", 100, workSearch.get("from"), workSearch.get("to"), selectedWorkStatus],
     initialPageParam: "",
-    queryFn: ({ pageParam, signal }) => api<{ items: WorkSession[]; nextCursor?: string | null }>(`/api/work-sessions?limit=100${pageParam ? `&before=${encodeURIComponent(pageParam)}` : ""}`, { signal }),
+    queryFn: ({ pageParam, signal }) => api<{ items: WorkSession[]; nextCursor?: string | null }>(`/api/work-sessions?limit=100${workSearch.get("from") ? `&from=${encodeURIComponent(workSearch.get("from")!)}` : ""}${workSearch.get("to") ? `&to=${encodeURIComponent(workSearch.get("to")!)}` : ""}${selectedWorkStatus ? `&approvalStatus=${encodeURIComponent(selectedWorkStatus)}&recordKind=fact` : ""}${pageParam ? `&before=${encodeURIComponent(pageParam)}` : ""}`, { signal }),
     getNextPageParam: (last, _pages, _lastParam, allParams) => last.nextCursor && !allParams.includes(last.nextCursor) ? last.nextCursor : undefined,
   });
   const workData = useMemo(() => workPages.data ? { items: [...new Map(workPages.data.pages.flatMap((page) => page.items).map((item) => [item.id, item])).values()] } : undefined, [workPages.data]);
@@ -5593,7 +5599,7 @@ export function WorkPage() {
       links.find((link) => link.isPrimary)?.projectId ?? links[0]?.projectId ?? "",
     );
     setShowForm(true);
-    window.scrollTo({ top: 0, behavior: "smooth" });
+    window.requestAnimationFrame(() => document.getElementById("work-editor")?.scrollIntoView({ block: "start", behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "instant" : "smooth" }));
   };
   const latestConflictedSession = conflictSessionId
     ? work.data?.items.find((item) => item.id === conflictSessionId) ?? null
@@ -5650,7 +5656,7 @@ export function WorkPage() {
         "",
     );
     setShowForm(true);
-    window.scrollTo({ top: 0, behavior: "smooth" });
+    window.requestAnimationFrame(() => document.getElementById("work-editor")?.scrollIntoView({ block: "start", behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "instant" : "smooth" }));
   };
   const saveLocalPrefill = () => {
     if (editingSession || correctionSession) return;
@@ -5817,6 +5823,10 @@ export function WorkPage() {
           </Button>
         }
       />
+      <CycleOverview compact /><WorkPolicyPanel />
+      <HistoricalRangePicker onChange={(range) => { const params = new URLSearchParams(workSearch); params.delete("record"); params.delete("version"); if (range) { params.set("from", range.from.toISOString()); params.set("to", range.to.toISOString()); } else { params.delete("from"); params.delete("to"); params.delete("status"); } setWorkSearch(params); }} />
+      {selectedWorkStatus ? <p className="lifecycle-caption">正在查看所选周期与状态：{selectedWorkStatus}。<Link to="/work">清除筛选</Link></p> : null}
+      {focusedRecord && /^[a-f0-9-]{36}$/i.test(focusedRecord) ? <Card className="mb-5"><CardHeader><h2>定位工作记录与引用版本</h2><Link to="/work">关闭定位</Link></CardHeader><CardContent><WorkFactContext id={focusedRecord} expectedVersion={workSearch.get("version")}><ReadOnlyEvidenceList sessionId={focusedRecord} /></WorkFactContext><div className="flex flex-wrap gap-2">{focusedWork.data?.ownRecord ? focusedWork.data.session.approvalStatus === "pending_review" ? <Button variant="secondary" onClick={() => withdraw.mutate(focusedWork.data!.session)} disabled={withdraw.isPending}>撤回此记录以修改</Button> : ["approved", "locked"].includes(focusedWork.data.session.approvalStatus) || focusedWork.data.session.source !== "manual" ? <Button variant="secondary" onClick={() => openCorrectionEditor(focusedWork.data!.session)}>申请更正此记录</Button> : <Button onClick={() => openDraftEditor(focusedWork.data!.session)}>编辑定位到的草稿</Button> : null}</div></CardContent></Card> : null}
       {saveMessage ? (
         <div className="work-save-status" role="status">
           <Check size={16} />
@@ -5856,7 +5866,7 @@ export function WorkPage() {
         </CardContent></Card>
       ) : null}
       {showForm ? (
-        <Card className="work-editor mb-5">
+        <Card className="work-editor mb-5" id="work-editor">
           <div className="work-editor-grid">
             <fieldset className="work-editor-form min-w-0" disabled={create.isPending} aria-busy={create.isPending}>
               <div className="work-editor-heading mb-6 flex items-start justify-between gap-4">
@@ -5868,7 +5878,7 @@ export function WorkPage() {
                         ? "编辑云端计划草稿"
                         : "编辑手工草稿"
                       : correctionSession
-                        ? "发起已结算记录更正"
+                        ? "发起记录更正申请"
                         : "补录一段真实工作"}
                   </h2>
                   <p className="mt-2 max-w-xl text-sm leading-6 text-[var(--text-muted)]">
@@ -5877,7 +5887,7 @@ export function WorkPage() {
                         ? "计划只在你自己的跨端草稿中可见，不会进入统计、AI、薪资、证据或审核；实际结束后需明确转换为真实工时草稿。"
                         : "修改会生成新的版本快照；提交审核后的记录不可在此静默改写。"
                       : correctionSession
-                        ? "原始锁定事实不会被改写。提交的是可审核的完整提案；若涉及已结算金额，审核人只能将明确金额放入后续开放周期。"
+                        ? "提交的是可审核的完整提案：未锁定记录经审核后生成待重新提交的更正草稿；已锁定事实保留原样，已结算金额仅能明确调整到后续开放周期。"
                         : "先准确描述时间和内容，保存草稿后再按需要提交审核。"}
                   </p>
                 </div>
@@ -6791,7 +6801,7 @@ export function WorkPage() {
             )}
           </CardContent>
         </Card>
-        <Card className="work-list-card">
+        <Card className="work-list-card"><ArchivedDrafts />
           <CardHeader>
             <div>
               <p className="app-section-label">可追溯记录</p>
@@ -6813,10 +6823,10 @@ export function WorkPage() {
               <ErrorMessage error={work.error} onRetry={() => void work.refetch()} retrying={work.isFetching} />
             ) : work.data?.items.length ? (
               <div className="divide-y divide-[var(--border)]">
-                {work.data.items.map((item) => {
+                {work.data.items.filter((item) => !selectedWorkStatus || item.approvalStatus === selectedWorkStatus).map((item) => {
                   const correction = latestCorrectionBySession.get(item.id);
                   return (
-                  <div key={item.id}>
+                  <div key={item.id} id={`work-record-${item.id}`} className="work-record-entry">
                     <WorkRow
                       action={
                         item.recordKind === "plan" ? (
@@ -6838,7 +6848,7 @@ export function WorkPage() {
                               转为真实草稿
                             </Button>
                           </div>
-                        ) : item.approvalStatus === "locked" ? (
+                        ) : ["locked", "approved"].includes(item.approvalStatus) ? (
                           <Button
                             disabled={
                               create.isPending ||
@@ -6905,8 +6915,10 @@ export function WorkPage() {
                         </span>
                       </div>
                     ) : null}
+                    {item.submissionStatus === "draft" && ["not_requested", "returned"].includes(item.approvalStatus) ? <DraftArchiveButton id={item.id} version={item.version} /> : null}
+                    {item.recordKind === "fact" && item.submissionStatus === "draft" && item.source !== "manual" ? <Button variant="ghost" size="compact" onClick={() => openCorrectionEditor(item)}>申请修正计时或导入事实</Button> : null}
                     {item.recordKind === "fact" ? (
-                      <EvidencePanel sessionId={item.id} />
+                      <><RecordReadiness id={item.id} /><EvidencePanel sessionId={item.id} /></>
                     ) : null}
                     <WorkVersionHistory sessionId={item.id} />
                     {correction ? (
@@ -7503,6 +7515,8 @@ export function LegacyProjectDetailPage({ me }: { me: Me }) {
   );
 }
 interface ApprovalItem {
+  displayName?: string;
+  cutoffAt?: string | null;
   request: {
     id: string;
     priority: string;
@@ -7557,16 +7571,21 @@ function readCorrectionProposal(snapshot: unknown): {
 
 export function ApprovalsPage() {
   const queryClient = useQueryClient();
+  const [queueNow, setQueueNow] = useState(() => Date.now());
+  useEffect(() => { const timer = window.setInterval(() => setQueueNow(Date.now()), 60_000); return () => window.clearInterval(timer); }, []);
   const me = queryClient.getQueryData<Me>(["me"]);
   const canAdjustPayroll = me?.permissions.some((grant) => grant.permission === "payroll.settle" && grant.scopeKind === "organization") ?? false;
+  const [approvalGrouping, setApprovalGrouping] = useState("export");
   const [expandedApprovalId, setExpandedApprovalId] = useState<string | null>(null);
   const [returnReasons, setReturnReasons] = useState<Record<string, string>>({});
   const [correctionInputs, setCorrectionInputs] = useState<
     Record<string, { amount: string; reviewNote: string }>
   >({});
-  const approvals = useQuery({
-    queryKey: ["approvals"],
-    queryFn: () => api<{ items: ApprovalItem[] }>("/api/approvals?limit=100"),
+  const approvals = useInfiniteQuery({
+    queryKey: ["approvals", approvalGrouping], initialPageParam: 0,
+    queryFn: ({ pageParam }) => api<{ items: ApprovalItem[]; nextOffset: number | null }>(`/api/approvals?limit=50&offset=${pageParam}&sort=${approvalGrouping}`),
+    getNextPageParam: (page) => page.nextOffset ?? undefined,
+    select: (data) => ({ items: [...new Map(data.pages.flatMap((page) => page.items).map((item) => [item.request.id, item])).values()] }),
   });
   const corrections = useQuery({
     queryKey: ["work-corrections-pending"],
@@ -7648,6 +7667,7 @@ export function ApprovalsPage() {
         title="审批"
         description="仅显示当前角色和授权范围内的待审事实；批准、退回与更正均保留前后快照。"
       />
+      <div className="approval-queue-controls"><label>队列优先顺序<select value={approvalGrouping} onChange={(e) => setApprovalGrouping(e.target.value)}><option value="export">临近本期导出</option><option value="waiting">等待最长</option><option value="anomaly">异常优先</option></select></label><p>每页显示最多 100 项；核对项目节点、相邻时段、证据和历史依据后作出决定。</p></div>
       <ReimbursementPanel reviewOnly />
       {approvals.isPending ? (
         <Card>
@@ -7663,8 +7683,8 @@ export function ApprovalsPage() {
                 <div className="flex flex-col gap-4 md:flex-row md:items-center">
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2">
-                      <h2 className="truncate font-bold">
-                        {item.session.content}
+                      <h2 className="approval-summary-title break-words font-bold">
+                        {item.displayName ? `${item.displayName} · ` : ""}{item.session.content}
                       </h2>
                       <Badge
                         tone={
@@ -7684,6 +7704,7 @@ export function ApprovalsPage() {
                       {formatDuration(item.session.netSeconds)} · 版本{" "}
                       {item.session.version}
                     </p>
+                    <p className="lifecycle-caption">提交人：{item.displayName ?? "成员"} · 成员编号 {item.session.membershipId ?? "展开详情查看"}<br />已等待 {Math.max(0, Math.floor((queueNow - Date.parse(item.request.requestedAt ?? item.session.startAt)) / 3_600_000))} 小时{item.cutoffAt ? ` · 本期计划导出 ${formatDateTime(item.cutoffAt)}` : " · 尚未配置相交结算周期"}</p>
                     {item.request.anomalyFlags.length ? (
                       <div className="mt-2 flex flex-wrap gap-1.5" role="status">
                         {item.request.anomalyFlags.map((flag) => (
@@ -7761,6 +7782,7 @@ export function ApprovalsPage() {
                 </div>
                 {expandedApprovalId === item.request.id ? (
                   <section className="approval-evidence-detail" aria-label="待审核工作与附件详情">
+                    <WorkFactContext id={item.session.id} />
                     <dl className="approval-fact-grid">
                       <div><dt>工作内容</dt><dd>{item.session.content}</dd></div>
                       <div><dt>工作结果</dt><dd>{item.session.result || "未填写"}</dd></div>
@@ -7798,6 +7820,7 @@ export function ApprovalsPage() {
           />
         </Card>
       )}
+      {approvals.hasNextPage ? <Button variant="secondary" disabled={approvals.isFetchingNextPage} onClick={() => void approvals.fetchNextPage()}>{approvals.isFetchingNextPage ? "正在读取…" : "加载更多待审记录"}</Button> : null}
       {corrections.isPending ? (
         <Card className="mt-5">
           <LoadingBlock />
@@ -7835,7 +7858,7 @@ export function ApprovalsPage() {
                     <div className="min-w-0">
                       <div className="flex flex-wrap items-center gap-2">
                         <h3 className="font-bold">
-                          {item.requesterDisplayName} 的已结算更正申请
+                          {item.requesterDisplayName} 的{item.session.approvalStatus === "locked" ? "已结算" : "工作事实"}更正申请
                         </h3>
                         <Badge tone="warning">原始版本 {item.correction.baseVersion}</Badge>
                       </div>
@@ -7870,7 +7893,9 @@ export function ApprovalsPage() {
                   <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
                     <Field
                       hint={
-                        !canAdjustPayroll
+                        item.session.approvalStatus !== "locked"
+                          ? "通过后恢复草稿，成员确认后重新提交审核并重算本期金额。"
+                          : !canAdjustPayroll
                           ? "当前授权可审核工作事实；薪资金额调整需要组织级薪资结算权限。"
                           : item.nextOpenPeriod
                           ? `可选；填写后会进入“${item.nextOpenPeriod.name}”的下期调整，币种由该成员在该周期的有效薪资方案决定。`
@@ -7880,7 +7905,7 @@ export function ApprovalsPage() {
                     >
                       <input
                         className={fieldClass}
-                        disabled={!canAdjustPayroll || !item.nextOpenPeriod || decideCorrection.isPending}
+                        disabled={item.session.approvalStatus !== "locked" || !canAdjustPayroll || !item.nextOpenPeriod || decideCorrection.isPending}
                         inputMode="decimal"
                         maxLength={22}
                         onChange={(event) => setInput({ amount: event.target.value })}
@@ -7962,7 +7987,8 @@ interface PayrollRecord {
     status: string;
     calculationVersion: string;
   };
-  period: { name: string; startsAt: string; endsAt: string; status: string };
+  period: {
+    id?: string; name: string; startsAt: string; endsAt: string; status: string };
   payslip: null | {
     id: string;
     issuedAt: string;
@@ -7995,7 +8021,8 @@ interface PayrollOwnResponse {
     };
   };
   livePreview: null | {
-    period: { startsAt: string; endsAt: string; cutoffAt: string };
+    period: {
+      id?: string; startsAt: string; endsAt: string; cutoffAt: string };
     currency: string;
     planType: CompensationPlanType;
     baseAmount: string;
@@ -8234,13 +8261,14 @@ function formatPayrollAxis(currency: string, value: number): string {
   }
 }
 
-function PayrollManagementPanel() {
+function PayrollManagementPanel({ me }: { me: Me }) {
   const queryClient = useQueryClient();
   const chartPalette = useChartPalette();
   const management = useQuery({
     queryKey: ["payroll-management"],
     queryFn: () => api<PayrollManagementOverview>("/api/payroll/management"),
   });
+  const [periodMonth, setPeriodMonth] = useState("");
   const activeMembers = useMemo(
     () =>
       management.data?.members.filter(
@@ -8516,19 +8544,7 @@ function PayrollManagementPanel() {
       api(`/api/pay-periods/${periodId}/calculate`, { method: "POST" }),
     onSuccess: refresh,
   });
-  const settleRun = useMutation({
-    mutationFn: (runId: string) =>
-      api(`/api/payroll-runs/${runId}/settle`, { method: "POST" }),
-    onSuccess: async (_response, runId) => {
-      const anchor = document.createElement("a");
-      anchor.href = `/api/payroll-runs/${runId}/finance-export.csv`;
-      anchor.rel = "noopener";
-      document.body.append(anchor);
-      anchor.click();
-      anchor.remove();
-      await refresh();
-    },
-  });
+  const [handoffRunId, setHandoffRunId] = useState<string | null>(null);
   const reopenRun = useMutation({
     mutationFn: (runId: string) =>
       api(`/api/payroll-runs/${runId}/reopen`, { method: "POST" }),
@@ -8544,16 +8560,11 @@ function PayrollManagementPanel() {
       api(`/api/payroll/periods/${periodId}`, { method: "DELETE" }),
     onSuccess: refresh,
   });
-  const downloadFinanceExport = (runId: string) => {
-    const anchor = document.createElement("a");
-    anchor.href = `/api/payroll-runs/${runId}/finance-export.csv`;
-    anchor.rel = "noopener";
-    document.body.append(anchor);
-    anchor.click();
-    anchor.remove();
-  };
   return (
     <section className="mb-6 space-y-5" aria-label="薪资管理">
+      {me.user.isOwner ? <WorkPolicyPanel editable /> : null}
+      {handoffRunId ? <PayrollHandoffPanel runId={handoffRunId} onClose={() => setHandoffRunId(null)} /> : null}
+      {activeMembers.filter((m) => !m.plan).length ? <Card><CardHeader><h2>已加入但缺计薪方案</h2></CardHeader><CardContent><p>请在导出前补齐方案与生效日期。</p><div className="fact-project-links">{activeMembers.filter((m) => !m.plan).map((m) => <Button variant="secondary" key={m.membershipId} onClick={() => selectMember(m.membershipId)}>{m.displayName} · 配置方案</Button>)}</div></CardContent></Card> : null}
       {management.data?.liveItemIssues?.length ? (
         <Card>
           <CardContent>
@@ -8846,6 +8857,7 @@ function PayrollManagementPanel() {
       </Card>
       <Card>
         <CardHeader>
+          <label className="history-month">查看 / 导出指定月份<input type="month" value={periodMonth} onChange={(e) => setPeriodMonth(e.target.value)} /><Button variant="ghost" onClick={() => setPeriodMonth("")}>显示所有周期</Button></label>
           <div><p className="app-page-kicker">结算控制</p><h2 className="mt-1 text-lg font-bold">薪资周期与批次</h2></div>
         </CardHeader>
         <CardContent>
@@ -8856,7 +8868,7 @@ function PayrollManagementPanel() {
               saveSettings.mutate();
             }}
           >
-            <Field hint="由所有者设置：每月该日预计发放上一个自然月薪资。" label="预计发薪日（每月）">
+            <Field hint="由所有者设置：每月该日计划核对并导出上一个自然月薪资依据；实际付款时间由外部平台确认。" label="结算截止日（每月）">
               <input
                 className={`${fieldClass} w-32`}
                 max="28"
@@ -8871,9 +8883,9 @@ function PayrollManagementPanel() {
                 value={cutoffDay}
               />
             </Field>
-            <Field hint="该时间会同步显示在员工的本月薪资中。" label="预计发薪时间">
+            <Field hint="该时间会同步显示在员工的本月薪资中。" label="结算截止 / 计划导出时间">
               <input
-                aria-label="预计发薪时间"
+                aria-label="结算截止 / 计划导出时间"
                 className={`${fieldClass} w-36`}
                 onChange={(event) => {
                   setCutoffMinuteOverride(cutoffTimeMinutes(event.target.value));
@@ -8885,20 +8897,20 @@ function PayrollManagementPanel() {
               />
             </Field>
             <Button disabled={saveSettings.isPending} size="compact" type="submit" variant="secondary">
-              {saveSettings.isPending ? "保存中…" : "保存预计发薪时间"}
+              {saveSettings.isPending ? "保存中…" : "保存结算截止 / 计划导出时间"}
             </Button>
           </form>
           <form className="grid gap-4 lg:grid-cols-4" onSubmit={(event) => { event.preventDefault(); createPeriod.mutate(); }}>
             <Field label="周期名称"><input className={fieldClass} onChange={(event) => setPeriodForm({ ...periodForm, name: event.target.value })} required value={periodForm.name} /></Field>
             <Field label="开始"><input className={fieldClass} onChange={(event) => setPeriodForm({ ...periodForm, startsAt: event.target.value })} required type="datetime-local" value={periodForm.startsAt} /></Field>
             <Field label="结束（不含）"><input className={fieldClass} onChange={(event) => setPeriodForm({ ...periodForm, endsAt: event.target.value })} required type="datetime-local" value={periodForm.endsAt} /></Field>
-            <Field label="本周期预计发薪时间"><input aria-label="本周期预计发薪时间" className={fieldClass} onChange={(event) => { setPeriodCutoffTouched(true); setPeriodForm({ ...periodForm, cutoffAt: event.target.value }); }} required type="datetime-local" value={effectivePeriodCutoffAt} /></Field>
+            <Field label="本周期结算截止 / 计划导出时间"><input aria-label="本周期结算截止 / 计划导出时间" className={fieldClass} onChange={(event) => { setPeriodCutoffTouched(true); setPeriodForm({ ...periodForm, cutoffAt: event.target.value }); }} required type="datetime-local" value={effectivePeriodCutoffAt} /></Field>
             <div className="lg:col-span-4"><Button disabled={createPeriod.isPending} type="submit">创建薪资周期</Button></div>
           </form>
           <div className="mt-5 space-y-2">
-            {management.data?.periods.map((period) => (
+            {management.data?.periods.filter((period) => !periodMonth || (toZonedInputValue(new Date(period.startsAt)).slice(0, 7) <= periodMonth && toZonedInputValue(new Date(Date.parse(period.endsAt) - 1)).slice(0, 7) >= periodMonth)).map((period) => (
               <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl bg-[var(--surface-subtle)] px-4 py-3" key={period.id}>
-                <div><p className="font-semibold">{period.name}</p><p className="text-xs text-[var(--text-muted)]">{formatDateTime(period.startsAt)} – {formatDateTime(period.endsAt)} · {payPeriodStatusLabels[period.status] ?? period.status} · 预计发薪 {formatDateTime(period.cutoffAt)}</p></div>
+                <div><p className="font-semibold">{period.name}</p><p className="text-xs text-[var(--text-muted)]">{formatDateTime(period.startsAt)} – {formatDateTime(period.endsAt)} · {payPeriodStatusLabels[period.status] ?? period.status} · 计划导出 {formatDateTime(period.cutoffAt)}</p></div>
                 {period.status === "open" ? (
                   <div className="flex flex-wrap gap-2">
                     <Button disabled={calculatePeriod.isPending} onClick={() => calculatePeriod.mutate(period.id)} type="button" variant="secondary">计算本周期</Button>
@@ -8929,13 +8941,13 @@ function PayrollManagementPanel() {
                     {entry.run.status === "ready" ? (
                       <>
                         <Button
-                          disabled={settleRun.isPending}
+                          disabled={false}
                           onClick={() => {
-                            if (window.confirm("将导出财务账单并锁定本周期工时。锁定前请核对金额；确认继续？")) settleRun.mutate(entry.run.id);
+                            setHandoffRunId(entry.run.id);
                           }}
                           type="button"
                         >
-                          确认导出并锁定
+                          核对导出预览
                         </Button>
                         <Button
                           disabled={cancelRun.isPending}
@@ -8964,7 +8976,7 @@ function PayrollManagementPanel() {
                       </>
                     ) : (
                       <>
-                        <Button onClick={() => downloadFinanceExport(entry.run.id)} type="button" variant="secondary">重新导出账单</Button>
+                        <Button onClick={() => setHandoffRunId(entry.run.id)} type="button" variant="secondary">重新导出账单</Button>
                         <Button
                           disabled={reopenRun.isPending}
                           onClick={() => {
@@ -8982,7 +8994,7 @@ function PayrollManagementPanel() {
               ))}
             </div>
           ) : null}
-          <ErrorMessage error={saveSettings.error ?? createPeriod.error ?? calculatePeriod.error ?? settleRun.error ?? reopenRun.error ?? cancelRun.error ?? deletePeriod.error} />
+          <ErrorMessage error={saveSettings.error ?? createPeriod.error ?? calculatePeriod.error ?? reopenRun.error ?? cancelRun.error ?? deletePeriod.error} />
         </CardContent>
       </Card>
     </section>
@@ -8991,18 +9003,28 @@ function PayrollManagementPanel() {
 
 export function PayrollPage({ me }: { me: Me }) {
   const chartPalette = useChartPalette();
+  const [payrollSearch, setPayrollSearch] = useSearchParams();
+  const sourceId = payrollSearch.get("source");
+  const [payrollHistory, setPayrollHistory] = useState<HistoricalRange | null>(null);
   const queryClient = useQueryClient();
-  const isPayrollManager = hasGrant(me, "payroll.configure");
+  const canManagePayroll = hasGrant(me, "payroll.configure");
+  const isPayrollManager = canManagePayroll && !sourceId && payrollSearch.get("view") !== "own";
   const payroll = useQuery({
-    queryKey: ["payroll-me"],
-    queryFn: () => api<PayrollOwnResponse>("/api/payroll/me"),
+    queryKey: ["payroll-me", payrollHistory?.from.toISOString(), payrollHistory?.to.toISOString()],
+    queryFn: () => api<PayrollOwnResponse>(`/api/payroll/me${payrollHistory ? `?from=${encodeURIComponent(payrollHistory.from.toISOString())}&to=${encodeURIComponent(payrollHistory.to.toISOString())}` : ""}`),
     enabled: !isPayrollManager,
   });
   const [selectedPayrollId, setSelectedPayrollId] = useState("");
-  const selected =
-    payroll.data?.items.find((record) => record.item.id === selectedPayrollId) ??
-    payroll.data?.items[0] ??
-    null;
+  const sourceRecord = sourceId ? payroll.data?.items.find((record) => record.item.id === sourceId || record.period.id === sourceId || record.components.some((c) => c.id === sourceId)) : undefined;
+  const selected = sourceId ? sourceRecord ?? null : payroll.data?.items.find((record) => record.item.id === selectedPayrollId) ?? payroll.data?.items[0] ?? null;
+  const selectPayroll = (id: string) => {
+    setSelectedPayrollId(id);
+    if (sourceId) {
+      const next = new URLSearchParams(payrollSearch); next.delete("source");
+      if (canManagePayroll) next.set("view", "own");
+      setPayrollSearch(next, { replace: true });
+    }
+  };
   const acknowledge = useMutation({
     mutationFn: (payslipId: string) =>
       api(`/api/payroll/payslips/${payslipId}/acknowledge`, { method: "POST" }),
@@ -9421,7 +9443,8 @@ export function PayrollPage({ me }: { me: Me }) {
       <PageHeader
         title={isPayrollManager ? "薪资管理" : "我的薪资"}
       />
-      {isPayrollManager ? <PayrollManagementPanel /> : null}
+      {canManagePayroll ? <div className="mb-4"><Link to={isPayrollManager ? "/payroll?view=own" : "/payroll"}>{isPayrollManager ? "查看本人的薪资与来源" : "返回组织薪资管理"}</Link></div> : null}
+      {isPayrollManager ? <PayrollManagementPanel me={me} /> : null}
       <ReimbursementPanel />
       {livePreview && Number(livePreview.approvedReimbursementAmount ?? 0) > 0 && <Card className="mb-4"><CardContent>
         <StatusLine label="已批准报销 · 已计入本月预估" value={money(livePreview.currency, livePreview.approvedReimbursementAmount!)} />
@@ -9436,7 +9459,7 @@ export function PayrollPage({ me }: { me: Me }) {
           {salarySubsidies.length ? <Card><CardContent><StatusLine label={`${salarySubsidies.length} 项固定补贴`} value={money(livePreview.currency, salarySubsidyTotal)} /><p className="mt-1 break-words text-xs text-[var(--text-muted)]">{salarySubsidies.map((item) => `${item.name} ${money(livePreview.currency, item.amount)}`).join(" · ")}</p></CardContent></Card> : null}
           <Card><CardContent><StatusLine label="本月实时预估" value={money(livePreview.currency, livePreview.estimatedAmount)} /></CardContent></Card>
           <Card><CardContent><StatusLine label="月末趋势预测" value={money(livePreview.currency, livePreview.projectedPeriodAmount)} />{monthEndForecast ? <p className="mt-1 text-xs text-[var(--text-muted)]">合理区间 {money(livePreview.currency, monthEndForecast.projectedLowerCumulativeAmount)} – {money(livePreview.currency, monthEndForecast.projectedUpperCumulativeAmount)}{livePreview.projectedWeeklyBonusSeconds ? ` · 另预计奖励 ${formatDuration(livePreview.projectedWeeklyBonusSeconds)}` : ""}</p> : null}</CardContent></Card>
-          <Card><CardContent><StatusLine label="预计发薪" value={formatDateTime(livePreview.period.cutoffAt)} /></CardContent></Card>
+          <Card><CardContent><StatusLine label="结算截止 / 计划导出" value={formatDateTime(livePreview.period.cutoffAt)} /></CardContent></Card>
         </section>
       ) : null}
       {!isPayrollManager && livePreview ? (
@@ -9525,6 +9548,8 @@ export function PayrollPage({ me }: { me: Me }) {
           </Card>
         </section>
       ) : null}
+      {!isPayrollManager ? <HistoricalRangePicker onChange={setPayrollHistory} /> : null}
+      {!isPayrollManager && sourceId && payroll.isSuccess && !sourceRecord ? <Card className="mb-4"><CardContent><p role="alert">该来源未出现在当前授权与日期范围内，可能已撤销、被新版批次替代或范围不匹配。请核对来源版本和日期；不会用另一张账单代替此来源。</p><Button variant="secondary" onClick={() => selectPayroll("")}>查看当前可用薪资批次</Button></CardContent></Card> : null}
       {!isPayrollManager && payroll.isPending ? (
         <Card>
           <LoadingBlock />
@@ -9548,7 +9573,7 @@ export function PayrollPage({ me }: { me: Me }) {
 
           <div className="flex flex-wrap items-end justify-between gap-3">
             <Field label="查看薪资周期">
-              <select className={`${fieldClass} min-w-64`} onChange={(event) => setSelectedPayrollId(event.target.value)} value={selected.item.id}>
+              <select className={`${fieldClass} min-w-64`} onChange={(event) => selectPayroll(event.target.value)} value={selected.item.id}>
                 {payroll.data.items.map((record) => (
                   <option key={record.item.id} value={record.item.id}>
                     {record.period.name} · {money(record.item.currency, record.item.finalAmount)}
@@ -9561,7 +9586,7 @@ export function PayrollPage({ me }: { me: Me }) {
                 {selected.run.status === "settled"
                   ? selected.payslip?.acknowledgedAt
                     ? "已确认收款"
-                    : "账单已导出，到账待确认"
+                    : "依据已导出，外部付款待本人核对"
                   : selected.item.estimate
                     ? "预估"
                     : "待结算"}
@@ -10569,7 +10594,7 @@ function formatExportFileSize(bytes: number | null): string {
   return `${(bytes / 1_048_576).toFixed(1)} MB`;
 }
 
-function BackgroundExportPanel({ from, to }: { from: Date; to: Date }) {
+function BackgroundExportPanel({ from, to, filters }: { from: Date; to: Date; filters: AnalyticsFilterState }) {
   const queryClient = useQueryClient();
   const [downloadMessage, setDownloadMessage] = useState("");
   const [format, setFormat] = useState<"csv" | "json" | "xlsx" | "pdf">("xlsx");
@@ -10601,6 +10626,7 @@ function BackgroundExportPanel({ from, to }: { from: Date; to: Date }) {
         body: {
           exportType: "work_sessions",
           format,
+          filters: Object.fromEntries(Object.entries(filters).filter(([, value]) => value)),
           from: from.toISOString(),
           to: to.toISOString(),
         },
@@ -10639,7 +10665,8 @@ function BackgroundExportPanel({ from, to }: { from: Date; to: Date }) {
         from: from.toISOString(),
         to: to.toISOString(),
       });
-      const fileName = `work-sessions.${effectiveFormat}`;
+      for (const [key, value] of Object.entries(filters)) if (value) query.set(key, value);
+      const fileName = `工作记录-${toZonedInputValue(from).slice(0, 10)}-${toZonedInputValue(new Date(to.getTime() - 1)).slice(0, 10)}.${effectiveFormat}`;
       if (effectiveFormat !== "csv" && effectiveFormat !== "json") throw new Error("请选择 CSV 或 JSON 直接导出。");
       const blob = await fetchExportFile(
         `/api/exports/work-sessions.${effectiveFormat}?${query.toString()}`,
@@ -10829,6 +10856,7 @@ function BackgroundExportPanel({ from, to }: { from: Date; to: Date }) {
 export function AnalyticsPage({ me }: { me: Me }) {
   const queryClient = useQueryClient();
   const [days, setDays] = useState(30);
+  const [historicalRange, setHistoricalRange] = useState<HistoricalRange | null>(null);
   const [forecastDays, setForecastDays] = useState(7);
   const [filters, setFilters] = useState<AnalyticsFilterState>(emptyAnalyticsFilters);
   const [filtersOpen, setFiltersOpen] = useState(false);
@@ -10842,11 +10870,11 @@ export function AnalyticsPage({ me }: { me: Me }) {
   }, []);
   const to = useMemo(() => {
     const timezone = getOrganizationTimezone();
-    return zonedInputToDate(`${addDateKey(today, 1)}T00:00:00`, timezone);
-  }, [today]);
+    return historicalRange?.to ?? zonedInputToDate(`${addDateKey(today, 1)}T00:00:00`, timezone);
+  }, [today, historicalRange]);
   const from = useMemo(
-    () => zonedInputToDate(`${addDateKey(today, 1 - days)}T00:00:00`),
-    [days, today],
+    () => historicalRange?.from ?? zonedInputToDate(`${addDateKey(today, 1 - days)}T00:00:00`),
+    [days, today, historicalRange],
   );
   const analyticsUrl = useMemo(() => {
     const query = new URLSearchParams({
@@ -10863,7 +10891,7 @@ export function AnalyticsPage({ me }: { me: Me }) {
     return `/api/analytics/summary?${query.toString()}`;
   }, [filters, forecastDays, from, to]);
   const analytics = useQuery({
-    queryKey: ["analytics", me.user.membershipId, days, forecastDays, filters, today],
+    queryKey: ["analytics", me.user.membershipId, days, forecastDays, filters, today, from.toISOString(), to.toISOString()],
     queryFn: ({ signal }) => api<AnalyticsSummary>(analyticsUrl, { signal }),
     placeholderData: (previous) => previous,
     refetchOnWindowFocus: false,
@@ -10885,7 +10913,7 @@ export function AnalyticsPage({ me }: { me: Me }) {
         days,
         forecastDays,
         emptyAnalyticsFilters,
-        today,
+        today, from.toISOString(), to.toISOString(),
       ],
       refetchType: "none",
     });
@@ -11299,12 +11327,12 @@ export function AnalyticsPage({ me }: { me: Me }) {
             <select
               aria-label="时间范围"
               className={fieldClass}
-              onChange={(event) => setDays(Number(event.target.value))}
+              onChange={(event) => { setDays(Number(event.target.value)); setHistoricalRange(null); }}
               value={days}
             >
               <option value={7}>最近 7 天</option>
               <option value={30}>最近 30 天</option>
-              <option value={90}>最近 90 天</option>
+              <option value={90}>最近 90 天</option><option value={180}>最近半年</option><option value={365}>最近一年</option>
             </select>
             {activeFilterCount ? (
               <Button onClick={clearFilters} size="compact" variant="secondary">
@@ -11317,6 +11345,7 @@ export function AnalyticsPage({ me }: { me: Me }) {
           </>
         }
       />
+      <HistoricalRangePicker onChange={setHistoricalRange} />
       {analytics.data?.availableFilters ? (
         <section
           aria-label="分析联动筛选"
@@ -11361,7 +11390,8 @@ export function AnalyticsPage({ me }: { me: Me }) {
         </Card>
       ) : analytics.data ? (
         <>
-          {canExport ? <BackgroundExportPanel from={from} to={to} /> : null}
+          <FactExplorer from={from} to={to} filters={filters} />
+          {canExport ? <BackgroundExportPanel from={from} to={to} filters={filters} /> : null}
           <div className="analytics-metrics-grid mt-5 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
             <Metric
               hint={`最近 ${days} 天`}
@@ -11685,12 +11715,15 @@ interface AiReportRecord {
 }
 
 interface AiReportDetail extends AiReportRecord {
+  stale?: boolean;
+  inputTruncated?: boolean;
   sources: Array<{
     id: string;
     entityType: string;
     entityId: string;
     entityVersion: string | null;
     label: string;
+    stale?: boolean;
   }>;
 }
 
@@ -12502,7 +12535,7 @@ export function AiPage({ me }: { me: Me }) {
                           {item.job.scope.question || "工作分析"}
                         </div>
                         <div className="max-w-[92%] rounded-2xl rounded-bl-md bg-[var(--surface-subtle)] px-4 py-3 text-sm leading-7">
-                          {item.report?.summary ??
+                          {(item.report ? <AiFactAnswer reportId={item.report.id} text={item.report.summary} /> : null) ??
                             (item.job.status === "failed"
                               ? item.job.errorSummary || "本次回答生成失败，可以重试。"
                               : item.job.status === "cancelled"
@@ -12654,19 +12687,25 @@ export function AiPage({ me }: { me: Me }) {
                 <CardContent>
                   {selectedReport ? (
                     <>
+                      {selectedDetail.data?.stale ? <p className="lifecycle-warning" role="alert">来源记录或项目版本已经变化，这份旧回答需要重新核对并生成。</p> : null}
+                      {selectedDetail.data?.inputTruncated ? <p className="lifecycle-caption">本报告使用了受限明细样本，完整来源清单仍保留；不能把局部样本解释为全量事实。</p> : null}
+                      <AiDraftEditor key={selectedReport.id} report={selectedReport} />
+                      <p className="lifecycle-caption">AI 生成的是待校对草稿，确认前不会提交报告或改写工作记录。没有逐句标记的结论需人工核对。</p>
                       <p className="text-sm leading-7 text-[var(--text-muted)]">
-                        {selectedReport.summary}
+                        <CitedText text={selectedReport.summary} sources={selectedDetail.data?.sources} />
                       </p>
                       <div className="mt-5 grid gap-4 md:grid-cols-3">
                         <InsightList
                           items={
                             selectedReport.structuredOutput.highlights ?? []
                           }
+                          sources={selectedDetail.data?.sources}
                           title={isSalaryReport ? "工资事实" : "进展亮点"}
                           tone="positive"
                         />
                         <InsightList
                           items={selectedReport.structuredOutput.risks ?? []}
+                          sources={selectedDetail.data?.sources}
                           title={isSalaryReport ? "待确认项" : "风险提示"}
                           tone="danger"
                         />
@@ -12674,6 +12713,7 @@ export function AiPage({ me }: { me: Me }) {
                           items={
                             selectedReport.structuredOutput.suggestions ?? []
                           }
+                          sources={selectedDetail.data?.sources}
                           title={isSalaryReport ? "核对建议" : "建议"}
                           tone="info"
                         />
@@ -12690,13 +12730,13 @@ export function AiPage({ me }: { me: Me }) {
                         ) : selectedDetail.data?.sources.length ? (
                           <div className="mt-3 flex flex-wrap gap-2">
                             {selectedDetail.data.sources.map((source) => (
-                              <span
+                              <Link to={sourceHref(source) ?? "/ai"}
                                 className="rounded-lg bg-[var(--surface-subtle)] px-3 py-2 text-xs leading-5 text-[var(--text-muted)]"
                                 key={source.id}
                                 title={`${source.entityType}${source.entityVersion ? ` · v${source.entityVersion}` : ""}`}
                               >
-                                {source.label}
-                              </span>
+                                {source.label}{source.entityVersion ? ` · v${source.entityVersion}` : ""}{source.stale ? " · 来源已变化" : ""}
+                              </Link>
                             ))}
                           </div>
                         ) : (
@@ -12774,10 +12814,12 @@ function InsightList({
   title,
   items,
   tone,
+  sources,
 }: {
   title: string;
   items: string[];
   tone: "positive" | "danger" | "info";
+  sources?: AiReportDetail["sources"] | undefined;
 }) {
   return (
     <div className="rounded-xl bg-[var(--surface-tint)] p-4">
@@ -12787,7 +12829,7 @@ function InsightList({
           {items.map((item, index) => (
             <li className="flex gap-2" key={`${title}-${index}`}>
               <span aria-hidden="true">•</span>
-              <span>{item}</span>
+              <span><CitedText text={item} sources={sources} /></span>
             </li>
           ))}
         </ul>

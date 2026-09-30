@@ -1,9 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
 
 import { DeleteObjectCommand, PutObjectCommand, type S3Client } from "@aws-sdk/client-s3";
-import { and, eq, gte, inArray, isNotNull, isNull, lt, lte, or, sql } from "drizzle-orm";
+import { and, eq, gt, inArray, isNotNull, isNull, lt, lte, or, sql } from "drizzle-orm";
 import type { PgBoss } from "pg-boss";
 import { z } from "zod";
+import { workRecordFiltersSchema, recordRangeNetSeconds } from "@workbench/shared";
 import type { Database } from "@workbench/db";
 import {
   auditLogs,
@@ -17,6 +18,7 @@ import {
   users,
   workSessionProjectLinks,
   workSessions,
+  workBreaks,
   workTypes,
 } from "@workbench/db/schema";
 
@@ -36,6 +38,7 @@ const scopeSchema = z.object({
   from: z.iso.datetime({ offset: true }),
   to: z.iso.datetime({ offset: true }),
   snapshotAt: z.iso.datetime({ offset: true }),
+  filters: workRecordFiltersSchema.default({}),
 });
 
 const fieldPolicySchema = z.object({
@@ -470,11 +473,18 @@ export function createExportJobRuntime(
         eq(workSessions.organizationId, claimed.organizationId),
         policy.organizationWide ? undefined : or(...dataAccessConditions),
         policy.exportOrganizationWide ? undefined : (or(...exportAccessConditions) ?? sql`false`),
-        gte(workSessions.startAt, new Date(scope.from)),
+        gt(workSessions.endAt, new Date(scope.from)),
         lt(workSessions.startAt, new Date(scope.to)),
         lte(workSessions.createdAt, new Date(scope.snapshotAt)),
         eq(workSessions.recordKind, "fact"),
         isNull(workSessions.deletedAt),
+        scope.filters.projectId ? or(inArray(workSessions.primaryProjectNodeId, db.select({ id: projectNodes.id }).from(projectNodes).where(eq(projectNodes.projectId, scope.filters.projectId))), inArray(workSessions.id, db.select({ id: workSessionProjectLinks.workSessionId }).from(workSessionProjectLinks).where(eq(workSessionProjectLinks.projectId, scope.filters.projectId)))) : undefined,
+        scope.filters.nodeId ? or(eq(workSessions.primaryProjectNodeId, scope.filters.nodeId), inArray(workSessions.id, db.select({ id: workSessionProjectLinks.workSessionId }).from(workSessionProjectLinks).where(eq(workSessionProjectLinks.projectNodeId, scope.filters.nodeId)))) : undefined,
+        scope.filters.memberId ? eq(workSessions.membershipId, scope.filters.memberId) : undefined,
+        scope.filters.orgUnitId ? inArray(workSessions.membershipId, db.select({ id: orgMemberships.id }).from(orgMemberships).where(eq(orgMemberships.orgUnitId, scope.filters.orgUnitId))) : undefined,
+        scope.filters.workTypeId ? eq(workSessions.workTypeId, scope.filters.workTypeId) : undefined,
+        scope.filters.approvalState ? eq(workSessions.approvalStatus, scope.filters.approvalState) : undefined,
+        scope.filters.sourceType ? eq(workSessions.source, scope.filters.sourceType) : undefined,
       );
       const [size] = await db
         .select({
@@ -507,6 +517,9 @@ export function createExportJobRuntime(
         .orderBy(workSessions.startAt)
         .limit(MAX_EXPORT_ROWS);
 
+      const breaks = rows.length ? await db.select().from(workBreaks).where(inArray(workBreaks.workSessionId, rows.map((r) => r.session.id))) : [];
+      const bySession = new Map<string, typeof breaks>();
+      for (const entry of breaks) bySession.set(entry.workSessionId, [...(bySession.get(entry.workSessionId) ?? []), entry]);
       const items: WorkSessionExportRow[] = rows.map(({
         session,
         displayName,
@@ -532,6 +545,7 @@ export function createExportJobRuntime(
           grossSeconds: session.grossSeconds,
           breakSeconds: session.breakSeconds,
           netSeconds: session.netSeconds,
+          rangeNetSeconds: recordRangeNetSeconds(session.id, session.startAt, session.endAt, bySession.get(session.id) ?? [], new Date(scope.from), new Date(scope.to)),
           billableSeconds: session.billableSeconds,
           source: session.source,
           content: protectedValue(session.content),

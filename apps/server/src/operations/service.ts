@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import { and, desc, eq, gte, inArray, isNull, lt, or, sql } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import type { Database } from "@workbench/db";
 import {
@@ -11,12 +11,16 @@ import {
   outboxEvents,
   users,
   workSessionProjectLinks,
+  projectNodes,
   workSessions,
+  workBreaks,
 } from "@workbench/db/schema";
 import {
   createWorkSessionSchema,
   parseCsv,
   stringifyCsv,
+  recordRangeNetSeconds,
+  type WorkRecordFilters,
 } from "@workbench/shared";
 
 import type { AnalyticsActor, AnalyticsService } from "../analytics/service.js";
@@ -48,6 +52,7 @@ export interface CreateBackgroundExportInput {
   format: BackgroundExportFormat;
   from: Date;
   to: Date;
+  filters?: WorkRecordFilters | undefined;
 }
 
 function sha256(value: string): string {
@@ -276,6 +281,7 @@ export class OperationsService {
       from: input.from.toISOString(),
       to: input.to.toISOString(),
       snapshotAt: new Date().toISOString(),
+      filters: input.filters ?? {},
     };
     const job = await this.db.transaction(async (tx) => {
       const [created] = await tx
@@ -543,7 +549,27 @@ export class OperationsService {
     return { ...signed, fileName: job.fileName, sha256: job.sha256 };
   }
 
-  async exportWorkSessions(actor: AnalyticsActor, from: Date, to: Date) {
+  private selectedRecords(filters: WorkRecordFilters) {
+    return and(
+      filters.projectId ? or(inArray(workSessions.primaryProjectNodeId, this.db.select({ id: projectNodes.id }).from(projectNodes).where(eq(projectNodes.projectId, filters.projectId))), inArray(workSessions.id, this.db.select({ id: workSessionProjectLinks.workSessionId }).from(workSessionProjectLinks).where(eq(workSessionProjectLinks.projectId, filters.projectId)))) : undefined,
+      filters.nodeId ? or(eq(workSessions.primaryProjectNodeId, filters.nodeId), inArray(workSessions.id, this.db.select({ id: workSessionProjectLinks.workSessionId }).from(workSessionProjectLinks).where(eq(workSessionProjectLinks.projectNodeId, filters.nodeId)))) : undefined,
+      filters.memberId ? eq(workSessions.membershipId, filters.memberId) : undefined,
+      filters.orgUnitId ? inArray(workSessions.membershipId, this.db.select({ id: orgMemberships.id }).from(orgMemberships).where(eq(orgMemberships.orgUnitId, filters.orgUnitId))) : undefined,
+      filters.workTypeId ? eq(workSessions.workTypeId, filters.workTypeId) : undefined,
+      filters.approvalState ? eq(workSessions.approvalStatus, filters.approvalState) : undefined,
+      filters.sourceType ? eq(workSessions.source, filters.sourceType) : undefined,
+    );
+  }
+
+
+  private async assertExportSize(actor: AnalyticsActor, from: Date, to: Date, filters: WorkRecordFilters) {
+    const access = await this.analytics.buildAccessCondition(actor);
+    const [size] = await this.db.select({ rows: sql<number>`count(*)::integer`, bytes: sql<string>`coalesce(sum(octet_length(${workSessions.content}) + octet_length(${workSessions.result}) + octet_length(${workSessions.blockers}) + octet_length(${workSessions.nextStep})), 0)::bigint` }).from(workSessions).innerJoin(orgMemberships, eq(orgMemberships.id, workSessions.membershipId)).where(and(access, this.exportAccessCondition(actor), this.selectedRecords(filters), gt(workSessions.endAt, from), lt(workSessions.startAt, to), eq(workSessions.recordKind, "fact"), isNull(workSessions.deletedAt)));
+    if (Number(size?.rows ?? 0) > 50_000 || Number(size?.bytes ?? 0) > 25 * 1024 * 1024) throw new ExportJobError("export_too_large", "导出超过 5 万条或 25 MiB 文字，请按月份、成员或项目拆分；系统不会截断数据。", 413);
+  }
+
+  async exportWorkSessions(actor: AnalyticsActor, from: Date, to: Date, filters: WorkRecordFilters = {}) {
+    await this.assertExportSize(actor, from, to, filters);
     const access = await this.analytics.buildAccessCondition(actor);
     const rows = await this.db
       .select({
@@ -554,32 +580,44 @@ export class OperationsService {
       .from(workSessions)
       .innerJoin(orgMemberships, eq(orgMemberships.id, workSessions.membershipId))
       .innerJoin(users, eq(users.id, orgMemberships.userId))
-      .where(and(access, this.exportAccessCondition(actor), gte(workSessions.startAt, from), lt(workSessions.startAt, to), eq(workSessions.recordKind, "fact"), isNull(workSessions.deletedAt)))
-      .orderBy(workSessions.startAt);
+      .where(and(access, this.exportAccessCondition(actor), this.selectedRecords(filters), gt(workSessions.endAt, from), lt(workSessions.startAt, to), eq(workSessions.recordKind, "fact"), isNull(workSessions.deletedAt)))
+      .orderBy(workSessions.startAt).limit(50_001);
+    if (rows.length > 50_000 || rows.reduce((size, r) => size + Buffer.byteLength(r.session.content + r.session.result + r.session.blockers + r.session.nextStep), 0) > 25 * 1024 * 1024) throw new ExportJobError("export_too_large", "导出超过 5 万条或 25 MiB 文字，请按月份、成员或项目拆分范围；未截断数据。", 413);
+    const breaks = rows.length ? await this.db.select().from(workBreaks).where(inArray(workBreaks.workSessionId, rows.map((r) => r.session.id))) : [];
+    const bySession = new Map<string, typeof breaks>();
+    for (const entry of breaks) bySession.set(entry.workSessionId, [...(bySession.get(entry.workSessionId) ?? []), entry]);
+    const ranges = new Map(rows.map(({ session: r }) => [r.id, recordRangeNetSeconds(r.id, r.startAt, r.endAt, bySession.get(r.id) ?? [], from, to)]));
     const includeContent = actor.grants.some((grant) => grant.permission === "work.view_full_scope" && grant.scopeKind === "organization");
     const csv = stringifyCsv([
-      ["id", "membershipId", "member", "startAt", "endAt", "timezone", "grossSeconds", "breakSeconds", "netSeconds", "source", "content", "result", "visibility", "submissionStatus", "approvalStatus", "version"],
-      ...rows.map(({ session, membershipId, displayName }) => [session.id, membershipId, displayName, session.startAt.toISOString(), session.endAt.toISOString(), session.timezone, session.grossSeconds, session.breakSeconds, session.netSeconds, session.source, includeContent || session.membershipId === actor.membershipId ? session.content : "[按字段策略隐藏]", includeContent || session.membershipId === actor.membershipId ? session.result : "[按字段策略隐藏]", session.visibility, session.submissionStatus, session.approvalStatus, session.version]),
+      ["id", "membershipId", "member", "startAt", "endAt", "timezone", "grossSeconds", "breakSeconds", "netSeconds", "source", "content", "result", "visibility", "submissionStatus", "approvalStatus", "version", "rangeNetSeconds", "blockers", "nextStep"],
+      ...rows.map(({ session, membershipId, displayName }) => [session.id, membershipId, displayName, session.startAt.toISOString(), session.endAt.toISOString(), session.timezone, session.grossSeconds, session.breakSeconds, session.netSeconds, session.source, includeContent || session.membershipId === actor.membershipId ? session.content : "[按字段策略隐藏]", includeContent || session.membershipId === actor.membershipId ? session.result : "[按字段策略隐藏]", session.visibility, session.submissionStatus, session.approvalStatus, session.version, ranges.get(session.id) ?? 0, includeContent || membershipId === actor.membershipId ? session.blockers : "[按字段策略隐藏]", includeContent || membershipId === actor.membershipId ? session.nextStep : "[按字段策略隐藏]"]),
     ].map((row) => row.map(safeSpreadsheetCell)));
     // The HTTP response includes a UTF-8 BOM for spreadsheet compatibility.
     const digest = sha256(`\uFEFF${csv}`);
-    const [job] = await this.db.insert(exportJobs).values({ organizationId: actor.organizationId, requestedBy: actor.membershipId, format: "csv", exportType: "work_sessions", scope: { from, to }, fieldPolicySnapshot: { includeContent }, status: "completed", sha256: digest, completedAt: new Date(), expiresAt: new Date(Date.now() + 24 * 60 * 60_000) }).returning();
+    const [job] = await this.db.insert(exportJobs).values({ organizationId: actor.organizationId, requestedBy: actor.membershipId, format: "csv", exportType: "work_sessions", scope: { from, to, filters }, fieldPolicySnapshot: { includeContent }, status: "completed", sha256: digest, completedAt: new Date(), expiresAt: new Date(Date.now() + 24 * 60 * 60_000) }).returning();
     if (job) await this.db.insert(auditLogs).values({ organizationId: actor.organizationId, actorMembershipId: actor.membershipId, action: "export.work_sessions", entityType: "export", entityId: job.id, after: { rowCount: rows.length, sha256: digest, includeContent } });
     return { csv, sha256: digest, rowCount: rows.length };
   }
 
-  async exportWorkSessionsJson(actor: AnalyticsActor, from: Date, to: Date) {
+  async exportWorkSessionsJson(actor: AnalyticsActor, from: Date, to: Date, filters: WorkRecordFilters = {}) {
+    await this.assertExportSize(actor, from, to, filters);
     const access = await this.analytics.buildAccessCondition(actor);
     const rows = await this.db
       .select({ session: workSessions, membershipId: workSessions.membershipId, displayName: users.displayName })
       .from(workSessions)
       .innerJoin(orgMemberships, eq(orgMemberships.id, workSessions.membershipId))
       .innerJoin(users, eq(users.id, orgMemberships.userId))
-      .where(and(access, this.exportAccessCondition(actor), gte(workSessions.startAt, from), lt(workSessions.startAt, to), eq(workSessions.recordKind, "fact"), isNull(workSessions.deletedAt)))
-      .orderBy(workSessions.startAt);
+      .where(and(access, this.exportAccessCondition(actor), this.selectedRecords(filters), gt(workSessions.endAt, from), lt(workSessions.startAt, to), eq(workSessions.recordKind, "fact"), isNull(workSessions.deletedAt)))
+      .orderBy(workSessions.startAt).limit(50_001);
+    if (rows.length > 50_000 || rows.reduce((size, r) => size + Buffer.byteLength(r.session.content + r.session.result + r.session.blockers + r.session.nextStep), 0) > 25 * 1024 * 1024) throw new ExportJobError("export_too_large", "导出超过 5 万条或 25 MiB 文字，请按月份、成员或项目拆分范围；未截断数据。", 413);
+    const breaks = rows.length ? await this.db.select().from(workBreaks).where(inArray(workBreaks.workSessionId, rows.map((r) => r.session.id))) : [];
+    const bySession = new Map<string, typeof breaks>();
+    for (const entry of breaks) bySession.set(entry.workSessionId, [...(bySession.get(entry.workSessionId) ?? []), entry]);
+    const ranges = new Map(rows.map(({ session: r }) => [r.id, recordRangeNetSeconds(r.id, r.startAt, r.endAt, bySession.get(r.id) ?? [], from, to)]));
     const includeContent = actor.grants.some((grant) => grant.permission === "work.view_full_scope" && grant.scopeKind === "organization");
     const payload = {
       schemaVersion: 1,
+      dateSemantics: "[from, to); 记录按相交范围选取；netSeconds 是整条时长，rangeNetSeconds 是范围内扣除休息后的完整秒数。",
       exportedAt: new Date().toISOString(),
       range: { from: from.toISOString(), to: to.toISOString() },
       rowCount: rows.length,
@@ -593,6 +631,9 @@ export class OperationsService {
         grossSeconds: session.grossSeconds,
         breakSeconds: session.breakSeconds,
         netSeconds: session.netSeconds,
+        rangeNetSeconds: ranges.get(session.id) ?? 0,
+        blockers: includeContent || membershipId === actor.membershipId ? session.blockers : "[按字段策略隐藏]",
+        nextStep: includeContent || membershipId === actor.membershipId ? session.nextStep : "[按字段策略隐藏]",
         source: session.source,
         content: includeContent || membershipId === actor.membershipId ? session.content : "[按字段策略隐藏]",
         result: includeContent || membershipId === actor.membershipId ? session.result : "[按字段策略隐藏]",
@@ -604,7 +645,7 @@ export class OperationsService {
     };
     const json = JSON.stringify(payload, null, 2);
     const digest = sha256(json);
-    const [job] = await this.db.insert(exportJobs).values({ organizationId: actor.organizationId, requestedBy: actor.membershipId, format: "json", exportType: "work_sessions", scope: { from, to }, fieldPolicySnapshot: { includeContent }, status: "completed", sha256: digest, completedAt: new Date(), expiresAt: new Date(Date.now() + 24 * 60 * 60_000) }).returning();
+    const [job] = await this.db.insert(exportJobs).values({ organizationId: actor.organizationId, requestedBy: actor.membershipId, format: "json", exportType: "work_sessions", scope: { from, to, filters }, fieldPolicySnapshot: { includeContent }, status: "completed", sha256: digest, completedAt: new Date(), expiresAt: new Date(Date.now() + 24 * 60 * 60_000) }).returning();
     if (job) await this.db.insert(auditLogs).values({ organizationId: actor.organizationId, actorMembershipId: actor.membershipId, action: "export.work_sessions_json", entityType: "export", entityId: job.id, after: { rowCount: rows.length, sha256: digest, includeContent } });
     return { json, sha256: digest, rowCount: rows.length };
   }

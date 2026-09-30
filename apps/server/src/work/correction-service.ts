@@ -12,9 +12,17 @@ import {
   workSessionCorrections,
   workSessionProjectLinks,
   workSessions,
+  workBreaks,
+  workSessionVersions,
+  projectNodes,
+  projectMembers,
+  projects,
+  outboxEvents,
 } from "@workbench/db/schema";
 import {
   calculateWorkDuration,
+  createWorkSessionSchema,
+  workDurationAnomalyFlags,
   hasPermission,
   type CreateWorkSessionInput,
   type PermissionGrant,
@@ -118,6 +126,7 @@ export class WorkCorrectionService {
     }
 
     return this.db.transaction(async (tx) => {
+      await lockPayrollInputs(tx, actor.organizationId);
       // One pending proposal per original record makes a correction a clear
       // conversation rather than a race between browser tabs.
       await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${sessionId}))`);
@@ -130,7 +139,7 @@ export class WorkCorrectionService {
             eq(workSessions.organizationId, actor.organizationId),
             eq(workSessions.membershipId, actor.membershipId),
             eq(workSessions.recordKind, "fact"),
-            eq(workSessions.approvalStatus, "locked"),
+            inArray(workSessions.approvalStatus, ["approved", "locked", "not_requested", "returned"]),
             isNull(workSessions.deletedAt),
           ),
         )
@@ -138,7 +147,7 @@ export class WorkCorrectionService {
         .limit(1);
       if (!session) {
         throw new WorkCorrectionConflictError(
-          "只有已结算并锁定的本人记录可以发起更正申请。",
+          "只有未在审核中且属于本人的事实记录可以发起更正申请；待审记录请先撤回。",
         );
       }
       if (proposal.source !== session.source) {
@@ -339,10 +348,8 @@ export class WorkCorrectionService {
           "原始记录版本已变化，不能将旧提案应用到新的事实状态。",
         );
       }
-      if (
-        record.session.approvalStatus !== "locked" ||
-        record.session.lockedAt === null
-      ) {
+      const lockedCorrection = record.session.approvalStatus === "locked" && record.session.lockedAt !== null;
+      if (!lockedCorrection && !["approved", "not_requested", "returned"].includes(record.session.approvalStatus)) {
         throw new WorkCorrectionConflictError(
           "原始记录已不处于结算锁定状态，不能继续按已结算更正流程处理。",
         );
@@ -369,6 +376,37 @@ export class WorkCorrectionService {
           reason: input.reviewNote,
         });
         return { correction, adjustment: null, nextOpenPeriod: null };
+      }
+
+      if (!lockedCorrection) {
+        if (input.adjustment) throw new WorkCorrectionValidationError("尚未锁定的记录更正后重新审批、重新计算本期金额，不使用跨期金额调整。");
+        const payload = record.correction.proposedSnapshot as { workSession?: unknown };
+        const parsed = createWorkSessionSchema.safeParse(payload.workSession);
+        if (!parsed.success) throw new WorkCorrectionValidationError("更正提案结构无效，请重新提交。");
+        const proposal = parsed.data;
+        if (proposal.source !== record.session.source || new Date(proposal.endAt) > new Date(Date.now() + 5 * 60_000)) throw new WorkCorrectionValidationError("更正必须保留原始来源并描述已发生的工作。");
+        const startAt = new Date(proposal.startAt); const endAt = new Date(proposal.endAt);
+        const breaks = proposal.breaks.map((b) => ({ startAt: new Date(b.startAt), endAt: new Date(b.endAt) }));
+        const duration = calculateWorkDuration({ startAt, endAt }, breaks);
+        const [lockedPeriod] = await tx.select({ id: payPeriods.id }).from(payPeriods).where(and(eq(payPeriods.organizationId, actor.organizationId), inArray(payPeriods.status, ["settled", "locked"]), lt(payPeriods.startsAt, endAt), gt(payPeriods.endsAt, startAt))).limit(1);
+        if (lockedPeriod) throw new WorkCorrectionConflictError("更正时段涉及已锁定周期，请使用跨期更正而不能改写该周期事实。");
+        const [overlap] = await tx.select({ id: workSessions.id }).from(workSessions).where(and(eq(workSessions.organizationId, actor.organizationId), eq(workSessions.membershipId, record.session.membershipId), ne(workSessions.id, record.session.id), eq(workSessions.recordKind, "fact"), isNull(workSessions.deletedAt), lt(workSessions.startAt, endAt), gt(workSessions.endAt, startAt))).limit(1);
+        if (overlap && !proposal.parallelWork) throw new WorkCorrectionValidationError("更正后的时段与其他事实记录重叠，请核对时间或明确标记并行工作后重新申请。");
+        const nodeIds = [...new Set([...proposal.projectNodeIds, ...(proposal.primaryProjectNodeId ? [proposal.primaryProjectNodeId] : [])])];
+        const nodes = nodeIds.length ? await tx.select({ id: projectNodes.id, projectId: projectNodes.projectId, branchId: projectNodes.branchId }).from(projectNodes).innerJoin(projects, eq(projects.id, projectNodes.projectId)).innerJoin(projectMembers, and(eq(projectMembers.projectId, projectNodes.projectId), eq(projectMembers.membershipId, record.session.membershipId), isNull(projectMembers.leftAt))).where(and(eq(projects.organizationId, actor.organizationId), isNull(projects.deletedAt), inArray(projectNodes.id, nodeIds), isNull(projectNodes.deletedAt))) : [];
+        if (new Set(nodes.map((n) => n.id)).size !== nodeIds.length) throw new WorkCorrectionValidationError("关联节点已删除或成员已不在相关项目，请核对提案的项目归属。");
+        const [oldBreaks, oldLinks] = await Promise.all([tx.select().from(workBreaks).where(eq(workBreaks.workSessionId, record.session.id)), tx.select().from(workSessionProjectLinks).where(eq(workSessionProjectLinks.workSessionId, record.session.id))]);
+        const [updated] = await tx.update(workSessions).set({ startAt, endAt, timezone: proposal.timezone, content: proposal.content, result: proposal.result, blockers: proposal.blockers, nextStep: proposal.nextStep, visibility: proposal.visibility, parallelWork: proposal.parallelWork, primaryProjectNodeId: proposal.primaryProjectNodeId ?? null, grossSeconds: duration.grossSeconds, breakSeconds: duration.breakSeconds, netSeconds: duration.netSeconds, billableSeconds: null, submissionStatus: "draft", approvalStatus: "not_requested", submittedAt: null, version: record.session.version + 1, updatedAt: new Date(), anomalyFlags: [...workDurationAnomalyFlags(duration), ...(overlap ? ["overlapping_work_requires_review"] : [])] }).where(eq(workSessions.id, record.session.id)).returning();
+        await tx.delete(workBreaks).where(eq(workBreaks.workSessionId, record.session.id));
+        if (breaks.length) await tx.insert(workBreaks).values(breaks.map((b) => ({ workSessionId: record.session.id, ...b })));
+        await tx.delete(workSessionProjectLinks).where(eq(workSessionProjectLinks.workSessionId, record.session.id));
+        const newLinks = nodes.map((n) => ({ workSessionId: record.session.id, projectId: n.projectId, projectNodeId: n.id, projectBranchId: n.branchId, isPrimary: n.id === proposal.primaryProjectNodeId }));
+        if (newLinks.length) await tx.insert(workSessionProjectLinks).values(newLinks);
+        await tx.insert(workSessionVersions).values({ workSessionId: record.session.id, version: updated!.version, snapshot: { ...updated, breaks, projectLinks: newLinks }, changeReason: "reviewed_correction_requires_resubmission", changedBy: actor.membershipId });
+        const [correction] = await tx.update(workSessionCorrections).set({ status: "approved", reviewedBy: actor.membershipId, reviewedAt: new Date() }).where(eq(workSessionCorrections.id, record.correction.id)).returning();
+        await tx.insert(auditLogs).values({ organizationId: actor.organizationId, actorMembershipId: actor.membershipId, action: "work_session.correction_applied_draft", entityType: "work_session", entityId: record.session.id, before: { ...record.session, breaks: oldBreaks, projectLinks: oldLinks }, after: updated, reason: input.reviewNote ?? record.correction.reason });
+        await tx.insert(outboxEvents).values({ organizationId: actor.organizationId, eventType: "work_session.changed", entityType: "work_session", entityId: record.session.id, entityVersion: updated!.version, payload: { change: "correction_applied_draft" } });
+        return { correction: correction!, adjustment: null, nextOpenPeriod: null };
       }
 
       let adjustment: typeof payrollAdjustments.$inferSelect | null = null;

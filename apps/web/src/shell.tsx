@@ -1,3 +1,4 @@
+import { AiFactAnswer } from "./lifecycle-workbench.js";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowUpRight,
@@ -1414,7 +1415,7 @@ export function AppShell({
                       {item.job.scope.question || "页面分析"}
                     </div>
                     <div className="max-w-[94%] rounded-2xl rounded-bl-md bg-[var(--surface-subtle)] px-3 py-2.5 text-sm leading-6">
-                      {item.report?.summary ??
+                      {(item.report ? <AiFactAnswer reportId={item.report.id} text={item.report.summary} /> : null) ??
                         (item.job.status === "failed"
                           ? item.job.errorSummary || "本次回答生成失败。"
                           : item.job.status === "cancelled"

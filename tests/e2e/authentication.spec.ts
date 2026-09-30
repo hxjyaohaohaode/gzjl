@@ -859,10 +859,10 @@ test("Owner can configure a versioned hourly plan and create a pay period", asyn
     },
   ]);
 
-  await expect(page.getByLabel("预计发薪日（每月）")).toHaveValue("15");
-  await expect(page.getByLabel("预计发薪时间", { exact: true })).toHaveValue("18:00");
-  await page.getByLabel("预计发薪时间", { exact: true }).fill("09:30");
-  await page.getByRole("button", { name: "保存预计发薪时间" }).click();
+  await expect(page.getByLabel("结算截止日（每月）")).toHaveValue("15");
+  await expect(page.getByLabel("结算截止 / 计划导出时间", { exact: true })).toHaveValue("18:00");
+  await page.getByLabel("结算截止 / 计划导出时间", { exact: true }).fill("09:30");
+  await page.getByRole("button", { name: "保存结算截止 / 计划导出时间" }).click();
   await expect.poll(() => settingsPayload).toEqual({
     payrollCutoffDay: 15,
     payrollCutoffMinute: 570,
@@ -1244,6 +1244,34 @@ test("personal payroll renders reconciled totals, daily pay, period trend, and c
   await expect(page.getByRole("paragraph").filter({ hasText: /^补贴$/ })).toBeVisible();
   await page.getByRole("button", { name: "确认已收到薪资" }).click();
   await expect.poll(() => acknowledgedPayslip).toBe(true);
+});
+
+test("payroll managers follow their own cited item and missing sources cannot select an unrelated payslip", async ({ page }) => {
+  await mockAuthenticatedWorkspace(page);
+  await page.route("**/api/payroll/me", (route) => route.fulfill({ json: {
+    currentPlan: null, livePreview: null, summary: [], items: [{
+      item: { id: "cited-own-item", currency: "CNY", approvedSeconds: 3600, pendingSeconds: 0, grossAmount: "123.00", adjustmentAmount: "2.00", finalAmount: "125.00", estimate: false, needsReview: false },
+      run: { id: "own-run", runNumber: 1, status: "ready", calculationVersion: "verified" },
+      period: { id: "own-period", name: "本人来源验收周期", startsAt: "2026-09-01T00:00:00.000Z", endsAt: "2026-10-01T00:00:00.000Z", status: "open" },
+      payslip: null, dailyBreakdown: [], components: [{ id: "cited-own-component", type: "base", label: "本人已核对基础工时", quantity: "3600", unit: "second", rate: "123.00", multiplier: "1.00", amount: "123.00" }],
+    }],
+  } }));
+  await page.goto("/login");
+  await page.getByLabel("邮箱或手机号").fill("owner@example.test");
+  await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+  await expect(page).not.toHaveURL(/\/login(?:[?#].*)?$/);
+  await page.goto("/payroll?source=cited-own-component");
+  await expect(page.getByRole("heading", { name: "我的薪资", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "计薪明细", exact: true })).toBeVisible();
+  await expect(page.getByText("本人已核对基础工时", { exact: true })).toBeVisible();
+  await expect(page.getByRole("link", { name: "返回组织薪资管理" })).toBeVisible();
+  await page.goto("/payroll?source=unknown-old-source");
+  await expect(page.getByRole("alert").filter({ hasText: "该来源未出现在当前授权与日期范围内" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "计薪明细", exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "查看当前可用薪资批次" }).click();
+  await expect(page).toHaveURL(/\/payroll\?view=own$/);
+  await expect(page.getByText("本人已核对基础工时", { exact: true })).toBeVisible();
 });
 
 test("contact verification consumes a fragment capability without leaving it in the address bar", async ({
@@ -2801,7 +2829,7 @@ test("CSV export remains usable when private object storage is unavailable", asy
   const download = page.waitForEvent("download");
   await page.getByRole("button", { name: "直接导出" }).click();
   const completedDownload = await download;
-  expect(completedDownload.suggestedFilename()).toBe("work-sessions.csv");
+  expect(completedDownload.suggestedFilename()).toMatch(/^工作记录-\d{4}-\d{2}-\d{2}-\d{4}-\d{2}-\d{2}\.csv$/);
   const stream = await completedDownload.createReadStream();
   const chunks: Buffer[] = [];
   for await (const chunk of stream) chunks.push(Buffer.from(chunk));
@@ -6334,7 +6362,13 @@ for (const scenario of [
     await expect(page.getByRole("alert").filter({ hasText: "读取失败，请重试核对" }).first()).toBeVisible();
     await expect(page.getByRole("heading", { name: scenario.empty, exact: true })).toHaveCount(0);
     fail = false;
-    await page.getByRole("button", { name: "重新加载", exact: true }).first().click();
+    try {
+      await page.getByRole("button", { name: "重新加载", exact: true }).first().click({ timeout: 5_000 });
+    } catch (error) {
+      // Reconnect can already recover the read while Playwright scrolls to the
+      // retry control. Only accept that race when the original error is gone.
+      if (await page.getByRole("alert").filter({ hasText: "读取失败，请重试核对" }).count()) throw error;
+    }
     await expect(page.getByRole("alert").filter({ hasText: "读取失败，请重试核对" })).toHaveCount(0);
   });
 }
@@ -6370,7 +6404,8 @@ test("resilience: an invalid export can be retried without downloading an error 
   expect(downloads).toEqual([]);
   failed = false;
   await page.getByRole("button", { name: "直接导出", exact: true }).click();
-  await expect.poll(() => downloads).toEqual(["work-sessions.csv"]);
+  await expect.poll(() => downloads.length).toBe(1);
+  expect(downloads[0]).toMatch(/^工作记录-\d{4}-\d{2}-\d{2}-\d{4}-\d{2}-\d{2}\.csv$/);
   await expect(page.getByRole("status").filter({ hasText: "已生成导出文件" })).toBeVisible();
   await expect(page.getByRole("alert").filter({ hasText: "有效的导出文件" })).toHaveCount(0);
 });
