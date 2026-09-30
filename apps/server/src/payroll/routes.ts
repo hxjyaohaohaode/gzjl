@@ -106,7 +106,13 @@ export async function registerPayrollRoutes(
   }
 
   if (reimbursements) {
-    app.get("/api/reimbursements", { preHandler: authenticate }, async (request) => reimbursements.list(request.auth!));
+    app.get("/api/reimbursements", { preHandler: authenticate }, async (request) => {
+      const query = z.object({ from: z.iso.date().optional(), to: z.iso.date().optional(), pendingOnly: z.enum(["true", "false"]).transform((value) => value === "true").optional(), id: z.uuid().optional(),
+        limit: z.coerce.number().int().min(1).max(100).default(100),
+        before: z.string().refine((value) => { const [at, id, extra] = value.split("|"); return extra === undefined && z.iso.datetime({ offset: true }).safeParse(at).success && z.uuid().safeParse(id).success; }, "分页游标无效。").optional(),
+      }).refine((value) => (!value.from && !value.to) || Boolean(value.from && value.to && value.to > value.from && Date.parse(value.to) - Date.parse(value.from) <= 366 * 86_400_000), "日期须成对指定，结束不含，范围为正且最多 366 天。").parse(request.query);
+      return reimbursements.list(request.auth!, query);
+    });
     app.post("/api/reimbursements", { preHandler: [app.csrfProtection, authenticate, ownPermission] }, async (request, reply) => {
       const input = z.object({ title: z.string().trim().min(2).max(120), description: z.string().trim().min(2).max(4000),
         expenseDate: z.iso.date(), amount: money.refine((value) => Number(value) > 0, "报销金额必须大于零。"),

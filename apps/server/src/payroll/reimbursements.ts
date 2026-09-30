@@ -1,7 +1,7 @@
-import { and, desc, eq, gt, inArray, isNull, lt, ne, or, sql } from "drizzle-orm";
+import { and, desc, eq, gt, gte, inArray, isNull, lt, ne, or, sql } from "drizzle-orm";
 import type { Database } from "@workbench/db";
-import { attachmentLinks, attachments, auditLogs, compensationPlans, compensationPlanVersions, notifications, outboxEvents, payPeriods, payrollAdjustments, payrollRuns, reimbursementRequests, users, orgMemberships } from "@workbench/db/schema";
-import { hasPermission } from "@workbench/shared";
+import { attachmentLinks, attachments, auditLogs, compensationPlans, compensationPlanVersions, notifications, organizations, outboxEvents, payPeriods, payrollAdjustments, payrollRuns, reimbursementRequests, users, orgMemberships } from "@workbench/db/schema";
+import { hasPermission, zonedCalendarTime } from "@workbench/shared";
 import type { AuthContext } from "../auth/service.js";
 import { PayrollConflictError, PayrollNotFoundError } from "./service.js";
 import { lockPayrollInputs } from "./input-lock.js";
@@ -12,20 +12,42 @@ export const canReviewReimbursements = (actor: AuthContext) =>
 export class ReimbursementService {
   constructor(private readonly db: Database) {}
 
-  async list(actor: AuthContext) {
+  async list(actor: AuthContext, input: { from?: string | undefined; to?: string | undefined; pendingOnly?: boolean | undefined; id?: string | undefined; before?: string | undefined; limit?: number | undefined } = {}) {
     const reviewer = canReviewReimbursements(actor);
+    const [organization] = await this.db.select({ timezone: organizations.timezone }).from(organizations).where(eq(organizations.id, actor.organizationId));
+    const timezone = organization?.timezone ?? "Asia/Shanghai";
+    const parts = new Intl.DateTimeFormat("en-CA", { timeZone: timezone, year: "numeric", month: "2-digit" }).formatToParts(new Date());
+    const year = Number(parts.find((part) => part.type === "year")!.value), month = Number(parts.find((part) => part.type === "month")!.value);
+    const from = input.from ?? `${year}-${String(month).padStart(2, "0")}-01`;
+    const to = input.to ?? new Date(Date.UTC(year, month, 1)).toISOString().slice(0, 10);
+    const boundary = (value: string) => { const [y, m, d] = value.split("-").map(Number); return zonedCalendarTime(y!, m!, d!, 0, 0, timezone); };
+    const [beforeAt, beforeId] = input.before?.split("|") ?? [];
+    const limit = input.limit ?? 100;
+    // Approved expenses belong to their assigned salary period's start month.
+    // Unapproved expenses use their expense date. This also keeps legacy
+    // periods with an imprecise end boundary from leaking into the next month.
+    // A September expense explicitly approved into October remains October's
+    // payable; approval never silently moves an already assigned adjustment.
+    const range = or(
+      and(eq(reimbursementRequests.status, "approved"), gte(payPeriods.startsAt, boundary(from)), lt(payPeriods.startsAt, boundary(to))),
+      and(ne(reimbursementRequests.status, "approved"), sql`${reimbursementRequests.expenseDate} >= ${from}`, sql`${reimbursementRequests.expenseDate} < ${to}`),
+    );
     const items = await this.db.select({ request: reimbursementRequests, memberName: users.displayName, periodName: payPeriods.name, periodStatus: payPeriods.status })
       .from(reimbursementRequests)
       .innerJoin(orgMemberships, eq(orgMemberships.id, reimbursementRequests.membershipId))
       .innerJoin(users, eq(users.id, orgMemberships.userId))
       .leftJoin(payPeriods, eq(payPeriods.id, reimbursementRequests.payPeriodId))
       .where(and(eq(reimbursementRequests.organizationId, actor.organizationId),
-        reviewer ? or(eq(reimbursementRequests.membershipId, actor.membershipId), ne(reimbursementRequests.status, "draft")) : eq(reimbursementRequests.membershipId, actor.membershipId)))
-      .orderBy(desc(reimbursementRequests.createdAt)).limit(200);
+        reviewer ? or(eq(reimbursementRequests.membershipId, actor.membershipId), ne(reimbursementRequests.status, "draft")) : eq(reimbursementRequests.membershipId, actor.membershipId),
+        input.id ? eq(reimbursementRequests.id, input.id) : input.pendingOnly ? eq(reimbursementRequests.status, "pending") : range,
+        beforeAt && beforeId ? or(lt(reimbursementRequests.createdAt, new Date(beforeAt)), and(eq(reimbursementRequests.createdAt, new Date(beforeAt)), lt(reimbursementRequests.id, beforeId))) : undefined))
+      .orderBy(desc(reimbursementRequests.createdAt), desc(reimbursementRequests.id)).limit(limit + 1);
     const periods = reviewer ? await this.db.select().from(payPeriods)
       .where(and(eq(payPeriods.organizationId, actor.organizationId), eq(payPeriods.status, "open")))
       .orderBy(desc(payPeriods.startsAt)) : [];
-    return { items: items.map(({ request, ...details }) => ({ ...request, ...details })), periods, canReview: reviewer, membershipId: actor.membershipId };
+    const page = items.slice(0, limit), last = page.at(-1)?.request;
+    return { items: page.map(({ request, ...details }) => ({ ...request, ...details })), periods, canReview: reviewer, membershipId: actor.membershipId,
+      range: { from, to, timezone }, nextCursor: items.length > limit && last ? `${last.createdAt.toISOString()}|${last.id}` : null };
   }
 
   async create(actor: AuthContext, input: { title: string; description: string; expenseDate: string; amount: string; currency: string }) {

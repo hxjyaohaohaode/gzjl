@@ -106,6 +106,12 @@ test("real API, database and file bytes connect the employee and management work
       endsAt: new Date(Date.now() + 86400_000).toISOString(), cutoffAt: new Date(Date.now() + 86400_000).toISOString(),
     })).period;
     await employee.goto("/payroll");
+    await owner.goto("/payroll");
+    const monthInput = owner.getByLabel("结算月份", { exact: true });
+    const savedMonth = await monthInput.inputValue();
+    await monthInput.evaluate((element) => { (element as HTMLInputElement).type = "text"; });
+    await monthInput.fill("2026-"); await expect(owner.getByRole("button", { name: "创建薪资周期" })).toBeDisabled();
+    await monthInput.fill(savedMonth); await expect(owner.getByRole("button", { name: "创建薪资周期" })).toBeEnabled();
     await employee.getByRole("button", { name: "申请报销", exact: true }).click();
     await employee.getByLabel("报销事项", { exact: true }).fill(`交通报销${suffix}`);
     await employee.getByLabel("发生日期").fill(new Date().toISOString().slice(0, 10));

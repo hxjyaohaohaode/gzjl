@@ -5,12 +5,15 @@ import { drizzle } from "drizzle-orm/pglite";
 import { eq } from "drizzle-orm";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { Database } from "@workbench/db";
-import { attachments, compensationPlans, compensationPlanVersions, notifications, organizations, orgMemberships, payPeriods, payrollAdjustments, payrollItems, payrollItemComponents, users, workSessions } from "@workbench/db/schema";
+import { attachments, compensationPlans, compensationPlanVersions, notifications, organizations, orgMemberships, payPeriods, payrollAdjustments, payrollItems, payrollItemComponents, reimbursementRequests, users, workSessions } from "@workbench/db/schema";
 import type { AuthContext } from "../auth/service.js";
 import { loadServerConfig } from "../config.js";
 import { EvidenceService } from "../evidence/service.js";
 import { PayrollService } from "./service.js";
 import { ReimbursementService } from "./reimbursements.js";
+import { PayrollHandoffService } from "./handoff.js";
+import { capturePayrollWorkbook } from "./bundle.js";
+import ExcelJS from "exceljs";
 
 const clients: PGlite[] = [];
 beforeEach(() => { vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(new Date("2026-09-08T12:00:00Z")); });
@@ -87,4 +90,64 @@ it("prorates daily subsidies but pays a period-end subsidy only from the final e
   const components = await db.select().from(payrollItemComponents);
   expect(components.filter((item) => item.label === "交通").map((item) => item.amount)).toEqual(["150.000000", "300.000000"]);
   expect(components.filter((item) => item.label === "月末").map((item) => item.amount)).toEqual(["0.000000", "200.000000"]);
+});
+
+it("keeps approved expenses in their assigned month and preserves historical, pending and notification access", async () => {
+  const { db, employee, reviewer, period, expense, evidence, payroll } = await fixture();
+  await db.update(organizations).set({ timezone: "Asia/Shanghai" }).where(eq(organizations.id, employee.organizationId));
+  const approve = async (title: string, expenseDate: string, assigned: string, amount: string) => {
+    const claim = await expense.create(employee, { title, description: "核对跨月归属", expenseDate, amount, currency: "CNY" });
+    await evidence.createReference(employee, claim.id, { kind: "text", textContent: "已核验费用凭证", visibility: "management_only" });
+    const pending = await expense.act(employee, claim.id, { action: "submit", expectedVersion: claim.version });
+    return expense.act(reviewer, claim.id, { action: "approve", expectedVersion: pending.version, payPeriodId: assigned });
+  };
+  const september = await approve("九月已批准交通费", "2026-09-03", period.id, "128.35");
+  vi.setSystemTime(new Date("2026-10-02T12:00:00Z"));
+  const [october] = await db.insert(payPeriods).values({ organizationId: employee.organizationId, name: "十月", timezone: "Asia/Shanghai", startsAt: new Date("2026-09-30T16:00:00Z"), endsAt: new Date("2026-10-31T16:00:00Z"), cutoffAt: new Date("2026-11-05T10:00:00Z") }).returning();
+  const late = await approve("八月费用明确计入十月", "2026-08-15", october!.id, "20.01");
+  const pending = await expense.create(employee, { title: "九月尚待审批", description: "不能从历史待办遗漏", expenseDate: "2026-09-30", amount: "10", currency: "CNY" });
+  await evidence.createReference(employee, pending.id, { kind: "text", textContent: "待审批凭证", visibility: "management_only" });
+  await expense.act(employee, pending.id, { action: "submit", expectedVersion: pending.version });
+  expect((await expense.list(employee)).items.map((r) => r.id)).toEqual([late.id]);
+  expect((await expense.list(employee, { from: "2026-09-01", to: "2026-10-01" })).items.map((r) => r.id)).toEqual(expect.arrayContaining([september.id, pending.id]));
+  expect((await expense.list(reviewer, { pendingOnly: true })).items.map((r) => r.id)).toEqual([pending.id]);
+  expect((await expense.list(employee, { id: september.id })).items[0]?.id).toBe(september.id);
+  expect((await expense.list({ ...employee, membershipId: reviewer.membershipId }, { id: september.id })).items).toEqual([]);
+  expect((await payroll.listOwn(employee)).livePreview?.approvedReimbursementAmount).toBe("20.010000");
+  expect((await db.select().from(payrollAdjustments)).map((r) => r.payPeriodId).sort()).toEqual([period.id, october!.id].sort());
+  await payroll.calculate(reviewer, october!.id);
+  expect((await db.select().from(payrollItems))[0]?.adjustmentAmount).toBe("20.010000");
+});
+
+it("paginates monthly claims with identical timestamps without truncating or exposing another member's draft", async () => {
+  const { db, employee, reviewer, expense } = await fixture();
+  await db.insert(reimbursementRequests).values(Array.from({ length: 205 }, (_, i) => ({ organizationId: employee.organizationId, membershipId: employee.membershipId, title: `待办 ${i}`, description: "大量申请验收", expenseDate: "2026-09-03", amount: "1", currency: "CNY", status: "pending" as const })));
+  await expense.create(employee, { title: "本人私密草稿", description: "不进入他人审批列表", expenseDate: "2026-09-03", amount: "1", currency: "CNY" });
+  const all = new Set<string>(); let before: string | undefined;
+  do { const page = await expense.list(reviewer, { pendingOnly: true, before, limit: 100 }); page.items.forEach((r) => all.add(r.id)); before = page.nextCursor ?? undefined; } while (before);
+  expect(all.size).toBe(205);
+  expect((await expense.list(reviewer)).items.every((r) => r.status !== "draft")).toBe(true);
+});
+
+it("exports a whole month's work, wages, subsidies, reimbursements and deductions as separately reconciled totals", async () => {
+  const { db, employee, reviewer, period, version, expense, evidence, payroll } = await fixture();
+  await db.update(compensationPlanVersions).set({ config: { subsidies: [{ name: "月末交通补贴", amount: "30", distribution: "period_end" }] } }).where(eq(compensationPlanVersions.id, version.id));
+  await db.insert(workSessions).values({ organizationId: employee.organizationId, membershipId: employee.membershipId, startAt: new Date("2026-09-03T08:00Z"), endAt: new Date("2026-09-03T09:00Z"), timezone: "UTC", source: "manual", grossSeconds: 3600, netSeconds: 3600, content: "九月完整工作提交单", result: "交付完成", submissionStatus: "submitted", approvalStatus: "approved" });
+  const claim = await expense.create(employee, { title: "九月交通报销", description: "客户现场交通费", expenseDate: "2026-09-03", amount: "128.35", currency: "CNY" });
+  await evidence.createReference(employee, claim.id, { kind: "text", textContent: "交通凭证", visibility: "management_only" });
+  const pending = await expense.act(employee, claim.id, { action: "submit", expectedVersion: claim.version });
+  await expense.act(reviewer, claim.id, { action: "approve", expectedVersion: pending.version, payPeriodId: period.id });
+  await db.insert(payrollAdjustments).values({ organizationId: employee.organizationId, membershipId: employee.membershipId, payPeriodId: period.id, amount: "-5", currency: "CNY", reason: "已确认扣减", createdBy: reviewer.membershipId, approvedBy: reviewer.membershipId, approvedAt: new Date() });
+  const run = await payroll.calculate(reviewer, period.id);
+  const preview = await new PayrollHandoffService(db).preview(reviewer, run.id);
+  const captured = await capturePayrollWorkbook(db, reviewer, preview, "九月.csv");
+  const book = new ExcelJS.Workbook(); await book.xlsx.load(Buffer.from(captured.workbookBase64, "base64") as unknown as Parameters<typeof book.xlsx.load>[0]);
+  const sheet = book.getWorksheet("薪资汇总")!;
+  const column = (name: string) => { let found = 0; sheet.getRow(1).eachCell((cell, index) => { if (cell.value === name) found = index; }); expect(found).toBeGreaterThan(0); return found; };
+  const value = (name: string) => sheet.getCell(2, column(name)).value;
+  expect(value("工作工资")).toBe("100.000000"); expect(value("补贴")).toBe("30.000000");
+  expect(value("已批准报销")).toBe("128.350000"); expect(value("其他调整（含扣减及更正）")).toBe("-5.000000");
+  expect(value("最终金额")).toBe("253.350000"); expect(value("薪资周期")).toBe("九月");
+  expect(JSON.stringify(book.getWorksheet("工作提交单")!.getSheetValues())).toContain("九月完整工作提交单");
+  expect(JSON.stringify(book.getWorksheet("报销明细")!.getSheetValues())).toContain("九月交通报销");
 });

@@ -72,6 +72,7 @@ export class PayrollHandoffService {
     for (const row of previewRows) { if (externalIds.has(row.externalId)) repeatedExternalIds.add(row.externalId); externalIds.add(row.externalId); }
     if (repeatedExternalIds.size) blockers.push("导出行存在重复的外部人员编号，请分别保存唯一映射后重新核对。");
     if (corrections.length) blockers.push(`${corrections.length} 条更正申请尚待处理，请先核对更正，避免锁定旧事实。`);
+    if (!batch && record.period.endsAt > new Date()) blockers.push("结算周期尚未结束，可先查看计算预览；请在完整周期结束后重新核对并确认导出，避免把半个月的依据当作完整月账单。");
     const previewHash = hash(JSON.stringify({ run: record.run, period: record.period, rows: previewRows, facts, missingPlans, corrections }));
     return { ...record, rows: batch ? (batch.manifest as { rows: typeof previewRows }).rows : previewRows, missingPlans, pending, drafts, anomalies, corrections, blockers, previewHash, batch: batch ? { id: batch.id, fileName: batch.fileName, sha256: batch.sha256, ruleVersion: batch.ruleVersion, createdAt: batch.createdAt, manifest: publicManifest(batch.manifest) } : null };
   }

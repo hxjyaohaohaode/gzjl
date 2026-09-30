@@ -59,7 +59,7 @@ test("long content, evidence queue, restoration, contextual approval and exact h
     await expect(owner.getByText("图片证据.png", { exact: true }).first()).toBeVisible();
     await owner.getByRole("button", { name: "批准", exact: true }).click();
     await expect.poll(async () => (await call(owner.request, "GET", `/api/work-facts/${session.id}`)).session.approvalStatus).toBe("approved");
-    const period = (await call(owner.request, "POST", "/api/payroll/periods", { name: "正式交接验收", timezone: "Asia/Shanghai", startsAt: new Date(Date.now() - 86400_000).toISOString(), endsAt: new Date(Date.now() + 3_600_000).toISOString(), cutoffAt: new Date(Date.now() + 7_200_000).toISOString() })).period;
+    const period = (await call(owner.request, "POST", "/api/payroll/periods", { name: "正式交接验收", timezone: "Asia/Shanghai", startsAt: new Date(Date.now() - 86400_000).toISOString(), endsAt: new Date().toISOString(), cutoffAt: new Date(Date.now() + 7_200_000).toISOString() })).period;
     const { run } = await call(owner.request, "POST", `/api/pay-periods/${period.id}/calculate`); expect(run.status).toBe("ready");
     expect((await owner.request.get(`/api/payroll-runs/${run.id}/finance-export.csv`)).status()).toBe(409);
     await owner.goto(`/projects/${createdProject.project.id}?node=${createdProject.root.id}`);
@@ -96,6 +96,8 @@ test("long content, evidence queue, restoration, contextual approval and exact h
       expect(await owner.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true);
     }
     await owner.goto("/analytics");
+    await expect(owner.locator(".fact-explorer")).toHaveCount(0);
+    await expect(owner.getByRole("button", { name: "生成本人可校对回顾" })).toHaveCount(0);
     await owner.getByLabel("历史月份", { exact: true }).fill("2026-03");
     const historyResponse = owner.waitForResponse((response) => response.url().includes("/api/analytics/summary?") && new URL(response.url()).searchParams.get("from") === "2026-02-28T16:00:00.000Z");
     await owner.getByRole("button", { name: "应用历史范围" }).click(); expect((await historyResponse).ok()).toBeTruthy();

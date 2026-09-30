@@ -171,4 +171,12 @@ describe("full cycle facts, repair and immutable handoff", () => {
     await f.handoff.profile(f.owner, second.membershipId, "external-two");
     expect((await f.handoff.preview(f.owner, f.run.id)).blockers).toEqual([]);
   });
+  it("allows calculation previews but prevents incomplete salary cycles from being frozen as complete exports", async () => {
+    const f = await preparedHandoff(); vi.setSystemTime(new Date("2026-09-30T12:00:00Z"));
+    const preview = await f.handoff.preview(f.owner, f.run.id);
+    expect(preview.blockers.join()).toContain("结算周期尚未结束");
+    await expect(f.handoff.confirm(f.owner, f.run.id, preview.previewHash)).rejects.toThrow("结算周期尚未结束");
+    expect(await f.db.select().from(payrollExportBatches)).toHaveLength(0);
+    vi.setSystemTime(f.period.endsAt); expect((await f.handoff.preview(f.owner, f.run.id)).blockers).toEqual([]);
+  });
 });

@@ -4,6 +4,7 @@ import type { Database } from "@workbench/db";
 import { attachments, attachmentLinks, orgMemberships, payrollItems, payrollItemComponents, projectNodes, projects, reimbursementRequests, users, workSessions } from "@workbench/db/schema";
 import { PayrollConflictError, type PayrollActor } from "./service.js";
 import { createHash } from "node:crypto";
+import { addDecimalAmounts } from "@workbench/shared";
 
 type BundleRow = Array<string | number | null>;
 interface BundleSheet { name: string; headers: string[]; rows: BundleRow[] }
@@ -63,8 +64,20 @@ export async function capturePayrollWorkbook(db: Database, actor: PayrollActor, 
     db.select({ memberId: workSessions.membershipId, workId: workSessions.id, evidence: attachments }).from(workSessions).innerJoin(attachmentLinks, and(eq(attachmentLinks.entityId, workSessions.id), eq(attachmentLinks.entityType, "work_session"))).innerJoin(attachments, eq(attachments.id, attachmentLinks.attachmentId)).where(and(eq(workSessions.organizationId, actor.organizationId), eq(attachments.organizationId, actor.organizationId), isNull(workSessions.deletedAt), isNull(attachments.deletedAt), ne(attachments.visibility, "private"), lt(workSessions.startAt, preview.period.endsAt), gt(workSessions.endAt, preview.period.startsAt))).orderBy(asc(workSessions.id), asc(attachments.id)),
   ]);
   const names = new Map(preview.rows.map((r) => [r.membershipId, r.displayName]));
+  const totals = new Map<string, { wages: string; bonus: string; subsidies: string; reimbursements: string }>();
+  for (const row of preview.rows) totals.set(row.membershipId, { wages: "0.000000", bonus: "0.000000", subsidies: "0.000000", reimbursements: "0.000000" });
+  for (const { memberId, component } of components) {
+    const total = totals.get(memberId); if (!total || component.sourceEntityType === "payroll_adjustment") continue;
+    const key = component.type === "allowance" ? "subsidies" : component.type === "bonus" ? "bonus" : "wages";
+    total[key] = addDecimalAmounts(total[key], component.amount);
+  }
+  for (const request of reimbursements) {
+    const total = totals.get(request.membershipId);
+    if (total && request.status === "approved") total.reimbursements = addDecimalAmounts(total.reimbursements, request.amount);
+  }
+  const localDateTime = (at: Date) => new Intl.DateTimeFormat("zh-CN", { timeZone: preview.period.timezone, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" }).format(at);
   const sheets: BundleSheet[] = [
-    { name: "薪资汇总", headers: ["成员唯一编号", "外部人员编号", "员工", "币种", "已批准工时（小时）", "待审工时（小时）", "应计工资及补贴", "报销及其他调整", "最终金额", "方案版本"], rows: preview.rows.map((r) => [r.membershipId, r.externalId, r.displayName, r.currency, r.approvedSeconds / 3600, r.pendingSeconds / 3600, r.grossAmount, r.adjustmentAmount, r.finalAmount, r.planVersionId]) },
+    { name: "薪资汇总", headers: ["成员唯一编号", "外部人员编号", "员工", "薪资周期", "周期开始（含，组织时区）", "周期结束（不含，组织时区）", "周期时区", "币种", "已批准工时（小时）", "待审工时（小时）", "工作工资", "奖励工资", "补贴", "应计工资及补贴小计", "已批准报销", "其他调整（含扣减及更正）", "报销及其他调整小计", "最终金额", "方案版本", "批次唯一编号", "规则版本"], rows: preview.rows.map((r) => { const t = totals.get(r.membershipId)!; return [r.membershipId, r.externalId, r.displayName, preview.period.name, localDateTime(preview.period.startsAt), localDateTime(preview.period.endsAt), preview.period.timezone, r.currency, r.approvedSeconds / 3600, r.pendingSeconds / 3600, t.wages, t.bonus, t.subsidies, r.grossAmount, t.reimbursements, addDecimalAmounts(r.adjustmentAmount, `-${t.reimbursements}`), r.adjustmentAmount, r.finalAmount, r.planVersionId, preview.run.id, preview.run.calculationVersion]; }) },
     { name: "工资组成", headers: ["成员唯一编号", "员工", "币种", "组成类型", "明细名称", "数量", "单位", "单价", "倍率", "金额（精确十进制）", "来源类型", "来源编号", "来源版本", "完整计算追踪"], rows: components.map(({ memberId, currency, component: c }) => [memberId, names.get(memberId) ?? memberId, currency, c.type, c.label, c.quantity, c.unit, c.rate, c.multiplier, c.amount, c.sourceEntityType, c.sourceEntityId, c.sourceVersion, JSON.stringify(c.calculationTrace)]) },
     { name: "报销明细", headers: ["成员唯一编号", "员工", "报销单编号", "版本", "费用日期", "标题", "费用说明", "币种", "金额", "审批状态", "审批说明", "提交时间", "审批时间"], rows: reimbursements.map((r) => [r.membershipId, names.get(r.membershipId) ?? r.membershipId, r.id, r.version, r.expenseDate, r.title, r.description, r.currency, r.amount, states[r.status] ?? r.status, r.reviewNote, r.submittedAt?.toISOString() ?? null, r.reviewedAt?.toISOString() ?? null]) },
     { name: "工作提交单", headers: ["成员唯一编号", "员工", "记录编号", "版本", "开始时间（UTC）", "结束时间（UTC）", "记录时区", "整条净工时（秒）", "审批状态", "提交状态", "项目", "节点", "工作内容", "工作结果", "阻塞", "下一步", "异常说明", "来源入口"], rows: records.map(({ session: r, name, project, node }) => [r.membershipId, name, r.id, r.version, r.startAt.toISOString(), r.endAt.toISOString(), r.timezone, r.netSeconds, states[r.approvalStatus] ?? r.approvalStatus, r.submissionStatus, project, node, r.content, r.result, r.blockers, r.nextStep, JSON.stringify(r.anomalyFlags), `/work?record=${r.id}&version=${r.version}`]) },

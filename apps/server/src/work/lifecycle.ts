@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gt, inArray, isNull, lt, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNull, lt, lte, or, sql } from "drizzle-orm";
 import type { Database } from "@workbench/db";
 import { approvalActions, approvalRequests, attachmentLinks, attachments, compensationPlans, compensationPlanVersions, organizations, orgMemberships, payPeriods, projectNodes, projects, users, timerStates, workBreaks, workSessions, workSessionProjectLinks, workSessionVersions } from "@workbench/db/schema";
 import type { FastifyInstance, preHandlerHookHandler } from "fastify";
@@ -44,7 +44,7 @@ export class WorkLifecycleService {
 
   async overview(actor: AnalyticsActor, now = new Date()) {
     const [organization] = await this.db.select().from(organizations).where(eq(organizations.id, actor.organizationId));
-    const [period] = await this.db.select().from(payPeriods).where(and(eq(payPeriods.organizationId, actor.organizationId), sql`${payPeriods.startsAt} <= ${now}`, gt(payPeriods.endsAt, now))).orderBy(desc(payPeriods.startsAt)).limit(1);
+    const [period] = await this.db.select().from(payPeriods).where(and(eq(payPeriods.organizationId, actor.organizationId), lte(payPeriods.startsAt, now), gt(payPeriods.endsAt, now))).orderBy(desc(payPeriods.startsAt)).limit(1);
     const range = period ?? monthRange(organization?.timezone ?? "Asia/Shanghai", now);
     const ownFacts = and(eq(workSessions.organizationId, actor.organizationId), eq(workSessions.membershipId, actor.membershipId), eq(workSessions.recordKind, "fact"), isNull(workSessions.deletedAt), lt(workSessions.startAt, range.endsAt), gt(workSessions.endAt, range.startsAt));
     const [counts, plans, attention] = await Promise.all([
