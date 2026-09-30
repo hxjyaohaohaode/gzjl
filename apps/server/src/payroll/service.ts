@@ -11,6 +11,7 @@ import {
   payrollItems,
   payrollRuns,
   payrollSnapshots,
+  payrollExportBatches,
   payPeriods,
   payslips,
   rateRules,
@@ -2425,6 +2426,8 @@ export class PayrollService {
   }
 
   async financeExport(actor: PayrollActor, runId: string) {
+    const [saved] = await this.db.select({ fileName: payrollExportBatches.fileName, csv: payrollExportBatches.csv, sha256: payrollExportBatches.sha256 }).from(payrollExportBatches).where(and(eq(payrollExportBatches.payrollRunId, runId), eq(payrollExportBatches.organizationId, actor.organizationId))).limit(1);
+    if (saved) return { fileName: saved.fileName, csv: `\uFEFF${saved.csv}`, sha256: saved.sha256 };
     const [record] = await this.db
       .select({ run: payrollRuns, period: payPeriods })
       .from(payrollRuns)

@@ -1,11 +1,12 @@
 import type { FastifyInstance, FastifyReply, preHandlerHookHandler } from "fastify";
 import { z } from "zod";
+import { workRecordFiltersSchema } from "@workbench/shared";
 
 import { requireAnyScopedPermission, requirePermission } from "../auth/authorization.js";
 import { ExportJobError, ImportValidationError, type OperationsService } from "./service.js";
 
 const rangeQuery = z
-  .object({ from: z.iso.datetime({ offset: true }), to: z.iso.datetime({ offset: true }) })
+  .object({ from: z.iso.datetime({ offset: true }), to: z.iso.datetime({ offset: true }), ...workRecordFiltersSchema.shape })
   .refine((value) => new Date(value.to) > new Date(value.from), { message: "结束时间必须晚于开始时间" });
 const backgroundExportBody = z
   .object({
@@ -13,6 +14,7 @@ const backgroundExportBody = z
     format: z.enum(["csv", "json", "xlsx", "pdf"]),
     from: z.iso.datetime({ offset: true }),
     to: z.iso.datetime({ offset: true }),
+    filters: workRecordFiltersSchema.optional(),
   })
   .refine((value) => new Date(value.to) > new Date(value.from), { message: "结束时间必须晚于开始时间" });
 const csvBody = z.object({ csv: z.string().min(1).max(5 * 1024 * 1024) });
@@ -77,12 +79,12 @@ export async function registerOperationsRoutes(app: FastifyInstance, service: Op
 
   app.get("/api/exports/work-sessions.csv", { preHandler: [authenticate, requireScopedExport] }, async (request, reply) => {
     const query = rangeQuery.parse(request.query);
-    const result = await service.exportWorkSessions(request.auth!, new Date(query.from), new Date(query.to));
+    const result = await service.exportWorkSessions(request.auth!, new Date(query.from), new Date(query.to), query);
     return reply.header("content-type", "text/csv; charset=utf-8").header("content-disposition", 'attachment; filename="work-sessions.csv"').header("x-content-sha256", result.sha256).send(`\uFEFF${result.csv}`);
   });
   app.get("/api/exports/work-sessions.json", { preHandler: [authenticate, requireScopedExport] }, async (request, reply) => {
     const query = rangeQuery.parse(request.query);
-    const result = await service.exportWorkSessionsJson(request.auth!, new Date(query.from), new Date(query.to));
+    const result = await service.exportWorkSessionsJson(request.auth!, new Date(query.from), new Date(query.to), query);
     return reply.header("content-type", "application/json; charset=utf-8").header("content-disposition", 'attachment; filename="work-sessions.json"').header("x-content-sha256", result.sha256).send(result.json);
   });
   app.post("/api/imports/work-sessions/preview", { preHandler: [app.csrfProtection, authenticate, requireOrgImport] }, async (request, reply) => {

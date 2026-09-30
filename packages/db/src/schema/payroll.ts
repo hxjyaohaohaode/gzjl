@@ -317,6 +317,31 @@ export const payslips = pgTable(
   (table) => [uniqueIndex("payslips_item_uidx").on(table.payrollItemId)],
 );
 
+export const payrollExportProfiles = pgTable("payroll_export_profiles", {
+  membershipId: uuid("membership_id").primaryKey().references(() => orgMemberships.id, { onDelete: "restrict" }),
+  organizationId: uuid("organization_id").notNull().references(() => organizations.id),
+  externalId: text("external_id").notNull(),
+  updatedBy: uuid("updated_by").notNull().references(() => orgMemberships.id),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [uniqueIndex("payroll_export_profiles_org_external_uidx").on(table.organizationId, table.externalId)]);
+
+// Freeze exact UTF-8 bytes and identity/amount/rule snapshots. Downloads never
+// regenerate a confirmed handoff from mutable names or profiles.
+export const payrollExportBatches = pgTable("payroll_export_batches", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  payrollRunId: uuid("payroll_run_id").notNull().references(() => payrollRuns.id),
+  organizationId: uuid("organization_id").notNull().references(() => organizations.id),
+  fileName: text("file_name").notNull(),
+  csv: text("csv").notNull(),
+  sha256: text("sha256").notNull(),
+  ruleVersion: text("rule_version").notNull(),
+  inputHash: text("input_hash").notNull(),
+  previewHash: text("preview_hash").notNull(),
+  manifest: jsonb("manifest").notNull(),
+  createdBy: uuid("created_by").notNull().references(() => orgMemberships.id),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [uniqueIndex("payroll_export_batches_run_uidx").on(table.payrollRunId)]);
+
 export const reimbursementRequests = pgTable("reimbursement_requests", {
   id: uuid("id").primaryKey().defaultRandom(),
   organizationId: uuid("organization_id").notNull().references(() => organizations.id),

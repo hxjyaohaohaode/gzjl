@@ -23,6 +23,8 @@ const listQuerySchema = z.object({
   from: z.iso.datetime({ offset: true }).optional(),
   to: z.iso.datetime({ offset: true }).optional(),
   recordKind: z.enum(["all", "fact", "plan"]).default("all"),
+  approvalStatus: z.enum(["not_requested", "pending_review", "approved", "returned", "locked"]).optional(),
+  archived: z.enum(["true", "false"]).default("false"),
 }).refine(
   (value) =>
     !value.from || !value.to || new Date(value.from) < new Date(value.to),
@@ -63,6 +65,17 @@ export async function registerWorkRoutes(
     scopeId: request.auth?.membershipId ?? null,
   }));
 
+  app.post("/api/work-sessions/:sessionId/archive-action", { preHandler: [app.csrfProtection, authenticate, ownPermission] }, async (request, reply) => {
+    const { sessionId } = submitParamsSchema.parse(request.params);
+    const input = submitBodySchema.extend({ action: z.enum(["archive", "restore"]) }).parse(request.body);
+    try { return { session: await service.archiveDraftOwn(request.auth!, sessionId, input.expectedVersion, input.action === "restore") }; }
+    catch (error) {
+      if (error instanceof WorkSessionValidationError) return reply.code(400).send({ error: "invalid_draft_action", message: error.message });
+      if (error instanceof WorkSessionConflictError || error instanceof WorkSessionVersionConflictError) return reply.code(409).send({ error: "draft_conflict", message: error.message });
+      throw error;
+    }
+  });
+
   app.get(
     "/api/work-sessions/project-node-recommendations",
     { preHandler: [authenticate, ownPermission] },
@@ -93,6 +106,8 @@ export async function registerWorkRoutes(
           from: query.from ? new Date(query.from) : undefined,
           to: query.to ? new Date(query.to) : undefined,
           recordKind: query.recordKind === "all" ? undefined : query.recordKind,
+          approvalStatus: query.approvalStatus,
+          archived: query.archived === "true",
         },
       );
       return {

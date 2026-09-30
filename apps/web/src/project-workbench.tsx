@@ -866,11 +866,14 @@ function ProjectOverview({
         <span className="project-overview-icon" style={{ background: project.color }}>
           <FolderKanban size={24} />
         </span>
-        <span>
+        <div className="project-overview-copy">
           <small>{project.key} · {project.status === "active" ? "执行中" : project.status}</small>
           <strong>{project.name}</strong>
-          <em>{project.description || "用结构、排期和工作证据推进交付。"}</em>
-        </span>
+          {project.description && project.description.length > 240 ? <>
+            <em className="project-description-preview">{project.description.slice(0, 200)}…</em>
+            <details className="project-description-full"><summary>展开 / 收起完整项目说明</summary><p>{project.description}</p></details>
+          </> : <em>{project.description || "用结构、排期和工作证据推进交付。"}</em>}
+        </div>
       </div>
       <div className="project-overview-progress">
         <span><small>实际完成进度</small><strong>{progress}%</strong></span>
@@ -1731,7 +1734,13 @@ function NodeInspectorContent({
               {linkedWork.data.items.map((session) => (
                 <div className="project-node-work-item" key={session.id}>
                   <span>
-                    <strong>{session.content}</strong>
+                    {session.content.length > 240 ? (
+                      <details className="project-linked-work-content">
+                        <summary><strong>{session.content.slice(0, 200)}…</strong><small>展开 / 收起完整工作内容</small></summary>
+                        <p>{session.content}</p>
+                      </details>
+                    ) : <strong>{session.content}</strong>}
+                    <Link to={`/work?record=${session.id}`}>核对完整记录与版本</Link>
                     <small>
                       {session.displayName} ·{" "}
                       {session.hasFullTiming !== false &&
@@ -2210,6 +2219,11 @@ export function ProjectDetailPage({ me }: { me: Me }) {
   const [branchId, setBranchId] = useState("all");
   const [search, setSearch] = useState("");
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(() => searchParams.get("node"));
+  const linkedNodeId = searchParams.get("node");
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => setSelectedNodeId(linkedNodeId));
+    return () => window.cancelAnimationFrame(frame);
+  }, [projectId, linkedNodeId]);
   const [showCreate, setShowCreate] = useState(false);
   const [showTeam, setShowTeam] = useState(false);
   const [showBranch, setShowBranch] = useState(false);
@@ -2659,7 +2673,7 @@ export function ProjectDetailPage({ me }: { me: Me }) {
                   size="compact"
                 >
                   <Plus size={16} />
-                  {selected ? `在“${selected.title}”下新建子节点` : "新建根节点"}
+                  {selected ? selected.title.length > 24 ? "在选中节点下新建子节点" : `在“${selected.title}”下新建子节点` : "新建根节点"}
                 </Button>
               </>
             ) : null}

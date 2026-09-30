@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, isNull, ne, or } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import type { Database } from "@workbench/db";
 import {
   attachmentLinks,
@@ -7,6 +7,8 @@ import {
   approvalRequests,
   auditLogs,
   orgMemberships,
+  users,
+  payPeriods,
   outboxEvents,
   workBreaks,
   workSessions,
@@ -70,13 +72,15 @@ export class ApprovalService {
     return links.some((link) => projectIds.includes(link.projectId));
   }
 
-  async listPending(actor: ApprovalActor, limit = 50) {
+  async listPending(actor: ApprovalActor, limit = 50, offset = 0, sort: "export" | "waiting" | "anomaly" = "export") {
     if (reviewGrants(actor).length === 0) return [];
     const candidates = await this.db
       .select({
         request: approvalRequests,
         session: workSessions,
         requesterOrgUnitId: orgMemberships.orgUnitId,
+        displayName: users.displayName,
+        cutoffAt: sql<Date | null>`(select min(cutoff_at) from ${payPeriods} p where p.organization_id = ${actor.organizationId} and p.starts_at < ${workSessions.endAt} and p.ends_at > ${workSessions.startAt} and p.status = 'open')`.as("cutoff_at"),
       })
       .from(approvalRequests)
       .innerJoin(
@@ -87,6 +91,7 @@ export class ApprovalService {
         ),
       )
       .innerJoin(orgMemberships, eq(orgMemberships.id, workSessions.membershipId))
+      .innerJoin(users, eq(users.id, orgMemberships.userId))
       .where(
         and(
           eq(approvalRequests.organizationId, actor.organizationId),
@@ -98,8 +103,8 @@ export class ApprovalService {
           workReviewScope(actor.grants),
         ),
       )
-      .orderBy(desc(approvalRequests.priority), desc(approvalRequests.requestedAt))
-      .limit(limit);
+      .orderBy(...(sort === "waiting" ? [asc(approvalRequests.requestedAt), asc(approvalRequests.id)] : sort === "anomaly" ? [sql`jsonb_array_length(${approvalRequests.anomalyFlags}) desc`, asc(approvalRequests.requestedAt), asc(approvalRequests.id)] : [sql`cutoff_at asc nulls last`, desc(approvalRequests.priority), asc(approvalRequests.requestedAt), asc(approvalRequests.id)]))
+      .limit(limit).offset(offset);
 
     const visible = [];
     for (const candidate of candidates) {
@@ -193,6 +198,8 @@ export class ApprovalService {
         );
       }
     }
+
+    if (decision === "approved" && reviewable.session.endAt > new Date()) throw new ApprovalConflictError("工作结束时间尚未到，不能批准未来事实；请退回核对时间，未来安排应保存为计划。");
 
     return this.db.transaction(async (tx) => {
       await lockPayrollInputs(tx, actor.organizationId);

@@ -1,4 +1,5 @@
-import { and, asc, desc, eq, gt, inArray, isNull, lt, ne, or } from "drizzle-orm";
+import { assertWorkSubmissionWindow, WorkSubmissionPolicyError } from "./policy.js";
+import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lt, ne, or } from "drizzle-orm";
 import type { Database } from "@workbench/db";
 import {
   attachmentLinks,
@@ -14,8 +15,8 @@ import {
   projects,
   orgMemberships,
   outboxEvents,
+  payPeriods,
   workBreaks,
-  workExpectationProfiles,
   workSessionProjectLinks,
   workSessions,
   workSessionVersions,
@@ -79,6 +80,8 @@ export interface WorkSessionListOptions {
   from?: Date | undefined;
   to?: Date | undefined;
   recordKind?: WorkRecordKind | undefined;
+  approvalStatus?: typeof workSessions.$inferSelect["approvalStatus"] | undefined;
+  archived?: boolean | undefined;
 }
 
 const maximumPlanHorizonMs = 366 * 86_400_000;
@@ -160,17 +163,8 @@ async function lockWorkMember(db: WorkExecutor, actor: WorkActor): Promise<void>
 }
 
 async function assertManualLookback(db: WorkExecutor, actor: WorkActor, startAt: Date): Promise<void> {
-  const now = new Date();
-  const [expectation] = await db.select({ lookbackDays: workExpectationProfiles.manualEntryLookbackDays })
-    .from(workExpectationProfiles).where(and(
-      eq(workExpectationProfiles.membershipId, actor.membershipId),
-      lt(workExpectationProfiles.effectiveFrom, now),
-      or(isNull(workExpectationProfiles.effectiveTo), gt(workExpectationProfiles.effectiveTo, now)),
-    )).orderBy(desc(workExpectationProfiles.effectiveFrom)).limit(1);
-  const lookbackDays = expectation?.lookbackDays ?? 7;
-  if (startAt < new Date(now.getTime() - lookbackDays * 86_400_000)) {
-    throw new WorkSessionValidationError(`手工补录仅允许追溯 ${lookbackDays} 天；更早记录需要提交更正申请。`);
-  }
+  try { await assertWorkSubmissionWindow(db, actor.organizationId, actor.membershipId, startAt); }
+  catch (error) { if (error instanceof WorkSubmissionPolicyError) throw new WorkSessionValidationError(error.message); throw error; }
 }
 
 export class WorkSessionService {
@@ -661,31 +655,7 @@ export class WorkSessionService {
         );
       }
 
-      const [expectation] = await tx
-        .select({
-          lookbackDays: workExpectationProfiles.manualEntryLookbackDays,
-        })
-        .from(workExpectationProfiles)
-        .where(
-          and(
-            eq(workExpectationProfiles.membershipId, actor.membershipId),
-            lt(workExpectationProfiles.effectiveFrom, new Date()),
-            or(
-              isNull(workExpectationProfiles.effectiveTo),
-              gt(workExpectationProfiles.effectiveTo, new Date()),
-            ),
-          ),
-        )
-        .orderBy(desc(workExpectationProfiles.effectiveFrom))
-        .limit(1);
-      const lookbackDays = expectation?.lookbackDays ?? 7;
-      if (startAt < new Date(Date.now() - lookbackDays * 86_400_000)) {
-        throw new WorkSessionValidationError(
-          "手工补录仅允许追溯 " +
-            lookbackDays +
-            " 天；更早记录需要提交更正申请。",
-        );
-      }
+      if (recordKind === "fact") await assertManualLookback(tx, actor, startAt);
 
       const linkedNodeIds = Array.from(
         new Set([
@@ -899,30 +869,7 @@ export class WorkSessionService {
     // preview before confirming it. It may therefore restore historical facts
     // from a verified archive, whereas ordinary manual backfill stays bounded
     // by the member's active expectation profile.
-    if (input.source !== "import" && recordKind === "fact") {
-      const [expectation] = await db
-        .select({ lookbackDays: workExpectationProfiles.manualEntryLookbackDays })
-        .from(workExpectationProfiles)
-        .where(
-          and(
-            eq(workExpectationProfiles.membershipId, actor.membershipId),
-            lt(workExpectationProfiles.effectiveFrom, new Date()),
-            or(
-              isNull(workExpectationProfiles.effectiveTo),
-              gt(workExpectationProfiles.effectiveTo, new Date()),
-            ),
-          ),
-        )
-        .orderBy(desc(workExpectationProfiles.effectiveFrom))
-        .limit(1);
-      const lookbackDays = expectation?.lookbackDays ?? 7;
-      const cutoff = new Date(Date.now() - lookbackDays * 86_400_000);
-      if (startAt < cutoff) {
-        throw new WorkSessionValidationError(
-          `手工补录仅允许追溯 ${lookbackDays} 天；更早记录需要提交更正申请。`,
-        );
-      }
-    }
+    if (input.source !== "import" && recordKind === "fact") await assertManualLookback(db, actor, startAt);
     if (recordKind === "plan") {
       assertPlanWindow(startAt, endAt);
     } else if (endAt > new Date(Date.now() + factualFutureGraceMs)) {
@@ -1084,10 +1031,11 @@ export class WorkSessionService {
         and(
           eq(workSessions.organizationId, actor.organizationId),
           eq(workSessions.membershipId, actor.membershipId),
-          isNull(workSessions.deletedAt),
+          options.archived ? isNotNull(workSessions.deletedAt) : isNull(workSessions.deletedAt),
           options.recordKind
             ? eq(workSessions.recordKind, options.recordKind)
             : undefined,
+          options.approvalStatus ? eq(workSessions.approvalStatus, options.approvalStatus) : undefined,
           options.before ? (options.beforeId
             ? or(lt(workSessions.startAt, options.before), and(eq(workSessions.startAt, options.before), lt(workSessions.id, options.beforeId)))
             : lt(workSessions.startAt, options.before)) : undefined,
@@ -1388,6 +1336,7 @@ export class WorkSessionService {
         );
       }
 
+      await assertManualLookback(tx, actor, current.startAt);
       const [overlap] = await tx
         .select({ id: workSessions.id })
         .from(workSessions)
@@ -1469,6 +1418,8 @@ export class WorkSessionService {
   async submit(actor: WorkActor, sessionId: string, expectedVersion: number) {
     return this.db.transaction(async (tx) => {
       await lockPayrollInputs(tx, actor.organizationId);
+      const [submissionFact] = await tx.select({ startAt: workSessions.startAt }).from(workSessions).where(and(eq(workSessions.id, sessionId), eq(workSessions.organizationId, actor.organizationId), eq(workSessions.membershipId, actor.membershipId), isNull(workSessions.deletedAt))).limit(1);
+      if (submissionFact) await assertWorkSubmissionWindow(tx, actor.organizationId, actor.membershipId, submissionFact.startAt, false);
       const evidence = await tx
         .select({
           id: attachments.id,
@@ -1594,6 +1545,26 @@ export class WorkSessionService {
         payload: { change: "submitted" },
       });
       return snapshot;
+    });
+  }
+
+  async archiveDraftOwn(actor: WorkActor, id: string, expectedVersion: number, restore = false) {
+    return this.db.transaction(async (tx) => {
+      await lockWorkMember(tx, actor);
+      const [current] = await tx.select().from(workSessions).where(and(eq(workSessions.id, id), eq(workSessions.organizationId, actor.organizationId), eq(workSessions.membershipId, actor.membershipId), eq(workSessions.version, expectedVersion), eq(workSessions.submissionStatus, "draft"), inArray(workSessions.approvalStatus, ["not_requested", "returned"]), isNull(workSessions.lockedAt))).for("update");
+      if (!current || Boolean(current.deletedAt) !== restore) throw new WorkSessionVersionConflictError();
+      if (restore && current.recordKind === "fact") {
+        await assertWorkSubmissionWindow(tx, actor.organizationId, actor.membershipId, current.startAt);
+        const [period] = await tx.select({ id: payPeriods.id }).from(payPeriods).where(and(eq(payPeriods.organizationId, actor.organizationId), inArray(payPeriods.status, ["locked", "settled"]), lt(payPeriods.startsAt, current.endAt), gt(payPeriods.endsAt, current.startAt))).limit(1);
+        if (period) throw new WorkSessionValidationError("原时段已属于锁定周期，不能恢复为可计薪事实；请联系管理员处理更正。");
+        const [overlap] = await tx.select({ id: workSessions.id }).from(workSessions).where(and(eq(workSessions.organizationId, actor.organizationId), eq(workSessions.membershipId, actor.membershipId), ne(workSessions.id, id), eq(workSessions.recordKind, "fact"), isNull(workSessions.deletedAt), lt(workSessions.startAt, current.endAt), gt(workSessions.endAt, current.startAt))).limit(1);
+        if (overlap && !current.parallelWork) throw new WorkSessionConflictError("原时段现在已有其他事实记录，请先修改或归档冲突草稿，再恢复。");
+      }
+      const [updated] = await tx.update(workSessions).set({ deletedAt: restore ? null : new Date(), updatedAt: new Date(), version: expectedVersion + 1 }).where(eq(workSessions.id, id)).returning();
+      const [breaks, links] = await Promise.all([tx.select().from(workBreaks).where(eq(workBreaks.workSessionId, id)), tx.select().from(workSessionProjectLinks).where(eq(workSessionProjectLinks.workSessionId, id))]);
+      await tx.insert(workSessionVersions).values({ workSessionId: id, version: updated!.version, snapshot: { ...updated, breaks, projectLinks: links }, changedBy: actor.membershipId, changeReason: restore ? "draft_restored" : "mistaken_draft_archived" });
+      await tx.insert(auditLogs).values({ organizationId: actor.organizationId, actorMembershipId: actor.membershipId, entityType: "work_session", entityId: id, action: restore ? "work_session.draft_restored" : "work_session.draft_archived", before: current, after: updated });
+      return updated!;
     });
   }
 

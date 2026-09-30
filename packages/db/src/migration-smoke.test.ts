@@ -21,7 +21,9 @@ describe("generated PostgreSQL migration", () => {
       const tables = await database.query<{ count: number }>(
         "select count(*)::int as count from information_schema.tables where table_schema = 'public' and table_type = 'BASE TABLE'",
       );
-      expect(tables.rows[0]?.count).toBe(70);
+      expect(tables.rows[0]?.count).toBe(72);
+      const handoffIndexes = await database.query<{ indexname: string }>("select indexname from pg_indexes where schemaname = 'public' and tablename in ('payroll_export_batches', 'payroll_export_profiles')");
+      expect(handoffIndexes.rows.map((r) => r.indexname)).toEqual(expect.arrayContaining(["payroll_export_batches_run_uidx", "payroll_export_profiles_org_external_uidx"]));
       const aiProviderCheckColumns = await database.query<{
         column_name: string;
         is_nullable: string;

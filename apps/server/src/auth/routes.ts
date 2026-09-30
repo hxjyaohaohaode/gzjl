@@ -154,7 +154,7 @@ export async function registerAuthRoutes(
     "/api/auth/login",
     {
       preHandler: app.csrfProtection,
-      config: { rateLimit: { max: 10, timeWindow: "15 minutes", ban: 3 } },
+      config: { rateLimit: { keyGenerator: (request) => request.ip, max: 10, timeWindow: "15 minutes", ban: 3 } },
     },
     async (request, reply) => {
       const input = loginSchema.parse(request.body);
@@ -198,7 +198,7 @@ export async function registerAuthRoutes(
     "/api/auth/login/mfa",
     {
       preHandler: app.csrfProtection,
-      config: { rateLimit: { max: 10, timeWindow: "15 minutes", ban: 3 } },
+      config: { rateLimit: { keyGenerator: (request) => request.ip, max: 10, timeWindow: "15 minutes", ban: 3 } },
     },
     async (request, reply) => {
       const input = totpLoginSchema.parse(request.body);
@@ -289,7 +289,7 @@ export async function registerAuthRoutes(
     "/api/auth/credentials",
     {
       preHandler: [app.csrfProtection, authenticate],
-      config: { rateLimit: { max: 5, timeWindow: "1 hour", ban: 2 } },
+      config: { rateLimit: { keyGenerator: (request) => request.ip, max: 5, timeWindow: "1 hour", ban: 2 } },
     },
     async (request, reply) => {
       try {
@@ -316,7 +316,7 @@ export async function registerAuthRoutes(
     "/api/auth/credentials/:credentialId/resend",
     {
       preHandler: [app.csrfProtection, authenticate],
-      config: { rateLimit: { max: 5, timeWindow: "1 hour", ban: 2 } },
+      config: { rateLimit: { keyGenerator: (request) => request.ip, max: 5, timeWindow: "1 hour", ban: 2 } },
     },
     async (request, reply) => {
       try {
@@ -342,7 +342,7 @@ export async function registerAuthRoutes(
     "/api/auth/credentials/:credentialId",
     {
       preHandler: [app.csrfProtection, authenticate],
-      config: { rateLimit: { max: 5, timeWindow: "1 hour", ban: 2 } },
+      config: { rateLimit: { keyGenerator: (request) => request.ip, max: 5, timeWindow: "1 hour", ban: 2 } },
     },
     async (request, reply) => {
       try {
@@ -359,7 +359,7 @@ export async function registerAuthRoutes(
     "/api/auth/credentials/verify",
     {
       preHandler: app.csrfProtection,
-      config: { rateLimit: { max: 10, timeWindow: "15 minutes", ban: 3 } },
+      config: { rateLimit: { keyGenerator: (request) => request.ip, max: 10, timeWindow: "15 minutes", ban: 3 } },
     },
     async (request, reply) => {
       try {
@@ -375,7 +375,7 @@ export async function registerAuthRoutes(
     "/api/auth/password-reset/request",
     {
       preHandler: app.csrfProtection,
-      config: { rateLimit: { max: 5, timeWindow: "15 minutes", ban: 3 } },
+      config: { rateLimit: { keyGenerator: (request) => request.ip, max: 5, timeWindow: "15 minutes", ban: 3 } },
     },
     async (request, reply) => {
       const { identifier } = passwordResetRequestSchema.parse(request.body);

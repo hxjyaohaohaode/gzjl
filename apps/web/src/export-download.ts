@@ -1,5 +1,5 @@
 /** Direct exports must finish with a file, not an HTML gateway page or an endless spinner. */
-export async function fetchExportFile(path: string, format: "csv" | "json", timeoutMs = 60_000): Promise<Blob> {
+export async function fetchExportFile(path: string, format: "csv" | "json" | "xlsx", timeoutMs = 60_000): Promise<Blob> {
   const controller = new AbortController();
   const timer = globalThis.setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -10,7 +10,7 @@ export async function fetchExportFile(path: string, format: "csv" | "json", time
       throw new Error(message ?? (response.status === 401 ? "登录已失效，请重新登录后导出。" : `直接导出失败（HTTP ${response.status}），请稍后重试。`));
     }
     const mime = response.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase();
-    if (mime !== (format === "csv" ? "text/csv" : "application/json")) {
+    if (mime !== ({ csv: "text/csv", json: "application/json", xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }[format])) {
       throw new Error("服务未返回有效的导出文件，请重新导出。");
     }
     const blob = await response.blob();

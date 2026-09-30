@@ -16,6 +16,7 @@ export interface WorkSessionExportRow {
   grossSeconds: number;
   breakSeconds: number;
   netSeconds: number;
+  rangeNetSeconds?: number;
   billableSeconds: number | null;
   source: string;
   content: string;
@@ -62,7 +63,8 @@ const rawHeaders: Array<{ key: keyof WorkSessionExportRow; label: string; width:
   { key: "timezone", label: "时区", width: 18 },
   { key: "grossSeconds", label: "总时长（秒）", width: 16 },
   { key: "breakSeconds", label: "休息（秒）", width: 14 },
-  { key: "netSeconds", label: "净时长（秒）", width: 16 },
+  { key: "netSeconds", label: "整条净时长（秒）", width: 16 },
+  { key: "rangeNetSeconds", label: "范围内净时长（秒）", width: 20 },
   { key: "billableSeconds", label: "计薪时长（秒）", width: 17 },
   { key: "source", label: "来源", width: 14 },
   { key: "content", label: "工作内容", width: 44 },

@@ -2,7 +2,7 @@ import { and, eq, lt } from "drizzle-orm";
 import { z } from "zod";
 import { resolveOrganizationAiProvider, type Database, type AiDeploymentConfig } from "@workbench/db";
 import { aiJobs, aiReports, aiReportSources, notifications, outboxEvents } from "@workbench/db/schema";
-import { AiProviderResponseError, maximumAiRequestTimeoutMs, requestAiChatCompletion } from "@workbench/shared";
+import { AiProviderResponseError, citedSourceIds, maximumAiRequestTimeoutMs, requestAiChatCompletion } from "@workbench/shared";
 import { buildAiSystemPrompt } from "./ai-prompt.js";
 
 const aiOutputSchema = z.object({
@@ -59,12 +59,19 @@ export function createAiJobProcessor(db: Database, config: AiDeploymentConfig, n
       // Take URL, key, model and options from the same current configuration.
       const [active] = await db.update(aiJobs).set({ model: provider.model, maxOutputTokens: provider.maxOutputTokens, maxAttempts }).where(and(eq(aiJobs.id, job.id), eq(aiJobs.status, "running"), eq(aiJobs.attempt, attempt), eq(aiJobs.startedAt, startedAt))).returning({ id: aiJobs.id });
       if (!active) return;
+      const fullSummary = job.sourceSummary as { sources?: Array<{ entityType: string; entityId: string; entityVersion?: string; label: string }>; sourceManifest?: Array<{ entityType: string; entityId: string; entityVersion?: string; label: string }> };
+      const providerSummary = { ...fullSummary, sourceManifest: undefined };
       const payload = await requestAiChatCompletion(provider, [
         { role: "system", content: buildAiSystemPrompt(job.taskType) },
-        { role: "user", content: JSON.stringify(job.sourceSummary) },
+        { role: "user", content: JSON.stringify(providerSummary) },
       ], providerFetch);
       const output = parseAiJson(payload.content);
-      const sourceSummary = job.sourceSummary as { sources?: Array<{ entityType: string; entityId: string; entityVersion?: string; label: string }> };
+      const sections = [output.summary, ...output.highlights, ...output.risks, ...output.suggestions];
+      const knownIds = new Set((fullSummary.sources ?? []).map((s) => s.entityId.toLowerCase()));
+      if (sections.some((text) => citedSourceIds(text).some((id) => !knownIds.has(id)))) throw new AiProviderResponseError("AI 返回了无法核对的来源标记，请重新生成。");
+      if (sections.some((text) => [...text.matchAll(/\[source:([^\]]*)\]/gi)].some((m) => !/^[a-f0-9-]{36}$/i.test(m[1] ?? "")))) throw new AiProviderResponseError("AI 返回了格式无效的来源标记，请重新生成。");
+      if (job.promptTemplateVersion === "structured-work-intelligence-v6-provenance" && knownIds.size && [output.summary, ...output.highlights].some((text) => citedSourceIds(text).length === 0)) throw new AiProviderResponseError("AI 摘要或关键结论缺少可点击来源，未保存为可靠报告；请重新生成。");
+      const sourceSummary = { sources: fullSummary.sourceManifest ?? fullSummary.sources };
       const completed = await db.transaction(async (tx) => {
         // Completion and cancellation race on the same conditional update. If
         // cancellation won while the provider request was in flight, discard
@@ -73,7 +80,9 @@ export function createAiJobProcessor(db: Database, config: AiDeploymentConfig, n
         if (!completedJob) return null;
         const [report] = await tx.insert(aiReports).values({ aiJobId: job.id, title: output.title, summary: output.summary, structuredOutput: output, sourceCount: sourceSummary.sources?.length ?? 0 }).onConflictDoNothing().returning();
         if (report && sourceSummary.sources?.length) {
-          await tx.insert(aiReportSources).values(sourceSummary.sources.map((source) => ({ aiReportId: report.id, entityType: source.entityType, entityId: source.entityId, entityVersion: source.entityVersion, label: source.label }))).onConflictDoNothing();
+          for (let offset = 0; offset < sourceSummary.sources.length; offset += 500) {
+            await tx.insert(aiReportSources).values(sourceSummary.sources.slice(offset, offset + 500).map((source) => ({ aiReportId: report.id, entityType: source.entityType, entityId: source.entityId, entityVersion: source.entityVersion, label: source.label }))).onConflictDoNothing();
+          }
         }
         await tx.insert(outboxEvents).values({ organizationId: job.organizationId, eventType: "ai.report.completed", entityType: "ai_job", entityId: job.id, entityVersion: attempt, payload: { jobId: job.id, reportId: report?.id ?? null } });
         return { reportId: report?.id };

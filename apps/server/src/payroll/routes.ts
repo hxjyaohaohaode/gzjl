@@ -1,9 +1,10 @@
-import type { FastifyInstance, preHandlerHookHandler } from "fastify";
+import type { FastifyInstance, FastifyReply, preHandlerHookHandler } from "fastify";
 import { z } from "zod";
 import { timezoneSchema } from "@workbench/shared";
 
 import { requirePermission } from "../auth/authorization.js";
 import type { ReimbursementService } from "./reimbursements.js";
+import type { PayrollHandoffService } from "./handoff.js";
 import {
   PayrollConflictError,
   PayrollNotFoundError,
@@ -69,6 +70,7 @@ export async function registerPayrollRoutes(
   service: PayrollService,
   authenticate: preHandlerHookHandler,
   reimbursements?: ReimbursementService,
+  handoff?: PayrollHandoffService,
 ): Promise<void> {
   const ownPermission = requirePermission("payroll.view_own", (request) => ({
     scopeKind: "self",
@@ -80,6 +82,28 @@ export async function registerPayrollRoutes(
   const configurePermission = requirePermission("payroll.configure", () => ({
     scopeKind: "organization",
   }));
+
+  const handoffError = (error: unknown, reply: FastifyReply) => {
+    if (error instanceof PayrollNotFoundError) return reply.code(404).send({ error: "payroll_not_found", message: error.message });
+    if (error instanceof PayrollConflictError) return reply.code(409).send({ error: "payroll_conflict", message: error.message });
+    throw error;
+  };
+  if (handoff) {
+    app.get("/api/payroll-runs/:runId/handoff.xlsx", { preHandler: [authenticate, settlePermission, requirePermission("work.view_full_scope", () => ({ scopeKind: "organization" }))] }, async (request, reply) => {
+      try { const file = await handoff.workbook(request.auth!, runParams.parse(request.params).runId); return reply.header("content-type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet").header("content-disposition", `attachment; filename*=UTF-8''${encodeURIComponent(file.fileName)}`).header("x-content-sha256", file.sha256).header("cache-control", "private, no-store").send(file.body); } catch (error) { return handoffError(error, reply); }
+    });
+    app.get("/api/payroll-runs/:runId/handoff", { preHandler: [authenticate, settlePermission] }, async (request, reply) => {
+      try { return await handoff.preview(request.auth!, runParams.parse(request.params).runId); } catch (error) { return handoffError(error, reply); }
+    });
+    app.post("/api/payroll-runs/:runId/handoff", { preHandler: [app.csrfProtection, authenticate, settlePermission] }, async (request, reply) => {
+      const { previewHash } = z.object({ previewHash: z.string().regex(/^[a-f0-9]{64}$/), identityMatchingConfirmed: z.literal(true), exceptionsAcknowledged: z.literal(true) }).parse(request.body);
+      try { return { batch: await handoff.confirm(request.auth!, runParams.parse(request.params).runId, previewHash) }; } catch (error) { return handoffError(error, reply); }
+    });
+    app.put("/api/payroll/members/:membershipId/external-identity", { preHandler: [app.csrfProtection, authenticate, configurePermission] }, async (request, reply) => {
+      const { externalId } = z.object({ externalId: z.string().trim().min(1).max(120).refine((v) => [...v].every((c) => c.charCodeAt(0) >= 32 && c.charCodeAt(0) !== 127), "编号不能包含控制字符。") }).parse(request.body);
+      try { return await handoff.profile(request.auth!, z.object({ membershipId: z.uuid() }).parse(request.params).membershipId, externalId); } catch (error) { return handoffError(error, reply); }
+    });
+  }
 
   if (reimbursements) {
     app.get("/api/reimbursements", { preHandler: authenticate }, async (request) => reimbursements.list(request.auth!));
@@ -190,7 +214,12 @@ export async function registerPayrollRoutes(
   app.get(
     "/api/payroll/me",
     { preHandler: [authenticate, ownPermission] },
-    async (request) => service.listOwn(request.auth!),
+    async (request) => {
+      const range = z.object({ from: z.iso.datetime({ offset: true }), to: z.iso.datetime({ offset: true }) }).refine((q) => Date.parse(q.to) > Date.parse(q.from) && Date.parse(q.to) - Date.parse(q.from) <= 366 * 86_400_000, "时间范围必须为正且最多 366 天。");
+      const query = request.query as Record<string, unknown>;
+      const selected = query.from !== undefined || query.to !== undefined ? range.parse(query) : null;
+      return service.listOwn(request.auth!, selected ? { from: new Date(selected.from), to: new Date(selected.to) } : undefined);
+    },
   );
 
   app.post(
@@ -238,6 +267,7 @@ export async function registerPayrollRoutes(
     async (request, reply) => {
       const { runId } = runParams.parse(request.params);
       try {
+        if (handoff) return reply.code(409).send({ error: "handoff_confirmation_required", message: "请先打开薪资交接预览，核对整批金额和外部人员编号后确认导出。", actionUrl: `/payroll?handoff=${runId}` });
         return { run: await service.settle(request.auth!, runId) };
       } catch (error) {
         if (error instanceof PayrollNotFoundError) {
@@ -276,6 +306,10 @@ export async function registerPayrollRoutes(
     async (request, reply) => {
       const { runId } = runParams.parse(request.params);
       try {
+        if (handoff) {
+          const preview = await handoff.preview(request.auth!, runId);
+          if (!preview.batch && preview.run.status !== "settled") return reply.code(409).send({ error: "handoff_confirmation_required", message: "请先核对交接预览并确认保存原文件，再下载正式薪资依据。" });
+        }
         const exported = await service.financeExport(request.auth!, runId);
         return reply
           .header("content-type", "text/csv; charset=utf-8")
@@ -284,6 +318,7 @@ export async function registerPayrollRoutes(
             `attachment; filename*=UTF-8''${encodeURIComponent(exported.fileName)}`,
           )
           .header("cache-control", "private, no-store")
+          .header("x-content-sha256", exported.sha256 ?? "")
           .send(exported.csv);
       } catch (error) {
         if (error instanceof PayrollNotFoundError) {

@@ -10,6 +10,9 @@ import {
   orgMemberships,
   orgUnits,
   outboxEvents,
+  payrollItems,
+  payrollRuns,
+  payPeriods,
   projectMembers,
   projectNodes,
   projects,
@@ -23,6 +26,7 @@ import type { AnalyticsActor, AnalyticsService } from "../analytics/service.js";
 import type { PayrollService } from "../payroll/service.js";
 import type { AiConfigurationService } from "./configuration.js";
 import { aiPermissionSnapshot, canReadAiJob } from "./access.js";
+import { visibleWorkText } from "../work/review-scope.js";
 
 export const aiTaskTypes = [
   "daily_summary",
@@ -171,6 +175,7 @@ export class AiService {
         ? { ...actor, grants: actor.grants.filter((grant) => grant.scopeKind === "self") }
         : actor;
     const facts = await this.analytics.summary(analysisActor, from, to);
+    const organizationFacts = analysisActor.grants.some((g) => ["work.view_full_scope", "analytics.view_team"].includes(g.permission) && g.scopeKind === "organization");
     const memberRows = await this.db
       .select({
         membershipId: orgMemberships.id,
@@ -187,7 +192,7 @@ export class AiService {
       .where(
         and(
           eq(orgMemberships.organizationId, actor.organizationId),
-          scope === "self" ? eq(orgMemberships.id, actor.membershipId) : undefined,
+          scope === "self" || !organizationFacts ? inArray(orgMemberships.id, [...new Set([actor.membershipId, ...facts.byMember.map((m) => m.membershipId)])]) : undefined,
         ),
       )
       .limit(200);
@@ -228,10 +233,10 @@ export class AiService {
         startAt: workSessions.startAt,
         endAt: workSessions.endAt,
         netSeconds: workSessions.netSeconds,
-        content: workSessions.content,
-        result: workSessions.result,
-        blockers: workSessions.blockers,
-        nextStep: workSessions.nextStep,
+        content: visibleWorkText(workSessions.content, actor.membershipId, analysisActor.grants),
+        result: visibleWorkText(workSessions.result, actor.membershipId, analysisActor.grants),
+        blockers: visibleWorkText(workSessions.blockers, actor.membershipId, analysisActor.grants),
+        nextStep: visibleWorkText(workSessions.nextStep, actor.membershipId, analysisActor.grants),
         submissionStatus: workSessions.submissionStatus,
         approvalStatus: workSessions.approvalStatus,
         workType: workTypes.name,
@@ -255,8 +260,7 @@ export class AiService {
           isNull(workSessions.deletedAt),
         ),
       )
-      .orderBy(desc(workSessions.startAt))
-      .limit(60);
+      .orderBy(desc(workSessions.startAt));
     const projectRows =
       scope === "self" && accessibleProjectIds.length === 0
         ? []
@@ -284,10 +288,10 @@ export class AiService {
               and(
                 eq(projects.organizationId, actor.organizationId),
                 isNull(projects.deletedAt),
-                scope === "self" ? inArray(projects.id, accessibleProjectIds) : undefined,
+                !organizationFacts ? inArray(projects.id, accessibleProjectIds) : undefined,
               ),
             )
-            .limit(240);
+;
     const projectContext = new Map<
       string,
       {
@@ -418,15 +422,17 @@ export class AiService {
       dailyBreakdown: record.dailyBreakdown.slice(0, 93),
       dailyBreakdownTruncated: record.dailyBreakdown.length > 93,
     }));
-    const payrollSources = payrollItems.flatMap((record) => [
+    const payrollSources = (ownPayroll?.items ?? []).flatMap((record) => [
       {
         entityType: "payroll_item",
         entityId: record.item.id,
+        entityVersion: `${record.run.status}:${record.run.inputHash}`,
         label: `工资事实 · ${record.period.name}`,
       },
       {
         entityType: "pay_period",
         entityId: record.period.id,
+        entityVersion: `${record.period.status}:${record.period.updatedAt.toISOString()}`,
         label: `薪资周期 · ${record.period.name}`,
       },
       ...record.components.map((component) => ({
@@ -436,7 +442,12 @@ export class AiService {
         label: `${record.period.name} · ${component.label}`,
       })),
     ]);
-    const sourceSummary = this.limitSourceSummary({
+    const sourceManifest = [
+      ...recentRecords.map((r) => ({ entityType: "work_session", entityId: r.id, entityVersion: String(r.version), label: `工作记录 · ${r.displayName} · ${r.startAt.toISOString()}` })),
+      ...[...projectContext.values()].flatMap((p) => [{ entityType: "project", entityId: p.id, entityVersion: String(p.version), label: p.name }, ...p.nodes.map((n) => ({ entityType: "project_node", entityId: n.id, entityVersion: String(n.version), label: `${p.name} · ${n.title}` }))]),
+      ...payrollSources,
+    ];
+    const sourceSummary = { ...this.limitSourceSummary({
       taskType,
       taskGoal: taskGoals[taskType],
       ...(question
@@ -479,7 +490,7 @@ export class AiService {
         nodes: project.nodes.slice(0, 40),
         nodesTruncated: project.nodes.length > 40,
       })),
-      recentRecords: recentRecords.map((record) => ({
+      recentRecords: recentRecords.slice(0, 60).map((record) => ({
         ...record,
         // The model needs the work narrative, not unlimited editor text. The
         // durable record remains untouched and is referenced by id/version.
@@ -488,29 +499,8 @@ export class AiService {
         blockers: record.blockers.slice(0, 1_000),
         nextStep: record.nextStep.slice(0, 1_000),
       })),
-      sources: [
-        ...(taskType === "salary_explanation" ? payrollSources : []),
-        // Keep record-level provenance first so a large organization cannot
-        // crowd it out of the bounded source list with roster entries.
-        ...recentRecords.map((record) => ({
-          entityType: "work_session",
-          entityId: record.id,
-          entityVersion: String(record.version),
-          label: `工作记录 · ${record.displayName} · ${record.startAt.toISOString().slice(0, 10)}`,
-        })),
-        ...facts.byProject
-          .filter((item) => item.projectId)
-          .map((item) => ({ entityType: "project", entityId: item.projectId!, label: item.projectName })),
-        ...(scope === "team"
-          ? memberRows.map((member) => ({
-              entityType: "organization_membership",
-              entityId: member.membershipId,
-              label: member.displayName,
-            }))
-          : []),
-        ...(taskType === "salary_explanation" ? [] : payrollSources),
-      ],
-    });
+      sources: taskType === "salary_explanation" ? [...payrollSources, ...sourceManifest.filter((s) => !s.entityType.startsWith("payroll") && s.entityType !== "pay_period")] : sourceManifest,
+    }), sourceManifest, ...(recentRecords.length > 60 ? { inputTruncated: true } : {}) };
     const inputHash = createHash("sha256")
       // Provider/model/output-cap changes can materially affect a report even
       // when the business facts are unchanged.  Keep those non-secret inputs
@@ -533,7 +523,7 @@ export class AiService {
             configurationVersion: provider.configurationVersion,
             generationOptions: provider.generationOptions,
           },
-          template: "structured-work-intelligence-v5-payroll",
+          template: "structured-work-intelligence-v6-provenance",
         }),
       )
       .digest("hex");
@@ -557,7 +547,7 @@ export class AiService {
         .limit(1);
       if (existing) return existing;
       await this.configuration.assertQuota(actor.organizationId, tx);
-      const [job] = await tx.insert(aiJobs).values({ organizationId: actor.organizationId, requestedBy: actor.membershipId, scope: { scope, from, to, permissionSnapshot: aiPermissionSnapshot(actor, scope), ...(question ? { question, conversationId, ...(pageContext ? { pageContext } : {}) } : {}) }, taskType, provider: "openai_compatible", model: provider.model, promptTemplateVersion: "structured-work-intelligence-v5-payroll", inputHash, sourceSummary, maxAttempts: provider.maxAttempts, maxOutputTokens: provider.maxOutputTokens }).returning();
+      const [job] = await tx.insert(aiJobs).values({ organizationId: actor.organizationId, requestedBy: actor.membershipId, scope: { scope, from, to, permissionSnapshot: aiPermissionSnapshot(actor, scope), ...(question ? { question, conversationId, ...(pageContext ? { pageContext } : {}) } : {}) }, taskType, provider: "openai_compatible", model: provider.model, promptTemplateVersion: "structured-work-intelligence-v6-provenance", inputHash, sourceSummary, maxAttempts: provider.maxAttempts, maxOutputTokens: provider.maxOutputTokens }).returning();
       if (!job) throw new Error("Failed to create AI job");
       await tx.insert(outboxEvents).values({ organizationId: actor.organizationId, eventType: "ai.job.queued", entityType: "ai_job", entityId: job.id, entityVersion: 1, payload: { jobId: job.id } });
       return job;
@@ -573,7 +563,36 @@ export class AiService {
     const [record] = await this.db.select({ job: aiJobs, report: aiReports }).from(aiReports).innerJoin(aiJobs, eq(aiJobs.id, aiReports.aiJobId)).where(and(eq(aiReports.id, reportId), eq(aiJobs.organizationId, actor.organizationId), eq(aiJobs.requestedBy, actor.membershipId))).limit(1);
     if (!record || !canReadAiJob(actor, record.job)) return null;
     const sources = await this.db.select().from(aiReportSources).where(eq(aiReportSources.aiReportId, reportId));
-    return { ...record, sources };
+    const currentVersions = new Map<string, string>();
+    const sourceProjects = new Map<string, string>();
+    for (let offset = 0; offset < sources.length; offset += 500) {
+      const chunk = sources.slice(offset, offset + 500);
+      const ids = (type: string) => chunk.filter((s) => s.entityType === type).map((s) => s.entityId);
+      const workIds = ids("work_session"); const projectIds = ids("project"); const nodeIds = ids("project_node");
+      const payrollIds = ids("payroll_item"), periodIds = ids("pay_period");
+      const [work, project, nodes, wages, periods] = await Promise.all([
+        workIds.length ? this.db.select({ id: workSessions.id, version: workSessions.version }).from(workSessions).where(and(eq(workSessions.organizationId, actor.organizationId), inArray(workSessions.id, workIds), isNull(workSessions.deletedAt))) : [],
+        projectIds.length ? this.db.select({ id: projects.id, version: projects.version }).from(projects).where(and(eq(projects.organizationId, actor.organizationId), inArray(projects.id, projectIds), isNull(projects.deletedAt))) : [],
+        nodeIds.length ? this.db.select({ id: projectNodes.id, version: projectNodes.version, projectId: projectNodes.projectId }).from(projectNodes).innerJoin(projects, eq(projects.id, projectNodes.projectId)).where(and(eq(projects.organizationId, actor.organizationId), inArray(projectNodes.id, nodeIds), isNull(projectNodes.deletedAt), isNull(projects.deletedAt))) : [],
+        payrollIds.length ? this.db.select({ id: payrollItems.id, status: payrollRuns.status, inputHash: payrollRuns.inputHash }).from(payrollItems).innerJoin(payrollRuns, eq(payrollRuns.id, payrollItems.payrollRunId)).innerJoin(payPeriods, eq(payPeriods.id, payrollRuns.payPeriodId)).where(and(eq(payPeriods.organizationId, actor.organizationId), eq(payrollItems.membershipId, actor.membershipId), inArray(payrollItems.id, payrollIds))) : [],
+        periodIds.length ? this.db.select({ id: payPeriods.id, status: payPeriods.status, updatedAt: payPeriods.updatedAt }).from(payPeriods).where(and(eq(payPeriods.organizationId, actor.organizationId), inArray(payPeriods.id, periodIds))) : [],
+      ]);
+      for (const wage of wages) currentVersions.set(wage.id, `${wage.status}:${wage.inputHash}`);
+      for (const period of periods) currentVersions.set(period.id, `${period.status}:${period.updatedAt.toISOString()}`);
+      for (const row of [...work, ...project, ...nodes]) currentVersions.set(row.id, String(row.version));
+      for (const node of nodes) sourceProjects.set(node.id, node.projectId);
+    }
+    const scope = record.job.scope as { scope?: string; from?: string; to?: string };
+    let rangeChanged = false;
+    // New records can change a range total without touching any cited version.
+    if (scope.from && scope.to && (record.job.sourceSummary as { sourceManifest?: unknown }).sourceManifest) {
+      const access = await this.analytics.buildAccessCondition(scope.scope === "self" ? { ...actor, grants: actor.grants.filter((g) => g.scopeKind === "self") } : actor);
+      const current = await this.db.select({ id: workSessions.id }).from(workSessions).where(and(access, eq(workSessions.recordKind, "fact"), isNull(workSessions.deletedAt), gt(workSessions.endAt, new Date(scope.from)), lt(workSessions.startAt, new Date(scope.to))));
+      const savedIds = new Set(sources.filter((s) => s.entityType === "work_session").map((s) => s.entityId));
+      rangeChanged = current.length !== savedIds.size || current.some((r) => !savedIds.has(r.id));
+    }
+    const annotated = sources.map((s) => ({ ...s, projectId: sourceProjects.get(s.entityId) ?? null, stale: ["work_session", "project", "project_node", "payroll_item", "pay_period"].includes(s.entityType) && (!currentVersions.has(s.entityId) || Boolean(s.entityVersion && currentVersions.get(s.entityId) !== s.entityVersion)) }));
+    return { ...record, sources: annotated, stale: rangeChanged || annotated.some((s) => s.stale), rangeChanged, inputTruncated: (record.job.sourceSummary as { inputTruncated?: boolean }).inputTruncated === true };
   }
 
   async cancel(actor: { organizationId: string; membershipId: string }, jobId: string) {
