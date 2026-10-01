@@ -24,3 +24,14 @@ export function salaryPeriodMatchesMonth(period: { startsAt: string; endsAt: str
   return toZonedInputValue(new Date(period.startsAt), period.timezone).slice(0, 7) <= month
     && toZonedInputValue(new Date(Date.parse(period.endsAt) - 1), period.timezone).slice(0, 7) >= month;
 }
+
+/** The planned handoff follows the boss's range, including cross-month ranges. */
+export function suggestedPeriodCutoff(endsAt: string, day: number, minute: number) {
+  const month = endsAt.slice(0, 7);
+  if (!isSalaryMonth(month)) return "";
+  const clock = `${String(Math.floor(minute / 60)).padStart(2, "0")}:${String(minute % 60).padStart(2, "0")}:00`;
+  const candidate = `${month}-${String(day).padStart(2, "0")}T${clock}`;
+  if (candidate > endsAt) return candidate;
+  const next = salaryMonthForm(month).endsAt.slice(0, 7);
+  return `${next}-${String(day).padStart(2, "0")}T${clock}`;
+}

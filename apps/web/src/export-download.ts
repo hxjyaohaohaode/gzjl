@@ -1,5 +1,9 @@
 /** Direct exports must finish with a file, not an HTML gateway page or an endless spinner. */
 export async function fetchExportFile(path: string, format: "csv" | "json" | "xlsx", timeoutMs = 60_000): Promise<Blob> {
+  return (await fetchExportResponse(path, format, timeoutMs)).blob;
+}
+
+export async function fetchExportResponse(path: string, format: "csv" | "json" | "xlsx", timeoutMs = 60_000) {
   const controller = new AbortController();
   const timer = globalThis.setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -15,7 +19,9 @@ export async function fetchExportFile(path: string, format: "csv" | "json" | "xl
     }
     const blob = await response.blob();
     if (!blob.size) throw new Error("导出文件为空，请重新导出。");
-    return blob;
+    const encodedName = /filename\*=UTF-8''([^;]+)/i.exec(response.headers.get("content-disposition") ?? "")?.[1];
+    const fileName = encodedName ? decodeURIComponent(encodedName).replace(/[\\/:*?"<>|]/g, "-") : null;
+    return { blob, fileName, sha256: response.headers.get("x-content-sha256") };
   } catch (error) {
     if (controller.signal.aborted) throw new Error("导出超时，请缩小时间范围后重试。", { cause: error });
     if (error instanceof TypeError) throw new Error("下载连接中断，请检查网络后重新导出。", { cause: error });

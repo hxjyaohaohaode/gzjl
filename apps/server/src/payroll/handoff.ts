@@ -1,8 +1,9 @@
+import { payrollExportName } from "./export-name.js";
 import { capturePayrollWorkbook } from "./bundle.js";
 import { createHash } from "node:crypto";
 import { and, asc, desc, eq, gt, isNull, lt, ne, or, sql } from "drizzle-orm";
 import type { Database } from "@workbench/db";
-import { auditLogs, compensationPlans, compensationPlanVersions, organizationOwners, orgMemberships, payrollExportBatches, payrollExportProfiles, payrollItems, payrollRuns, payPeriods, users, workSessions, workSessionCorrections } from "@workbench/db/schema";
+import { auditLogs, compensationPlans, compensationPlanVersions, organizationOwners, orgMemberships, payrollAdjustments, payrollItemComponents, payrollExportBatches, payrollExportProfiles, payrollItems, payrollRuns, payPeriods, users, workSessions, workSessionCorrections } from "@workbench/db/schema";
 import { addDecimalAmounts } from "@workbench/shared";
 import { lockPayrollInputs } from "./input-lock.js";
 import { PayrollConflictError, PayrollNotFoundError, PayrollService, type PayrollActor } from "./service.js";
@@ -16,6 +17,23 @@ function escapeCsvCell(value: string, column: number) {
 }
 export class PayrollHandoffService {
   constructor(private readonly db: Database) {}
+
+  async report(actor: PayrollActor, runId: string) {
+    return this.db.transaction(async (tx) => {
+      await lockPayrollInputs(tx, actor.organizationId);
+      const service = new PayrollHandoffService(tx as unknown as Database);
+      const preview = await service.preview(actor, runId);
+      if (preview.batch) return service.workbook(actor, runId);
+      if (!["ready", "review_required"].includes(preview.run.status)) throw new PayrollConflictError("该计算已撤销或尚未完成，请重新计算后下载。");
+      // A stale recalculation is rolled back with the conflict. A GET never
+      // silently replaces the selected calculation or locks source records.
+      const current = await new PayrollService(tx as unknown as Database).calculate(actor, preview.period.id);
+      if (current.id !== runId) throw new PayrollConflictError("计算后记录、方案或报销已变化，请点击“更新计算并查看”后重新下载。");
+      const name = `${payrollExportName(preview.period.name)}-薪资总览及工作明细-未确认-${runId.slice(0, 8)}.csv`;
+      const captured = await capturePayrollWorkbook(tx as unknown as Database, actor, preview, name, { report: true, blockers: preview.blockers });
+      return { body: Buffer.from(captured.workbookBase64, "base64"), sha256: captured.workbookSha256, fileName: captured.workbookFileName };
+    });
+  }
 
 
   async workbook(actor: PayrollActor, runId: string) {
@@ -66,13 +84,24 @@ export class PayrollHandoffService {
     const pending = facts.filter((f) => f.approvalStatus === "pending_review");
     const drafts = facts.filter((f) => ["not_requested", "returned"].includes(f.approvalStatus));
     const anomalies = facts.filter((f) => Array.isArray(f.anomalyFlags) && f.anomalyFlags.length);
-    const previewRows = rows.map((r) => ({ membershipId: r.item.membershipId, displayName: r.displayName, externalId: r.externalId ?? r.item.membershipId, identityMode: r.externalId ? "external" : "membership", currency: r.item.currency, approvedSeconds: r.item.approvedSeconds, pendingSeconds: r.item.pendingSeconds, grossAmount: r.item.grossAmount, adjustmentAmount: r.item.adjustmentAmount, finalAmount: r.item.finalAmount, estimate: r.item.estimate, needsReview: r.item.needsReview, planVersionId: r.item.compensationPlanVersionId, amountChange: previous.has(r.item.membershipId) ? addDecimalAmounts(r.item.finalAmount, previous.get(r.item.membershipId)!.finalAmount.startsWith("-") ? previous.get(r.item.membershipId)!.finalAmount.slice(1) : `-${previous.get(r.item.membershipId)!.finalAmount}`) : null }));
+    const components = await this.db.select({ memberId: payrollItems.membershipId, component: payrollItemComponents, adjustmentSource: payrollAdjustments.sourceEntityType }).from(payrollItems)
+      .innerJoin(payrollItemComponents, eq(payrollItemComponents.payrollItemId, payrollItems.id))
+      .leftJoin(payrollAdjustments, and(eq(payrollItemComponents.sourceEntityType, "payroll_adjustment"), eq(payrollAdjustments.id, payrollItemComponents.sourceEntityId)))
+      .where(eq(payrollItems.payrollRunId, runId));
+    const amounts = new Map<string, { wages: string; bonus: string; subsidies: string; reimbursements: string; other: string }>();
+    for (const row of rows) amounts.set(row.item.membershipId, { wages: "0.000000", bonus: "0.000000", subsidies: "0.000000", reimbursements: "0.000000", other: "0.000000" });
+    for (const { memberId, component, adjustmentSource } of components) {
+      const total = amounts.get(memberId)!;
+      const key = component.sourceEntityType === "payroll_adjustment" ? (adjustmentSource === "reimbursement" ? "reimbursements" : "other") : component.type === "allowance" ? "subsidies" : component.type === "bonus" ? "bonus" : "wages";
+      total[key] = addDecimalAmounts(total[key], component.amount);
+    }
+    const previewRows = rows.map((r) => ({ membershipId: r.item.membershipId, displayName: r.displayName, externalId: r.externalId ?? r.item.membershipId, identityMode: r.externalId ? "external" : "membership", currency: r.item.currency, approvedSeconds: r.item.approvedSeconds, pendingSeconds: r.item.pendingSeconds, grossAmount: r.item.grossAmount, adjustmentAmount: r.item.adjustmentAmount, finalAmount: r.item.finalAmount, estimate: r.item.estimate, needsReview: r.item.needsReview, planVersionId: r.item.compensationPlanVersionId, amounts: amounts.get(r.item.membershipId)!, amountChange: previous.has(r.item.membershipId) ? addDecimalAmounts(r.item.finalAmount, previous.get(r.item.membershipId)!.finalAmount.startsWith("-") ? previous.get(r.item.membershipId)!.finalAmount.slice(1) : `-${previous.get(r.item.membershipId)!.finalAmount}`) : null }));
     const blockers = [...(record.run.status === "ready" || record.run.status === "settled" ? [] : ["批次未就绪，请先复核并重新计算。"]), ...(missingPlans.length ? [`${missingPlans.length} 位已加入成员在本周期缺少计薪方案。`] : []), ...(pending.length ? [`${pending.length} 条记录仍待审。`] : []), ...(previewRows.some((r) => r.needsReview || r.estimate) ? ["存在预估或待复核金额。"] : []), ...(rows.length ? [] : ["当前批次没有可导出人员行。"])];
     const externalIds = new Set<string>(); const repeatedExternalIds = new Set<string>();
     for (const row of previewRows) { if (externalIds.has(row.externalId)) repeatedExternalIds.add(row.externalId); externalIds.add(row.externalId); }
     if (repeatedExternalIds.size) blockers.push("导出行存在重复的外部人员编号，请分别保存唯一映射后重新核对。");
     if (corrections.length) blockers.push(`${corrections.length} 条更正申请尚待处理，请先核对更正，避免锁定旧事实。`);
-    if (!batch && record.period.endsAt > new Date()) blockers.push("结算周期尚未结束，可先查看计算预览；请在完整周期结束后重新核对并确认导出，避免把半个月的依据当作完整月账单。");
+    if (!batch && record.period.endsAt > new Date()) blockers.push("老板指定的周期尚未结束，可以下载当前统计表；正式交接请在该周期结束后更新计算并核对。");
     const previewHash = hash(JSON.stringify({ run: record.run, period: record.period, rows: previewRows, facts, missingPlans, corrections }));
     return { ...record, rows: batch ? (batch.manifest as { rows: typeof previewRows }).rows : previewRows, missingPlans, pending, drafts, anomalies, corrections, blockers, previewHash, batch: batch ? { id: batch.id, fileName: batch.fileName, sha256: batch.sha256, ruleVersion: batch.ruleVersion, createdAt: batch.createdAt, manifest: publicManifest(batch.manifest) } : null };
   }
@@ -87,7 +116,7 @@ export class PayrollHandoffService {
       if (preview.blockers.length) throw new PayrollConflictError(preview.blockers.join(" "));
       const header = ["成员唯一编号", "外部人员编号", "员工", "薪资周期", "周期开始（含）", "周期结束（不含）", "周期时区", "币种", "已批准工时（小时）", "待审核工时（小时）", "应计金额", "调整金额", "最终金额", "计薪方案版本", "批次唯一编号", "批次号", "计算规则版本", "发薪状态"];
       const csv = `${[header, ...preview.rows.map((r) => [r.membershipId, r.externalId, r.displayName, preview.period.name, preview.period.startsAt.toISOString(), preview.period.endsAt.toISOString(), preview.period.timezone, r.currency, (r.approvedSeconds / 3600).toFixed(6), (r.pendingSeconds / 3600).toFixed(6), r.grossAmount, r.adjustmentAmount, r.finalAmount, r.planVersionId, runId, String(preview.run.runNumber), preview.run.calculationVersion, "本平台仅导出依据，发薪由外部平台办理"])].map((r) => r.map(escapeCsvCell).join(",")).join("\r\n")}\r\n`;
-      const fileName = `${preview.period.name.replace(/[\\/:*?"<>|]+/g, "-").split("").map((c) => c.charCodeAt(0) < 32 ? "-" : c).join("").slice(0, 100)}-薪资交接-批次${preview.run.runNumber}-${runId.slice(0, 8)}.csv`;
+      const fileName = `${payrollExportName(preview.period.name)}-薪资交接-批次${preview.run.runNumber}-${runId.slice(0, 8)}.csv`;
       const workbook = await capturePayrollWorkbook(tx as unknown as Database, actor, preview, fileName);
       await new PayrollService(tx as unknown as Database).settle(actor, runId);
       const [batch] = await tx.insert(payrollExportBatches).values({ organizationId: actor.organizationId, payrollRunId: runId, fileName, csv, sha256: hash(`\uFEFF${csv}`), ruleVersion: preview.run.calculationVersion, inputHash: preview.run.inputHash, previewHash, manifest: { ...workbook, rows: preview.rows, rowCount: preview.rows.length, byteLength: Buffer.byteLength(`\uFEFF${csv}`, "utf8"), draftsAcknowledged: preview.drafts.map((f) => f.id), anomaliesAcknowledged: preview.anomalies.map((f) => f.id), encoding: "utf-8-bom", dateSemantics: "[startsAt, endsAt)", externalPayment: true }, createdBy: actor.membershipId }).returning();

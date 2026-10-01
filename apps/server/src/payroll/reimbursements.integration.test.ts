@@ -140,6 +140,7 @@ it("exports a whole month's work, wages, subsidies, reimbursements and deduction
   await db.insert(payrollAdjustments).values({ organizationId: employee.organizationId, membershipId: employee.membershipId, payPeriodId: period.id, amount: "-5", currency: "CNY", reason: "已确认扣减", createdBy: reviewer.membershipId, approvedBy: reviewer.membershipId, approvedAt: new Date() });
   const run = await payroll.calculate(reviewer, period.id);
   const preview = await new PayrollHandoffService(db).preview(reviewer, run.id);
+  expect(preview.rows.find((r) => r.membershipId === employee.membershipId)?.amounts).toEqual({ wages: "100.000000", bonus: "0.000000", subsidies: "30.000000", reimbursements: "128.350000", other: "-5.000000" });
   const captured = await capturePayrollWorkbook(db, reviewer, preview, "九月.csv");
   const book = new ExcelJS.Workbook(); await book.xlsx.load(Buffer.from(captured.workbookBase64, "base64") as unknown as Parameters<typeof book.xlsx.load>[0]);
   const sheet = book.getWorksheet("薪资汇总")!;

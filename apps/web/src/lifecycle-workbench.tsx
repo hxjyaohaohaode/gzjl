@@ -1,12 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { Badge, Button, Card, CardContent, CardHeader } from "@workbench/ui";
-import { sourceHref, type FactSource } from "@workbench/shared";
+import { addDecimalAmounts, sourceHref, type FactSource } from "@workbench/shared";
 import { api } from "./api.js";
 import { getOrganizationTimezone } from "./timezone.js";
 import { workStateLabels } from "./work-states.js";
-import { fetchExportFile } from "./export-download.js";
+import { fetchExportFile, fetchExportResponse } from "./export-download.js";
 import { hashEvidenceFile } from "./evidence-hash.js";
 
 const dateLabel = (value: string) => new Intl.DateTimeFormat("zh-CN", { timeZone: getOrganizationTimezone(), dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
@@ -101,8 +101,8 @@ export function AiDraftEditor({ report }: { report: { title: string; summary: st
 
 interface HandoffPreview {
   run: { status: string; calculationVersion: string; runNumber: number };
-  period: { name: string; startsAt: string; endsAt: string; timezone: string; cutoffAt: string };
-  rows: Array<{ membershipId: string; displayName: string; externalId: string; currency: string; finalAmount: string; amountChange: string | null; planVersionId: string }>;
+  period: { id: string; name: string; startsAt: string; endsAt: string; timezone: string; cutoffAt: string };
+  rows: Array<{ membershipId: string; displayName: string; externalId: string; currency: string; approvedSeconds: number; pendingSeconds: number; finalAmount: string; amountChange: string | null; planVersionId: string; estimate: boolean; needsReview: boolean; amounts?: { wages: string; bonus: string; subsidies: string; reimbursements: string; other: string } }>;
   missingPlans: Array<{ id: string; displayName: string }>;
   pending: Array<{ id: string }>;
   drafts: Array<{ id: string }>;
@@ -110,14 +110,23 @@ interface HandoffPreview {
   blockers: string[]; previewHash: string;
   batch: { id: string; fileName: string; sha256: string; ruleVersion: string; createdAt: string; manifest?: { workbookFileName?: string; workbookSha256?: string; workRowCount?: number; componentRowCount?: number; reimbursementRowCount?: number } } | null;
 }
-export function PayrollHandoffPanel({ runId, onClose }: { runId: string; onClose: () => void }) {
+export function PayrollHandoffPanel({ runId, onClose, onRecalculate, canExportWork = true }: { runId: string; onClose: () => void; onRecalculate?: (id: string) => void; canExportWork?: boolean }) {
   const client = useQueryClient();
+  const panel = useRef<HTMLDivElement>(null);
+  useEffect(() => { panel.current?.scrollIntoView({ block: "start" }); panel.current?.focus({ preventScroll: true }); }, [runId]);
   const [confirmedHash, setConfirmedHash] = useState<string | null>(null);
   const [identities, setIdentities] = useState<Record<string, string>>({});
   const query = useQuery({ queryKey: ["payroll-management", "handoff", runId], queryFn: () => api<HandoffPreview>(`/api/payroll-runs/${runId}/handoff`) });
   const refresh = () => { setConfirmedHash(null); return client.invalidateQueries({ queryKey: ["payroll-management"] }); };
   const profile = useMutation({ mutationFn: (row: HandoffPreview["rows"][number]) => api(`/api/payroll/members/${row.membershipId}/external-identity`, { method: "PUT", body: { externalId: identities[row.membershipId] ?? row.externalId } }), onSuccess: refresh });
   const confirm = useMutation({ mutationFn: () => api(`/api/payroll-runs/${runId}/handoff`, { method: "POST", body: { previewHash: query.data!.previewHash, identityMatchingConfirmed: true, exceptionsAcknowledged: true } }), onSuccess: async () => { await refresh(); await client.invalidateQueries({ queryKey: ["payroll-me"] }); await client.invalidateQueries({ queryKey: ["work-sessions"] }); } });
+  const report = useMutation({ mutationFn: async () => {
+    const file = await fetchExportResponse(`/api/payroll-runs/${runId}/report.xlsx`, "xlsx", 120_000);
+    if (!file.fileName || !file.sha256 || !/^[a-f0-9]{64}$/.test(file.sha256)) throw new Error("服务未返回有效的文件名或校验信息，请重试。");
+    if (await hashEvidenceFile(new File([file.blob], file.fileName)) !== file.sha256) throw new Error("下载文件校验失败，请重新下载。");
+    const url = URL.createObjectURL(file.blob); const anchor = document.createElement("a"); anchor.href = url; anchor.download = file.fileName; anchor.click();
+    globalThis.setTimeout(() => URL.revokeObjectURL(url), 30_000);
+  } });
   const download = useMutation({ mutationFn: async (format: "csv" | "xlsx") => {
     const batch = query.data?.batch;
     if (!batch) throw new Error("请先确认并保存交接批次。");
@@ -131,21 +140,27 @@ export function PayrollHandoffPanel({ runId, onClose }: { runId: string; onClose
     const anchor = document.createElement("a"); anchor.href = url; anchor.download = filename; anchor.click();
     globalThis.setTimeout(() => URL.revokeObjectURL(url), 30_000);
   } });
-  return <Card className="handoff-panel"><CardHeader><h2>薪资交接 · 预检与逐行预览</h2><Button variant="ghost" size="compact" onClick={onClose}>收起</Button></CardHeader><CardContent>
+  return <div ref={panel} tabIndex={-1} className="payroll-preview-anchor"><Card className="handoff-panel"><CardHeader><h2>薪资交接 · 预检与逐行预览</h2><Button variant="ghost" size="compact" onClick={onClose}>收起</Button></CardHeader><CardContent>
     {query.isPending ? <p role="status">正在核对整批数据…</p> : query.isError ? <QueryFailure error={query.error} retry={() => void query.refetch()} /> : query.data ? <>
       <p className="lifecycle-caption">{query.data.period.name} · {dateLabel(query.data.period.startsAt)} 至 {dateLabel(query.data.period.endsAt)}（不含） · {query.data.period.timezone}。本平台导出薪资依据，由外部平台实际发薪。</p>
       <p>完整 Excel 将包含薪资汇总、工资组成（工资 / 补贴 / 奖励 / 扣减）、报销明细、工作提交单、工作证据目录及规则来源；同时保留汇总 CSV 用于外部导入。</p>
+      <h3 className="font-bold">老板核对：每人薪资总览 + 本周期工作明细</h3>
+      <div className="flex flex-wrap gap-3">{canExportWork ? <Button disabled={report.isPending} onClick={() => report.mutate()}>{report.isPending ? "正在生成并校验 Excel…" : "下载薪资总览及工作明细 Excel"}</Button> : <p>完整工作明细导出需要组织全部工时查看权限。</p>}{!query.data.batch && onRecalculate ? <Button variant="secondary" disabled={report.isPending} onClick={() => onRecalculate(query.data!.period.id)}>更新计算并查看</Button> : null}</div>
+      {!query.data.batch ? <p className="lifecycle-caption">可直接下载当前统计表，无须先锁定或配置外部人员编号。待审与待复核金额会标明；正式交接待处理事项见下方。源数据变化后请更新计算。</p> : null}
+      {report.isSuccess ? <p role="status">Excel 校验通过，已发起下载。第一张为每人薪资总览，后附本周期工作提交单及各项明细。</p> : null}
       <p>缺方案 {query.data.missingPlans.length} 人 · 待审 {query.data.pending.length} 条 · 未提交/退回 {query.data.drafts.length} 条 · 异常 {query.data.anomalies.length} 条</p>
       {query.data.blockers.map((b) => <p className="lifecycle-warning" key={b}>{b}</p>)}
       {query.data.missingPlans.length ? <ul>{query.data.missingPlans.map((m) => <li key={m.id}>{m.displayName} · {m.id}：请配置覆盖本周期的方案。</li>)}</ul> : null}
       {query.data.pending.length || query.data.drafts.length || query.data.anomalies.length ? <details><summary>查看待处理或需核对记录</summary><div className="fact-project-links">{[...new Set([...query.data.pending, ...query.data.drafts, ...query.data.anomalies].map((f) => f.id))].map((id) => <Link key={id} to={`/work?record=${id}`}>记录 {id.slice(0, 8)}</Link>)}</div></details> : null}
-      <div className="handoff-table-scroll" tabIndex={0} aria-label="完整逐行薪资预览，可横向滚动"><table><thead><tr><th>成员 / 唯一编号</th><th>外部平台人员编号</th><th>金额</th><th>较上批变化</th><th>方案版本</th></tr></thead><tbody>{query.data.rows.map((r) => <tr key={r.membershipId}><td><strong>{r.displayName}</strong><small>{r.membershipId}</small></td><td>{query.data!.batch ? r.externalId : <><input aria-label={`${r.displayName} 外部人员编号`} value={identities[r.membershipId] ?? r.externalId} maxLength={120} onChange={(e) => { setIdentities((v) => ({ ...v, [r.membershipId]: e.target.value })); setConfirmedHash(null); }} /><Button variant="ghost" size="compact" disabled={profile.isPending || !(identities[r.membershipId] ?? r.externalId).trim()} onClick={() => profile.mutate(r)}>保存映射</Button></>}</td><td>{r.currency} {r.finalAmount}</td><td>{r.amountChange ?? "首批"}</td><td>{r.planVersionId}</td></tr>)}</tbody></table></div>
+      <div className="handoff-table-scroll" tabIndex={0} aria-label="完整逐行薪资预览，可横向滚动"><table><thead><tr><th>成员 / 唯一编号</th><th>已批准 / 待审工时</th><th>工作工资</th><th>奖励</th><th>补贴</th><th>报销</th><th>其他调整</th><th>本周期合计</th><th>金额状态</th><th>较上批变化</th></tr></thead><tbody>{query.data.rows.map((r) => <tr key={r.membershipId}><td><strong>{r.displayName}</strong><small>{r.membershipId}</small></td><td>{(r.approvedSeconds / 3600).toFixed(2)} / {(r.pendingSeconds / 3600).toFixed(2)} 小时</td>{(["wages", "bonus", "subsidies", "reimbursements", "other"] as const).map((key) => <td key={key}>{r.amounts?.[key] ?? "见组成明细"}</td>)}<td><strong>{r.currency} {r.finalAmount}</strong></td><td>{query.data!.batch ? "已确认交接" : r.needsReview ? "待复核 · 未确认" : r.estimate ? "含待审预估 · 未确认" : "计算值 · 未确认"}</td><td>{r.amountChange ?? "首批"}</td></tr>)}{!query.data.batch ? query.data.missingPlans.map((m) => <tr key={m.id}><td><strong>{m.displayName}</strong><small>{m.id}</small></td><td colSpan={9}>缺计薪方案，无法计算金额；请配置方案后更新计算。</td></tr>) : null}</tbody></table></div>
+      <div className="flex flex-wrap gap-3" aria-label="按币种汇总">{[...new Set(query.data.rows.map((r) => r.currency))].map((currency) => <p key={currency}>{currency} 本周期合计：<strong>{addDecimalAmounts(...query.data!.rows.filter((r) => r.currency === currency).map((r) => r.finalAmount))}</strong>（{query.data!.batch ? "已确认" : "未确认；含预估时须核对"}）</p>)}</div>
+      <details><summary>正式交接：核对外部人员编号和方案版本</summary><div className="handoff-table-scroll"><table><thead><tr><th>成员</th><th>外部平台人员编号</th><th>方案版本</th></tr></thead><tbody>{query.data.rows.map((r) => <tr key={r.membershipId}><td>{r.displayName}<small>{r.membershipId}</small></td><td>{query.data!.batch ? r.externalId : <><input aria-label={`${r.displayName} 外部人员编号`} value={identities[r.membershipId] ?? r.externalId} maxLength={120} onChange={(e) => { setIdentities((v) => ({ ...v, [r.membershipId]: e.target.value })); setConfirmedHash(null); }} /><Button variant="ghost" size="compact" disabled={profile.isPending || !(identities[r.membershipId] ?? r.externalId).trim()} onClick={() => profile.mutate(r)}>保存映射</Button></>}</td><td>{r.planVersionId}</td></tr>)}</tbody></table></div></details>
       {query.data.batch ? <div className="handoff-manifest"><p>已确认交接批次：{query.data.batch.id}</p><p>规则：{query.data.batch.ruleVersion}</p><p>文件 SHA-256：<code>{query.data.batch.sha256}</code></p><p>保留原批次文件，实际外部付款状态请到发薪平台核对。下方预览使用确认时的人员和金额快照。</p><Button disabled={download.isPending} onClick={() => download.mutate("csv")}>{download.isPending ? "下载并校验中…" : "重取已确认原文件"}</Button>{query.data.batch.manifest?.workbookFileName ? <><p>完整工作单：{query.data.batch.manifest.workRowCount} 条工作记录 · {query.data.batch.manifest.componentRowCount} 项工资组成 · {query.data.batch.manifest.reimbursementRowCount} 条报销。已批准、未提交、退回和异常均标记状态；补贴和报销不重复加总。</p><Button disabled={download.isPending} onClick={() => download.mutate("xlsx")}>下载薪资及完整工作单 Excel</Button><small>Excel SHA-256：{query.data.batch.manifest.workbookSha256}</small></> : null}{download.isSuccess ? <p role="status">文件校验通过，已发起下载；可随时重取同一批次。</p> : null}</div> : <>
         {profile.isPending || query.isFetching ? <p role="status">正在重新核对整批数据，请等待人员映射和金额预览更新后确认。</p> : null}
         <label className="handoff-confirmation"><input type="checkbox" disabled={profile.isPending || query.isFetching || confirm.isPending} checked={confirmedHash === query.data.previewHash} onChange={(e) => setConfirmedHash(e.target.checked ? query.data!.previewHash : null)} /><span>我已逐行核对金额和人员编号，确认外部平台接受这些编号及当前列格式；已检查未提交、退回和异常记录对本期的影响。默认 UUID 是本平台成员编号，须按外部平台规则保存映射。同名成员不能只按姓名识别。</span></label>
         <Button disabled={profile.isPending || query.isFetching || confirm.isPending || confirmedHash !== query.data.previewHash || query.data.blockers.length > 0 || Object.keys(identities).some((id) => identities[id] !== query.data!.rows.find((r) => r.membershipId === id)?.externalId)} onClick={() => confirm.mutate()}>{confirm.isPending ? "正在确认并保存原文件…" : "确认导出并锁定"}</Button>
       </>}
     </> : null}
-    {profile.error || confirm.error || download.error ? <QueryFailure error={profile.error ?? confirm.error ?? download.error} retry={() => void query.refetch()} /> : null}
-  </CardContent></Card>;
+    {profile.error || confirm.error || download.error || report.error ? <QueryFailure error={profile.error ?? confirm.error ?? download.error ?? report.error} retry={() => void query.refetch()} /> : null}
+  </CardContent></Card></div>;
 }

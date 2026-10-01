@@ -89,6 +89,12 @@ export async function registerPayrollRoutes(
     throw error;
   };
   if (handoff) {
+    app.get("/api/payroll-runs/:runId/report.xlsx", { preHandler: [authenticate, settlePermission, requirePermission("work.view_full_scope", () => ({ scopeKind: "organization" }))] }, async (request, reply) => {
+      try {
+        const file = await handoff.report(request.auth!, runParams.parse(request.params).runId);
+        return reply.header("content-type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet").header("content-disposition", `attachment; filename*=UTF-8''${encodeURIComponent(file.fileName)}`).header("x-content-sha256", file.sha256).header("cache-control", "private, no-store").send(file.body);
+      } catch (error) { return handoffError(error, reply); }
+    });
     app.get("/api/payroll-runs/:runId/handoff.xlsx", { preHandler: [authenticate, settlePermission, requirePermission("work.view_full_scope", () => ({ scopeKind: "organization" }))] }, async (request, reply) => {
       try { const file = await handoff.workbook(request.auth!, runParams.parse(request.params).runId); return reply.header("content-type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet").header("content-disposition", `attachment; filename*=UTF-8''${encodeURIComponent(file.fileName)}`).header("x-content-sha256", file.sha256).header("cache-control", "private, no-store").send(file.body); } catch (error) { return handoffError(error, reply); }
     });
