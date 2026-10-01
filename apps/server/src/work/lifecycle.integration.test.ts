@@ -126,11 +126,11 @@ describe("full cycle facts, repair and immutable handoff", () => {
     const workbook = await f.handoff.workbook(f.owner, f.run.id);
     expect(createHash("sha256").update(workbook.body).digest("hex")).toBe(workbook.sha256);
     const book = new ExcelJS.Workbook(); await book.xlsx.load(workbook.body as unknown as Parameters<typeof book.xlsx.load>[0]);
-    expect(book.worksheets.map((sheet) => sheet.name)).toEqual(["薪资汇总", "工资组成", "报销明细", "工作提交单", "工作证据目录", "规则与来源"]);
-    expect(book.getWorksheet("工作提交单")!.rowCount).toBe(3);
+    expect(book.worksheets.map((sheet) => sheet.name)).toEqual(["薪资总览", "周期工作记录", "工资组成", "报销明细", "工作证据目录", "规则与来源"]);
+    expect(book.getWorksheet("周期工作记录")!.rowCount).toBe(3);
     expect(book.getWorksheet("工资组成")!.rowCount).toBeGreaterThan(2);
     expect(JSON.stringify(book.getWorksheet("工资组成")!.getSheetValues())).toContain("-1.00");
-    expect(JSON.stringify(book.getWorksheet("工作提交单")!.getSheetValues())).toContain("事实0");
+    expect(JSON.stringify(book.getWorksheet("周期工作记录")!.getSheetValues())).toContain("事实0");
     expect(JSON.stringify((await f.handoff.preview(f.owner, f.run.id)).batch)).not.toContain("workbookBase64");
     const file = await f.payroll.financeExport(f.owner, f.run.id);
     expect(file.sha256).toBe(createHash("sha256").update(file.csv).digest("hex"));
@@ -195,10 +195,10 @@ describe("full cycle facts, repair and immutable handoff", () => {
     expect(exported.fileName).toContain("未确认");
     expect(() => encodeURIComponent(exported.fileName)).not.toThrow(); expect(exported.fileName).toContain("🚀");
     const book = new ExcelJS.Workbook(); await book.xlsx.load(exported.body as unknown as Parameters<typeof book.xlsx.load>[0]);
-    expect(JSON.stringify(book.getWorksheet("薪资汇总")!.getSheetValues())).toContain("缺方案不能写零元");
-    const last = book.getWorksheet("薪资汇总")!.lastRow!;
+    expect(JSON.stringify(book.getWorksheet("薪资总览")!.getSheetValues())).toContain("缺方案不能写零元");
+    const last = book.getWorksheet("薪资总览")!.lastRow!;
     expect(last.getCell(18).value).toBeNull(); expect(last.getCell(22).value).toBe("缺计薪方案 · 无法计算");
-    expect(JSON.stringify(book.getWorksheet("工作提交单")!.getSheetValues())).toContain("待审核");
+    expect(JSON.stringify(book.getWorksheet("周期工作记录")!.getSheetValues())).toContain("待审核");
     expect(JSON.stringify(book.getWorksheet("规则与来源")!.getSheetValues())).toContain("未确认统计表");
     expect(await f.db.select().from(payrollExportBatches)).toHaveLength(0);
     expect((await f.db.select().from(workSessions)).some((r) => r.approvalStatus === "locked")).toBe(false);

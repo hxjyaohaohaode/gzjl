@@ -833,7 +833,7 @@ test("Owner can configure a versioned hourly plan and create a pay period", asyn
   await page.getByLabel("第 1 项补贴名称").fill("交通补贴");
   await page.getByLabel("第 1 项补贴金额").fill("500");
   await expect(page.getByLabel("第 1 项补贴计入方式")).toHaveValue("period_end");
-  await page.getByLabel("第 1 项补贴计入方式").selectOption("daily");
+  await page.getByLabel("第 1 项补贴计入方式").selectOption("prorated");
   await page.getByRole("button", { name: "添加补贴" }).click();
   await page.getByLabel("第 2 项补贴名称").fill("通信补贴");
   await page.getByLabel("第 2 项补贴金额").fill("300");
@@ -848,7 +848,7 @@ test("Owner can configure a versioned hourly plan and create a pay period", asyn
     baseAmount: "88.50",
     pendingReviewCountsInEstimate: true,
     subsidies: [
-      { name: "交通补贴", amount: "500", distribution: "daily" },
+      { name: "交通补贴", amount: "500", distribution: "prorated" },
       { name: "通信补贴", amount: "300", distribution: "period_end" },
     ],
   });
@@ -906,6 +906,39 @@ test("Owner can configure a versioned hourly plan and create a pay period", asyn
   expect(periodPayload?.endsAt).toBe("2026-10-19T15:30:45.000Z");
   expect(periodPayload?.cutoffAt).toBe("2026-11-15T01:30:00.000Z");
 });
+
+for (const distribution of [undefined, "daily", "prorated"]) {
+  test(`Owner editing a ${distribution ?? "legacy default"} subsidy sees and saves the intended fixed or explicit policy`, async ({ page }) => {
+    await mockAuthenticatedWorkspace(page);
+    const memberId = "00000000-0000-4000-8000-000000000099";
+    await page.route("**/api/payroll/me", (route) => route.fulfill({ json: { items: [], currentPlan: null, livePreview: null } }));
+    await page.route("**/api/payroll/management", (route) => route.fulfill({ json: {
+      members: [{ membershipId: memberId, displayName: "独立补贴成员", status: "active", isOwner: false,
+        plan: { plan: { name: "原有个人方案", type: "hourly", currency: "CNY", activeVersion: 1 },
+          version: { version: 1, type: "hourly", baseAmount: "100.000000", effectiveFrom: "2026-08-01T00:00:00Z", effectiveTo: null,
+            pendingReviewCountsInEstimate: true, config: { subsidies: [{ name: "个人补贴", amount: "168.19", ...(distribution ? { distribution } : {}) }] } }, rules: [] } }],
+      periods: [], runs: [], latestItems: [], liveItems: [], settings: { timezone: "Asia/Shanghai", payrollCutoffDay: 15 },
+    } }));
+    let saved: Record<string, unknown> | null = null;
+    await page.route(`**/api/payroll/members/${memberId}/plan`, async (route) => {
+      saved = route.request().postDataJSON();
+      await route.fulfill({ json: { result: { version: { effectiveFrom: saved!.effectiveFrom } } } });
+    });
+    await page.goto("/login"); await page.getByLabel("邮箱或手机号").fill("owner@example.test");
+    await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
+    await page.getByRole("button", { name: "登录", exact: true }).click();
+    await expect(page).not.toHaveURL(/\/login(?:[?#].*)?$/);
+    await page.goto("/payroll");
+    await page.getByRole("combobox", { name: "成员", exact: true }).selectOption(memberId);
+    const expected = distribution === "prorated" ? "prorated" : "period_end";
+    await expect(page.getByLabel("第 1 项补贴金额")).toHaveValue("168.19");
+    await expect(page.getByLabel("第 1 项补贴计入方式")).toHaveValue(expected);
+    await page.getByRole("button", { name: "保存薪资方案新版本" }).click();
+    await expect.poll(() => saved).not.toBeNull();
+    expect(saved).toMatchObject({ subsidies: [{ name: "个人补贴", amount: "168.19", distribution: expected }] });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true);
+  });
+}
 
 test("Owner payroll keeps settlement controls visible when one live estimate has invalid work", async ({ page }) => {
   await mockAuthenticatedWorkspace(page);
@@ -5206,6 +5239,12 @@ test("project branch management keeps rename, merge, archive, and recovery actio
   const featureBranchId = "00000000-0000-4000-8000-000000000013";
   const experimentBranchId = "00000000-0000-4000-8000-000000000014";
   const archivedBranchId = "00000000-0000-4000-8000-000000000015";
+  // Refetches must see the mutations, as the real project API does. Returning
+  // the initial tree forever races the client's cache refresh on mobile.
+  let mainName = "主线";
+  let featureMerged = false;
+  let experimentArchived = false;
+  let restoredArchived = false;
   await page.route(`**/api/projects/${projectId}/tree`, (route) =>
     route.fulfill({
       json: {
@@ -5219,10 +5258,10 @@ test("project branch management keeps rename, merge, archive, and recovery actio
         branches: [
           {
             id: mainBranchId,
-            name: "主线",
+            name: mainName,
             description: "稳定交付路径",
             isDefault: true,
-            version: 2,
+            version: mainName === "主线" ? 2 : 3,
             archivedAt: null,
             mergedAt: null,
           },
@@ -5231,17 +5270,17 @@ test("project branch management keeps rename, merge, archive, and recovery actio
             name: "交付优化",
             description: "验证交付流程",
             isDefault: false,
-            version: 1,
+            version: featureMerged ? 2 : 1,
             archivedAt: null,
-            mergedAt: null,
+            mergedAt: featureMerged ? "2026-09-02T00:00:00.000Z" : null,
           },
           {
             id: experimentBranchId,
             name: "实验分支",
             description: null,
             isDefault: false,
-            version: 4,
-            archivedAt: null,
+            version: experimentArchived ? 5 : 4,
+            archivedAt: experimentArchived ? "2026-09-02T00:00:00.000Z" : null,
             mergedAt: null,
           },
           {
@@ -5249,8 +5288,8 @@ test("project branch management keeps rename, merge, archive, and recovery actio
             name: "旧验证分支",
             description: "可恢复的独立验证",
             isDefault: false,
-            version: 3,
-            archivedAt: "2026-09-01T01:00:00.000Z",
+            version: restoredArchived ? 4 : 3,
+            archivedAt: restoredArchived ? null : "2026-09-01T01:00:00.000Z",
             mergedAt: null,
           },
         ],
@@ -5284,6 +5323,7 @@ test("project branch management keeps rename, merge, archive, and recovery actio
         parentBranchId: null,
         changeSummary: "更新分支信息",
       });
+      mainName = "稳定主线";
       await route.fulfill({ json: { branch: { id: mainBranchId } } });
     },
   );
@@ -5295,6 +5335,7 @@ test("project branch management keeps rename, merge, archive, and recovery actio
         expectedVersion: 1,
         targetBranchId: mainBranchId,
       });
+      featureMerged = true;
       await route.fulfill({
         json: {
           result: {
@@ -5311,6 +5352,7 @@ test("project branch management keeps rename, merge, archive, and recovery actio
     async (route) => {
       expect(route.request().method()).toBe("POST");
       expect(route.request().postDataJSON()).toEqual({ expectedVersion: 4 });
+      experimentArchived = true;
       await route.fulfill({ json: { branch: { id: experimentBranchId } } });
     },
   );
@@ -5319,6 +5361,7 @@ test("project branch management keeps rename, merge, archive, and recovery actio
     async (route) => {
       expect(route.request().method()).toBe("POST");
       expect(route.request().postDataJSON()).toEqual({ expectedVersion: 3 });
+      restoredArchived = true;
       await route.fulfill({ json: { branch: { id: archivedBranchId } } });
     },
   );
@@ -5352,6 +5395,11 @@ test("project branch management keeps rename, merge, archive, and recovery actio
     branchRail.getByText("实验分支", { exact: true }),
   ).toHaveCount(0);
   await page.getByRole("button", { name: "恢复分支 旧验证分支" }).click();
+  await expect(branchRail.getByText("旧验证分支", { exact: true })).toBeVisible();
+  await page.reload();
+  await expect(branchRail.getByText("实验分支", { exact: true })).toHaveCount(0);
+  await expect(branchRail.getByText("旧验证分支", { exact: true })).toBeVisible();
+  await expect(branchRail.getByRole("button", { name: /稳定主线/ })).toBeVisible();
 });
 
 test("a project node can derive a connected work line with an entry node", async ({

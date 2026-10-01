@@ -384,7 +384,7 @@ describe("employee payroll view and receipt acknowledgement", () => {
       })
       .returning();
     const run = await service.calculate(ownerActor, period!.id);
-    expect(run.calculationVersion).toBe("payroll-engine-v9-versioned-cent-reconciliation");
+    expect(run.calculationVersion).toBe("payroll-engine-v10-fixed-member-subsidies");
     const [item] = await db
       .select()
       .from(payrollItems)
@@ -678,8 +678,8 @@ describe("employee payroll view and receipt acknowledgement", () => {
     });
     expect(configured.version.config).toEqual({
       subsidies: [
-        { name: "交通补贴", amount: "500" },
-        { name: "通信补贴", amount: "300" },
+        { name: "交通补贴", amount: "500", distribution: "period_end" },
+        { name: "通信补贴", amount: "300", distribution: "period_end" },
       ],
     });
 

@@ -225,7 +225,7 @@ it.each(["current", "legacy"] as const)("counts real elapsed work around fractio
   expect(unfiltered[0]).toMatchObject({ id: session.id, netSeconds: stored.netSeconds, periodNetSeconds: 9 });
   expect(ranged[0]).toMatchObject({ id: session.id, netSeconds: stored.netSeconds, periodNetSeconds: 9 });
   const { run, item, components } = await calculate();
-  expect(run.calculationVersion).toBe("payroll-engine-v9-versioned-cent-reconciliation");
+  expect(run.calculationVersion).toBe("payroll-engine-v10-fixed-member-subsidies");
   expect(item).toMatchObject({ approvedSeconds: 9, pendingSeconds: 0, grossAmount: "9.000000", estimate: false });
   expect(components.reduce((sum, component) => sum + Number(component.quantity), 0)).toBe(9);
   const [unchanged] = await db.select().from(workSessions).where(eq(workSessions.id, session.id));
