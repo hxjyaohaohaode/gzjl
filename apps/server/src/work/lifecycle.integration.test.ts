@@ -129,12 +129,12 @@ describe("full cycle facts, repair and immutable handoff", () => {
     expect(book.worksheets.map((sheet) => sheet.name)).toEqual(["薪资汇总", "工资组成", "报销明细", "工作提交单", "工作证据目录", "规则与来源"]);
     expect(book.getWorksheet("工作提交单")!.rowCount).toBe(3);
     expect(book.getWorksheet("工资组成")!.rowCount).toBeGreaterThan(2);
-    expect(JSON.stringify(book.getWorksheet("工资组成")!.getSheetValues())).toContain("-1.000000");
+    expect(JSON.stringify(book.getWorksheet("工资组成")!.getSheetValues())).toContain("-1.00");
     expect(JSON.stringify(book.getWorksheet("工作提交单")!.getSheetValues())).toContain("事实0");
     expect(JSON.stringify((await f.handoff.preview(f.owner, f.run.id)).batch)).not.toContain("workbookBase64");
     const file = await f.payroll.financeExport(f.owner, f.run.id);
     expect(file.sha256).toBe(createHash("sha256").update(file.csv).digest("hex"));
-    expect(file.csv).toContain('"-1.000000"'); expect(file.csv).not.toContain("'-1.000000");
+    expect(file.csv).toContain('"-1.00"'); expect(file.csv).not.toContain("'-1.00");
     for (const actor of f.actors.slice(1)) expect(file.csv).toContain(actor.membershipId);
     await f.db.update(users).set({ displayName: "重命名后不改变旧文件" }).where(eq(users.id, f.people[1]!.id));
     await f.handoff.profile(f.owner, f.actors[1]!.membershipId, "new-external-id");

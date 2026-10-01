@@ -109,6 +109,44 @@ it("keeps the same-day overtime threshold across effective hourly plan versions"
   }
 });
 
+it("uses historical hourly versions identically in live preview and the selected cycle", async () => {
+  vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(new Date("2026-09-23T12:00:00Z"));
+  const { employee, service, work, calculate } = await fixture({ versioned: true });
+  await work("08:00:00", "09:00:00"); await work("16:00:00", "17:00:00");
+  const preview = (await service.listOwn(employee)).livePreview!;
+  const { item } = await calculate();
+  expect(preview).toMatchObject({ approvedSeconds: 7200, estimatedAmount: "300.000000" });
+  expect(item).toMatchObject({ approvedSeconds: 7200, grossAmount: preview.estimatedAmount });
+});
+
+it("stops overlapping scheme versions before storing a duplicate payment", async () => {
+  const { db, versions, work, calculate } = await fixture({ versioned: true });
+  await db.update(compensationPlanVersions).set({ effectiveTo: null }).where(eq(compensationPlanVersions.id, versions[0]!.id));
+  await work("08:00:00", "20:00:00");
+  await expect(calculate()).rejects.toThrow("生效区间重叠");
+  expect(await db.select().from(payrollItems)).toHaveLength(0);
+});
+
+it("counts one daily salary using the last applicable approved rate on a version-change day", async () => {
+  const { db, work, calculate } = await fixture({ versioned: true });
+  await db.update(compensationPlanVersions).set({ type: "daily", baseUnit: "day" });
+  await work("08:00:00", "20:00:00");
+  const { item, components } = await calculate();
+  expect(item).toMatchObject({ grossAmount: "200.000000", approvedSeconds: 43_200, estimate: false });
+  const charged = components.filter((component) => component.unit === "day" && Number(component.quantity) > 0);
+  expect(charged).toHaveLength(1);
+  expect(charged[0]!.calculationTrace).toMatchObject({ dailyVersionPolicy: "one_day_last_applicable_approved_rate" });
+});
+
+it("counts one daily salary across identical rate versions and keeps an approved day confirmed", async () => {
+  const { db, work, calculate } = await fixture({ versioned: true });
+  await db.update(compensationPlanVersions).set({ type: "daily", baseUnit: "day", baseAmount: "100" });
+  await work("08:00:00", "09:00:00"); await work("16:00:00", "17:00:00", "pending_review");
+  const { item, components } = await calculate();
+  expect(item).toMatchObject({ grossAmount: "100.000000", estimate: false, approvedSeconds: 3600, pendingSeconds: 3600 });
+  expect(components.filter((component) => component.unit === "day" && Number(component.quantity) > 0)).toHaveLength(1);
+});
+
 it.each([
   { includePending: false, amount: "1200.000000", estimate: false },
   { includePending: true, amount: "2600.000000", estimate: true },
@@ -187,7 +225,7 @@ it.each(["current", "legacy"] as const)("counts real elapsed work around fractio
   expect(unfiltered[0]).toMatchObject({ id: session.id, netSeconds: stored.netSeconds, periodNetSeconds: 9 });
   expect(ranged[0]).toMatchObject({ id: session.id, netSeconds: stored.netSeconds, periodNetSeconds: 9 });
   const { run, item, components } = await calculate();
-  expect(run.calculationVersion).toBe("payroll-engine-v8-effective-millisecond-budget");
+  expect(run.calculationVersion).toBe("payroll-engine-v9-versioned-cent-reconciliation");
   expect(item).toMatchObject({ approvedSeconds: 9, pendingSeconds: 0, grossAmount: "9.000000", estimate: false });
   expect(components.reduce((sum, component) => sum + Number(component.quantity), 0)).toBe(9);
   const [unchanged] = await db.select().from(workSessions).where(eq(workSessions.id, session.id));
@@ -311,7 +349,7 @@ it("keeps already settled legacy amounts and snapshots immutable on repeated set
   await expect(service.settle(actor, run.id)).resolves.toEqual(legacy);
   await expect(service.settle(actor, run.id)).resolves.toEqual(legacy);
   const exported = await service.financeExport(actor, run.id);
-  expect(exported.csv).toContain("3600.000000,0.000000,3600.000000");
+  expect(exported.csv).toContain("3600.00,0.00,3600.00");
   expect(await db.select().from(payrollSnapshots).where(eq(payrollSnapshots.payrollRunId, run.id))).toEqual(beforeSnapshot);
   expect(await db.select().from(payrollItems).where(eq(payrollItems.payrollRunId, run.id))).toEqual(beforeItems);
   expect(await db.select().from(workSessions)).toEqual(beforeWork);

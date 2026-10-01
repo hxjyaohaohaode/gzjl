@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { roundMoney } from "@workbench/shared";
 
 import { and, desc, eq, gt, inArray, isNull, lt, sql } from "drizzle-orm";
 import type { Database } from "@workbench/db";
@@ -398,9 +399,9 @@ export class AiService {
         currency: record.item.currency,
         approvedSeconds: record.item.approvedSeconds,
         pendingSeconds: record.item.pendingSeconds,
-        grossAmount: record.item.grossAmount,
-        adjustmentAmount: record.item.adjustmentAmount,
-        finalAmount: record.item.finalAmount,
+        grossAmount: roundMoney(record.item.grossAmount),
+        adjustmentAmount: roundMoney(record.item.adjustmentAmount),
+        finalAmount: roundMoney(record.item.finalAmount),
         estimate: record.item.estimate,
         needsReview: record.item.needsReview,
       },
@@ -413,13 +414,13 @@ export class AiService {
         sourceVersion: component.sourceVersion,
         quantity: component.quantity,
         unit: component.unit,
-        rate: component.rate,
+        rate: component.rate ? roundMoney(component.rate) : null,
         multiplier: component.multiplier,
-        amount: component.amount,
+        amount: roundMoney(component.amount),
         calculationTrace: compactPayrollTrace(component.calculationTrace),
       })),
       componentsTruncated: record.components.length > 32,
-      dailyBreakdown: record.dailyBreakdown.slice(0, 93),
+      dailyBreakdown: record.dailyBreakdown.slice(0, 93).map((day) => ({ ...day, amount: roundMoney(day.amount), estimatedAmount: roundMoney(day.estimatedAmount) })),
       dailyBreakdownTruncated: record.dailyBreakdown.length > 93,
     }));
     const payrollSources = (ownPayroll?.items ?? []).flatMap((record) => [
@@ -473,7 +474,9 @@ export class AiService {
             payroll: {
               privacyScope: "self_only",
               range: { from, to },
-              summary: ownPayroll?.summary ?? [],
+              summary: (ownPayroll?.summary ?? []).map((item) => ({ ...item,
+                settledAmount: roundMoney(item.settledAmount), pendingAmount: roundMoney(item.pendingAmount), totalAmount: roundMoney(item.totalAmount),
+              })),
               items: payrollItems,
               itemsTruncated: (ownPayroll?.items.length ?? 0) > payrollItems.length,
             },

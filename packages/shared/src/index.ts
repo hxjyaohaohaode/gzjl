@@ -4,6 +4,7 @@ export * from "./exports.js";
 export * from "./forecast.js";
 export * from "./permissions.js";
 export * from "./payroll-engine.js";
+export * from "./money.js";
 export * from "./project-progress.js";
 export * from "./schemas.js";
 export * from "./timer-state.js";

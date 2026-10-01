@@ -26,6 +26,8 @@ import {
 } from "@workbench/db/schema";
 import {
   addDecimalAmounts,
+  allocateRoundedMoney,
+  roundMoney,
   calculateHourlyPayroll,
   calculateWorkDuration,
   clipWholeSecondPayableIntervals,
@@ -33,7 +35,6 @@ import {
   localDateKeysForIntervals,
   wholeSecondPayableIntervals,
   payableIntervalSeconds,
-  multiplyDecimalAmount,
   prorateDecimalAmount,
   timezoneSchema,
   type PayableInterval,
@@ -41,7 +42,7 @@ import {
 } from "@workbench/shared";
 import { lockPayrollInputs } from "./input-lock.js";
 
-const PAYROLL_CALCULATION_VERSION = "payroll-engine-v8-effective-millisecond-budget";
+export const PAYROLL_CALCULATION_VERSION = "payroll-engine-v9-versioned-cent-reconciliation";
 
 export interface PayrollActor {
   organizationId: string;
@@ -422,6 +423,286 @@ function workSecondsByLocalDate(
   return result;
 }
 
+function benefitKey(name: string) { return name.normalize("NFKC").trim(); }
+
+function versionedSalary(
+  period: { startsAt: Date; endsAt: Date; timezone: string },
+  versions: Array<typeof compensationPlanVersions.$inferSelect>,
+  rulesByVersion: Map<string, PayrollRateRule[]>,
+  intervals: PayableInterval[],
+  weeklyContextIntervals: PayableInterval[],
+) {
+  let grossAmount = "0.000000";
+  let estimate = false;
+  let needsReview = false;
+  const components: Array<{
+    type: "base" | "weekday" | "weekend" | "holiday" | "night" | "overtime" | "project" | "allowance" | "bonus";
+    label: string;
+    amount: string;
+    planVersionId: string;
+    planVersion: number;
+    quantity?: string;
+    unit?: string;
+    rate?: string;
+    multiplier?: string;
+    trace: unknown;
+  }> = [];
+  const orderedVersions = [...versions].sort(
+    (left, right) => left.effectiveFrom.getTime() - right.effectiveFrom.getTime(),
+  );
+  const latestVersion = orderedVersions.at(-1)!;
+  const periodMillis = period.endsAt.getTime() - period.startsAt.getTime();
+  const awardedWeeklyBonusWeeks = new Set<string>();
+  // One civil day earns one daily wage. Prefer a version with approved work;
+  // if several qualify, use the last applicable rate on that day's actual work.
+  const dailyPayees = new Map<string, { versionId: string; approved: boolean }>();
+  for (const version of orderedVersions.filter((entry) => entry.type === "daily")) {
+    const work = workSecondsByLocalDate(clipPayableIntervals(intervals, version.effectiveFrom,
+      version.effectiveTo ?? period.endsAt).filter((interval) => interval.approvalStatus === "approved"
+        || version.pendingReviewCountsInEstimate), period.timezone);
+    for (const [date, seconds] of work) {
+      const approved = seconds.approvedSeconds > 0;
+      const current = dailyPayees.get(date);
+      if (!current || approved || !current.approved) dailyPayees.set(date, { versionId: version.id, approved });
+    }
+  }
+
+  // A fixed benefit at period end replaces earlier prorated versions of
+  // the same benefit. Otherwise a switch daily -> period_end pays it twice.
+  const endingVersion = orderedVersions.findLast((version) =>
+    !version.effectiveTo || version.effectiveTo >= period.endsAt);
+  const fixedBenefits = new Set(planSubsidies(endingVersion?.config)
+    .filter((benefit) => benefit.distribution === "period_end")
+    .map((benefit) => benefitKey(benefit.name)));
+  for (let index = 1; index < orderedVersions.length; index++) {
+    const previous = orderedVersions[index - 1]!;
+    if (!previous.effectiveTo || previous.effectiveTo > orderedVersions[index]!.effectiveFrom)
+      throw new PayrollConflictError("薪资方案的生效区间重叠，已停止计算以避免重复工资或补贴，请核对方案版本。");
+  }
+  for (const version of orderedVersions) {
+    const names = planSubsidies(version.config).map((subsidy) => benefitKey(subsidy.name));
+    if (new Set(names).size !== names.length)
+      throw new PayrollConflictError("同一方案版本存在同名补贴，已停止计算以避免重复计入，请核对补贴名称。");
+    const segmentStart =
+      version.effectiveFrom > period.startsAt
+        ? version.effectiveFrom
+        : period.startsAt;
+    const segmentEnd =
+      version.effectiveTo && version.effectiveTo < period.endsAt
+        ? version.effectiveTo
+        : period.endsAt;
+    if (segmentEnd <= segmentStart) continue;
+    const versionIntervals = (version.type === "hourly" || version.type === "hybrid"
+      ? clipWholeSecondPayableIntervals : clipPayableIntervals)(
+      intervals,
+      segmentStart,
+      segmentEnd,
+    );
+
+    if (version.type === "hourly" || version.type === "hybrid") {
+      const hourly = calculateHourlyPayroll({
+        hourlyRate: version.baseAmount,
+        timezone: period.timezone,
+        intervals: versionIntervals,
+        // A rate version changes the price, not the amount already worked
+        // on this civil day. The engine applies this version's pending policy.
+        dailyContextIntervals: intervals,
+        // Every version sees the final approved/pending state for the
+        // whole natural week; the period boundary still clips a week that
+        // straddles two payroll months into two independent reward spans.
+        weeklyContextIntervals,
+        // Rule changes are versioned and auditable, but a newly enabled
+        // weekly reward is allowed to recognise earlier work in the same
+        // still-open payroll month. Limit eligibility to this version's
+        // segment end so an older version cannot claim a threshold reached
+        // later; the cross-version awarded set still prevents duplicates.
+        weeklyBonusEligibilityIntervals: clipPayableIntervals(
+          intervals,
+          period.startsAt,
+          segmentEnd,
+        ),
+        excludedWeeklyBonusWeekStarts: [...awardedWeeklyBonusWeeks],
+        rules: rulesByVersion.get(version.id) ?? [],
+        includePendingAsEstimate: version.pendingReviewCountsInEstimate,
+      });
+      grossAmount = addDecimalAmounts(grossAmount, hourly.grossAmount);
+      hourly.weeklyBonusWeekStarts.forEach((week) => awardedWeeklyBonusWeeks.add(week));
+      estimate ||= hourly.estimate;
+      components.push(
+        ...hourly.components.map((component) => ({
+          type: component.type === "night_window" ? "night" as const : component.type,
+          label: component.label,
+          amount: component.amount,
+          planVersionId: version.id,
+          planVersion: version.version,
+          quantity: String(component.seconds),
+          unit: "second",
+          rate: component.hourlyRate,
+          multiplier: component.multiplier,
+          trace: {
+            ...component.trace,
+            durationPolicy: "effective_millisecond_union_approved_budget_first",
+            sourceIds: component.sourceIds,
+            estimate: component.estimate,
+            effectiveFrom: segmentStart,
+            effectiveTo: segmentEnd,
+          },
+        })),
+      );
+      if (version.type === "hybrid") {
+        const config = version.config as Record<string, unknown>;
+        if (typeof config.fixedAmount === "string") {
+          const segmentSeconds = Math.floor(
+            (segmentEnd.getTime() - segmentStart.getTime()) / 1_000,
+          );
+          const fixedAmount = prorateDecimalAmount(
+            config.fixedAmount,
+            segmentEnd.getTime() - segmentStart.getTime(),
+            periodMillis,
+          );
+          grossAmount = addDecimalAmounts(grossAmount, fixedAmount);
+          components.push({
+            type: "base",
+            label: "混合方案固定部分（按生效区间折算）",
+            amount: fixedAmount,
+            planVersionId: version.id,
+            planVersion: version.version,
+            quantity: String(segmentSeconds),
+            unit: "period_second",
+            trace: { effectiveFrom: segmentStart, effectiveTo: segmentEnd },
+          });
+        }
+      }
+    } else if (version.type === "daily") {
+      const dailyWork = workSecondsByLocalDate(
+        versionIntervals.filter(
+          (interval) =>
+            interval.approvalStatus === "approved" ||
+            version.pendingReviewCountsInEstimate,
+        ),
+        period.timezone,
+      );
+      const dates = [...dailyWork.keys()].filter((date) => dailyPayees.get(date)?.versionId === version.id);
+      if (!dates.length) components.push({ type: "base", label: "按工作日计薪（本区间无可计薪日）",
+        amount: "0.00", planVersionId: version.id, planVersion: version.version,
+        quantity: "0", unit: "day", rate: version.baseAmount,
+        trace: { dates: [], estimate: false, effectiveFrom: segmentStart, effectiveTo: segmentEnd },
+      });
+      for (const date of dates) {
+        const day = dailyWork.get(date)!;
+        const dailyEstimate = day.approvedSeconds === 0 && day.pendingSeconds > 0;
+        estimate ||= dailyEstimate;
+        grossAmount = addDecimalAmounts(grossAmount, version.baseAmount);
+        components.push({
+          type: "base",
+          label: "按工作日计薪",
+          amount: version.baseAmount,
+          planVersionId: version.id,
+          planVersion: version.version,
+          quantity: "1",
+          unit: "day",
+          rate: version.baseAmount,
+          trace: { dates: [date], estimate: dailyEstimate, dailyVersionPolicy: "one_day_last_applicable_approved_rate",
+            effectiveFrom: segmentStart, effectiveTo: segmentEnd },
+        });
+      }
+    } else if (version.type === "project_based") {
+      // A project amount is not time-proportional. Only the newest version
+      // in the period is proposed and it always requires human review.
+      if (version.id === latestVersion.id) {
+        grossAmount = addDecimalAmounts(grossAmount, version.baseAmount);
+        needsReview = true;
+        components.push({
+          type: "project",
+          label: "项目制金额（待人工确认项目范围）",
+          amount: version.baseAmount,
+          planVersionId: version.id,
+          planVersion: version.version,
+          quantity: "1",
+          unit: version.baseUnit,
+          trace: { effectiveFrom: segmentStart, effectiveTo: segmentEnd },
+        });
+      }
+    } else {
+      const segmentSeconds = Math.floor(
+        (segmentEnd.getTime() - segmentStart.getTime()) / 1_000,
+      );
+      const amount = prorateDecimalAmount(
+        version.baseAmount,
+        segmentEnd.getTime() - segmentStart.getTime(),
+        periodMillis,
+      );
+      grossAmount = addDecimalAmounts(grossAmount, amount);
+      components.push({
+        type: "base",
+        label:
+          version.type === "monthly"
+            ? "月度固定薪资（按生效区间折算）"
+            : "周期固定薪资（按生效区间折算）",
+        amount,
+        planVersionId: version.id,
+        planVersion: version.version,
+        quantity: String(segmentSeconds),
+        unit: "period_second",
+        trace: { effectiveFrom: segmentStart, effectiveTo: segmentEnd },
+      });
+    }
+
+    const segmentSeconds = Math.floor(
+      (segmentEnd.getTime() - segmentStart.getTime()) / 1_000,
+    );
+    for (const subsidy of planSubsidies(version.config)) {
+      if (fixedBenefits.has(benefitKey(subsidy.name)) && version.id !== endingVersion?.id) continue;
+      const amount = subsidy.distribution === "period_end"
+        ? (segmentEnd.getTime() === period.endsAt.getTime() ? subsidy.amount : "0.000000")
+        : prorateDecimalAmount(subsidy.amount, segmentEnd.getTime() - segmentStart.getTime(), periodMillis);
+      grossAmount = addDecimalAmounts(grossAmount, amount);
+      components.push({
+        type: "allowance",
+        label: subsidy.name,
+        amount,
+        planVersionId: version.id,
+        planVersion: version.version,
+        quantity: String(segmentSeconds),
+        unit: "period_second",
+        rate: subsidy.amount,
+        trace: {
+          kind: "configured_subsidy",
+          configuredAmount: subsidy.amount,
+          distribution: subsidy.distribution ?? "daily",
+          effectiveFrom: segmentStart,
+          effectiveTo: segmentEnd,
+        },
+      });
+    }
+  }
+
+
+  // Round wages, rewards and each named benefit once, allocating cents back to each
+  // auditable component. Category totals, component totals and final pay agree.
+  const categories = new Map<string, typeof components>();
+  estimate = components.some((component) => (component.trace as Record<string, unknown>).estimate === true);
+  for (const component of components) {
+    const key = component.type === "allowance" ? `subsidy:${benefitKey(component.label)}` : component.type === "bonus" ? "bonus" : "wages";
+    categories.set(key, [...(categories.get(key) ?? []), component]);
+  }
+  for (const [category, group] of categories) {
+    const amounts = allocateRoundedMoney(group.map((component) => component.amount));
+    group.forEach((component, index) => {
+      const unroundedAmount = component.amount;
+      component.amount = amounts[index]!;
+      component.trace = { ...(component.trace as Record<string, unknown>), rounding: {
+        policy: "category_half_up_2_decimals_largest_remainder", category,
+        unroundedAmount, roundedAmount: component.amount,
+      } };
+    });
+  }
+  grossAmount = addDecimalAmounts(...components.map((component) => component.amount));
+  const countedIntervals = wholeSecondPayableIntervals(versions.flatMap((version) =>
+    clipWholeSecondPayableIntervals(intervals, version.effectiveFrom, version.effectiveTo ?? period.endsAt)));
+  return { grossAmount, estimate, needsReview, components, latestVersion, countedIntervals };
+}
+
 export class PayrollService {
   constructor(private readonly db: Database) {}
 
@@ -538,162 +819,65 @@ export class PayrollService {
       forecastHistoryStartsAt,
       now,
     );
-    const approvedSeconds = intervals
-      .filter((interval) => interval.approvalStatus === "approved")
-      .reduce(
-        (total, interval) =>
-          total +
-          payableIntervalSeconds(interval),
-        0,
-      );
-    const pendingSeconds = intervals
-      .filter((interval) => interval.approvalStatus === "pending_review")
-      .reduce(
-        (total, interval) =>
-          total +
-          payableIntervalSeconds(interval),
-        0,
-      );
-    const version = currentPlan.version;
-    let estimatedAmount: string;
-    let needsReview = false;
+    const versions = await this.db.select().from(compensationPlanVersions).where(and(
+      eq(compensationPlanVersions.compensationPlanId, currentPlan.plan.id),
+      lt(compensationPlanVersions.effectiveFrom, endsAt),
+      or(isNull(compensationPlanVersions.effectiveTo), gt(compensationPlanVersions.effectiveTo, startsAt)),
+    )).orderBy(asc(compensationPlanVersions.effectiveFrom));
+    const ruleRows = versions.length ? await this.db.select().from(rateRules)
+      .where(inArray(rateRules.compensationPlanVersionId, versions.map((version) => version.id)))
+      .orderBy(asc(rateRules.priority)) : [];
+    const rulesByVersion = new Map<string, PayrollRateRule[]>();
+    for (const row of ruleRows) {
+      const rule = parseRule(row);
+      if (rule) rulesByVersion.set(row.compensationPlanVersionId, [...(rulesByVersion.get(row.compensationPlanVersionId) ?? []), rule]);
+    }
+    const salary = versionedSalary({ startsAt, endsAt, timezone: organization.timezone }, versions,
+      rulesByVersion, intervals, weeklyContextIntervals);
+    const approvedSeconds = salary.countedIntervals.filter((interval) => interval.approvalStatus === "approved")
+      .reduce((total, interval) => total + payableIntervalSeconds(interval), 0);
+    const pendingSeconds = salary.countedIntervals.filter((interval) => interval.approvalStatus === "pending_review")
+      .reduce((total, interval) => total + payableIntervalSeconds(interval), 0);
+    const version = versions.findLast((entry) => entry.effectiveFrom <= now && (!entry.effectiveTo || entry.effectiveTo > now))
+      ?? salary.latestVersion ?? currentPlan.version;
+    let estimatedAmount = salary.grossAmount;
+    const needsReview = salary.needsReview;
     let weeklyBonusSeconds = 0;
     let weeklyBonusEstimatedSeconds = 0;
-    let weeklyBonusRule: { thresholdSeconds: number; rewardSeconds: number } | null = null;
-    const liveComponents: Array<{
-      date: string;
-      amount: string;
-      seconds: number;
-      estimate: boolean;
-      bonus: boolean;
-      recurring: boolean;
-    }> = [];
-    const monthDates = localDateKeysForIntervals(
-      [{ startAt: startsAt, endAt: endsAt }],
-      organization.timezone,
-    );
-    if (version.type === "hourly" || version.type === "hybrid") {
-      const currentRules = await this.db
-        .select()
-        .from(rateRules)
-        .where(eq(rateRules.compensationPlanVersionId, version.id))
-        .orderBy(asc(rateRules.priority));
-      const parsedRules = currentRules
-        .map(parseRule)
-        .filter((rule): rule is PayrollRateRule => Boolean(rule));
-      const configuredWeeklyBonus = parsedRules.find(
-        (rule) => rule.type === "weekly_bonus",
-      );
-      weeklyBonusRule = configuredWeeklyBonus
-        ? {
-            thresholdSeconds: configuredWeeklyBonus.thresholdSeconds ?? 108_000,
-            rewardSeconds: configuredWeeklyBonus.rewardSeconds ?? 18_000,
-          }
-        : null;
-      const hourly = calculateHourlyPayroll({
-        hourlyRate: version.baseAmount,
-        timezone: organization.timezone,
-        intervals,
-        weeklyContextIntervals,
-        // A rule configured during an open month must immediately evaluate the
-        // month's already-recorded work. Base pay is already previewed for the
-        // whole open month; weekly bonus eligibility follows the same live
-        // policy so reaching the threshold before the setting was saved does
-        // not leave the employee stuck at zero until the next week.
-        weeklyBonusEligibilityIntervals: intervals,
-        rules: parsedRules,
-        includePendingAsEstimate: version.pendingReviewCountsInEstimate,
-      });
-      estimatedAmount = hourly.grossAmount;
-      weeklyBonusSeconds = hourly.weeklyBonusSeconds;
-      weeklyBonusEstimatedSeconds = hourly.weeklyBonusEstimatedSeconds;
-      liveComponents.push(
-        ...hourly.components.map((component) => ({
-          date: String(component.trace.date),
-          amount: component.amount,
-          seconds: component.seconds,
-          estimate: component.estimate,
-          bonus: component.type === "bonus",
-          recurring: false,
-        })),
-      );
-      if (version.type === "hybrid") {
-        const fixedAmount = (version.config as Record<string, unknown>)
-          .fixedAmount;
-        if (typeof fixedAmount === "string") {
-          estimatedAmount = addDecimalAmounts(estimatedAmount, fixedAmount);
-          const allocations = splitMicros(decimalMicros(fixedAmount), monthDates.length);
-          monthDates.forEach((date, index) =>
-            liveComponents.push({
-              date,
-              amount: formatMicros(allocations[index] ?? 0n),
-              seconds: 0,
-              estimate: false,
-              bonus: false,
-              recurring: true,
-            }),
-          );
-        }
+    const configuredWeeklyBonus = (rulesByVersion.get(version.id) ?? []).find((rule) => rule.type === "weekly_bonus");
+    const weeklyBonusRule = configuredWeeklyBonus ? {
+      thresholdSeconds: configuredWeeklyBonus.thresholdSeconds ?? 108_000,
+      rewardSeconds: configuredWeeklyBonus.rewardSeconds ?? 18_000,
+    } : null;
+    const monthDates = localDateKeysForIntervals([{ startAt: startsAt, endAt: endsAt }], organization.timezone);
+    const liveComponents: Array<{ date: string; amount: string; seconds: number; estimate: boolean; bonus: boolean; recurring: boolean }> = [];
+    for (const component of salary.components) {
+      const trace = component.trace as Record<string, unknown>;
+      const bonus = component.type === "bonus";
+      const seconds = component.unit === "second" ? Number(component.quantity) : 0;
+      const estimate = trace.estimate === true || component.type === "project";
+      if (bonus) {
+        if (estimate) weeklyBonusEstimatedSeconds += seconds;
+        else weeklyBonusSeconds += seconds;
       }
-    } else if (version.type === "daily") {
-      const dailyWork = workSecondsByLocalDate(
-        intervals.filter(
-          (interval) =>
-            interval.approvalStatus === "approved" ||
-            version.pendingReviewCountsInEstimate,
-        ),
-        organization.timezone,
-      );
-      const payableDates = [...dailyWork.keys()];
-      estimatedAmount = multiplyDecimalAmount(
-        version.baseAmount,
-        payableDates.length,
-      );
-      for (const date of payableDates) {
-        const seconds = dailyWork.get(date)!;
-        liveComponents.push({
-          date,
-          amount: version.baseAmount,
-          seconds: 0,
-          estimate:
-            seconds.approvedSeconds === 0 && seconds.pendingSeconds > 0,
-          bonus: false,
-          recurring: false,
-        });
-      }
-    } else {
-      estimatedAmount = version.baseAmount;
-      needsReview = version.type === "project_based";
-      const allocations = splitMicros(decimalMicros(version.baseAmount), monthDates.length);
-      monthDates.forEach((date, index) =>
-        liveComponents.push({
-          date,
-          amount: formatMicros(allocations[index] ?? 0n),
-          seconds: 0,
-          estimate: needsReview,
-          bonus: false,
-          recurring: true,
-        }),
-      );
+      const dates = typeof trace.date === "string" ? [trace.date]
+        : Array.isArray(trace.dates) ? trace.dates as string[]
+        : localDateKeysForIntervals([{ startAt: new Date(String(trace.effectiveFrom)), endAt: new Date(String(trace.effectiveTo)) }], organization.timezone);
+      const allocations = trace.distribution === "period_end"
+        ? dates.map((_, index) => index === dates.length - 1 ? decimalMicros(component.amount) : 0n)
+        : allocateRoundedMoney(splitMicros(decimalMicros(component.amount), dates.length).map(formatMicros)).map(decimalMicros);
+      dates.forEach((date, index) => liveComponents.push({ date, amount: formatMicros(allocations[index] ?? 0n),
+        seconds: dates.length === 1 ? seconds : 0, estimate, bonus,
+        recurring: component.unit === "period_second" || component.type === "project",
+      }));
     }
-    const subsidies = planSubsidies(version.config);
-    const subsidyTotal = addDecimalAmounts(...subsidies.map((item) => item.amount));
-    for (const subsidy of subsidies) {
-      estimatedAmount = addDecimalAmounts(estimatedAmount, subsidy.amount);
-      const allocations = subsidy.distribution === "period_end"
-        ? monthDates.map((_, index) => index === monthDates.length - 1 ? decimalMicros(subsidy.amount) : 0n)
-        : splitMicros(decimalMicros(subsidy.amount), monthDates.length);
-      monthDates.forEach((date, index) =>
-        liveComponents.push({
-          date,
-          amount: formatMicros(allocations[index] ?? 0n),
-          seconds: 0,
-          estimate: false,
-          bonus: false,
-          recurring: true,
-        }),
-      );
-    }
+    const subsidies = salary.components.filter((component) => component.type === "allowance").map((component) => {
+      const trace = component.trace as Record<string, unknown>;
+      return { name: component.label, amount: component.amount, configuredAmount: String(trace.configuredAmount),
+        distribution: trace.distribution as "daily" | "period_end", effectiveFrom: trace.effectiveFrom,
+        effectiveTo: trace.effectiveTo, planVersion: component.planVersion };
+    });
+    const subsidyTotal = addDecimalAmounts(...subsidies.map((subsidy) => subsidy.amount));
     const daily = new Map<
       string,
       {
@@ -750,7 +934,7 @@ export class PayrollService {
       if (component.recurring) current.recurringAmount += amount;
       daily.set(component.date, current);
     }
-    for (const [date, seconds] of workSecondsByLocalDate(intervals, organization.timezone)) {
+    for (const [date, seconds] of workSecondsByLocalDate(salary.countedIntervals, organization.timezone)) {
       const current = daily.get(date);
       if (!current) continue;
       current.approvedSeconds = seconds.approvedSeconds;
@@ -778,15 +962,15 @@ export class PayrollService {
         eq(payrollAdjustments.membershipId, actor.membershipId), eq(payrollAdjustments.sourceEntityType, "reimbursement"),
         eq(payrollAdjustments.currency, currentPlan.plan.currency), sql`${payrollAdjustments.approvedAt} is not null`,
         gte(payPeriods.startsAt, startsAt), lt(payPeriods.startsAt, endsAt)));
-    const approvedReimbursementAmount = addDecimalAmounts(...approvedExpenses.map((expense) => expense.amount));
+    const approvedReimbursementAmount = addDecimalAmounts(...approvedExpenses.map((expense) => roundMoney(expense.amount)));
     estimatedAmount = addDecimalAmounts(estimatedAmount, approvedReimbursementAmount);
     for (const expense of approvedExpenses) {
       const date = localDateKey(new Date(Math.min(expense.endsAt.getTime(), endsAt.getTime()) - 1), organization.timezone);
       const day = daily.get(date);
       if (day) {
-        day.approvedAmount += decimalMicros(expense.amount);
+        day.approvedAmount += decimalMicros(roundMoney(expense.amount));
         // Known one-off payments must never become training observations.
-        day.recurringAmount += decimalMicros(expense.amount);
+        day.recurringAmount += decimalMicros(roundMoney(expense.amount));
       }
     }
     const futureDates = monthDates.filter((date) => date > today);
@@ -1293,6 +1477,9 @@ export class PayrollService {
     actor: PayrollActor,
     input: ConfigureCompensationPlanInput,
   ) {
+    const benefitNames = (input.subsidies ?? []).map((subsidy) => benefitKey(subsidy.name));
+    if (new Set(benefitNames).size !== benefitNames.length)
+      throw new PayrollConflictError("同一方案不能重复设置同名补贴，请合并金额或使用不同名称。");
     return this.db.transaction(async (tx) => {
       await lockPayrollInputs(tx, actor.organizationId);
       const [member] = await tx
@@ -1746,215 +1933,8 @@ export class PayrollService {
           0,
         );
 
-      let grossAmount = "0.000000";
-      let estimate = false;
-      let needsReview = false;
-      const components: Array<{
-        type: "base" | "weekday" | "weekend" | "holiday" | "night" | "overtime" | "project" | "allowance" | "bonus";
-        label: string;
-        amount: string;
-        planVersionId: string;
-        planVersion: number;
-        quantity?: string;
-        unit?: string;
-        rate?: string;
-        multiplier?: string;
-        trace: unknown;
-      }> = [];
-      const orderedVersions = [...versions].sort(
-        (left, right) => left.effectiveFrom.getTime() - right.effectiveFrom.getTime(),
-      );
-      const latestVersion = orderedVersions.at(-1)!;
-      const periodSeconds = Math.floor(
-        (period.endsAt.getTime() - period.startsAt.getTime()) / 1_000,
-      );
-      const awardedWeeklyBonusWeeks = new Set<string>();
-
-      for (const version of orderedVersions) {
-        const segmentStart =
-          version.effectiveFrom > period.startsAt
-            ? version.effectiveFrom
-            : period.startsAt;
-        const segmentEnd =
-          version.effectiveTo && version.effectiveTo < period.endsAt
-            ? version.effectiveTo
-            : period.endsAt;
-        if (segmentEnd <= segmentStart) continue;
-        const versionIntervals = (version.type === "hourly" || version.type === "hybrid"
-          ? clipWholeSecondPayableIntervals : clipPayableIntervals)(
-          intervals,
-          segmentStart,
-          segmentEnd,
-        );
-
-        if (version.type === "hourly" || version.type === "hybrid") {
-          const hourly = calculateHourlyPayroll({
-            hourlyRate: version.baseAmount,
-            timezone: period.timezone,
-            intervals: versionIntervals,
-            // A rate version changes the price, not the amount already worked
-            // on this civil day. The engine applies this version's pending policy.
-            dailyContextIntervals: intervals,
-            // Every version sees the final approved/pending state for the
-            // whole natural week; the period boundary still clips a week that
-            // straddles two payroll months into two independent reward spans.
-            weeklyContextIntervals,
-            // Rule changes are versioned and auditable, but a newly enabled
-            // weekly reward is allowed to recognise earlier work in the same
-            // still-open payroll month. Limit eligibility to this version's
-            // segment end so an older version cannot claim a threshold reached
-            // later; the cross-version awarded set still prevents duplicates.
-            weeklyBonusEligibilityIntervals: clipPayableIntervals(
-              intervals,
-              period.startsAt,
-              segmentEnd,
-            ),
-            excludedWeeklyBonusWeekStarts: [...awardedWeeklyBonusWeeks],
-            rules: rulesByVersion.get(version.id) ?? [],
-            includePendingAsEstimate: version.pendingReviewCountsInEstimate,
-          });
-          grossAmount = addDecimalAmounts(grossAmount, hourly.grossAmount);
-          hourly.weeklyBonusWeekStarts.forEach((week) => awardedWeeklyBonusWeeks.add(week));
-          estimate ||= hourly.estimate;
-          components.push(
-            ...hourly.components.map((component) => ({
-              type: component.type === "night_window" ? "night" as const : component.type,
-              label: component.label,
-              amount: component.amount,
-              planVersionId: version.id,
-              planVersion: version.version,
-              quantity: String(component.seconds),
-              unit: "second",
-              rate: component.hourlyRate,
-              multiplier: component.multiplier,
-              trace: {
-                ...component.trace,
-                durationPolicy: "effective_millisecond_union_approved_budget_first",
-                sourceIds: component.sourceIds,
-                estimate: component.estimate,
-                effectiveFrom: segmentStart,
-                effectiveTo: segmentEnd,
-              },
-            })),
-          );
-          if (version.type === "hybrid") {
-            const config = version.config as Record<string, unknown>;
-            if (typeof config.fixedAmount === "string") {
-              const segmentSeconds = Math.floor(
-                (segmentEnd.getTime() - segmentStart.getTime()) / 1_000,
-              );
-              const fixedAmount = prorateDecimalAmount(
-                config.fixedAmount,
-                segmentSeconds,
-                periodSeconds,
-              );
-              grossAmount = addDecimalAmounts(grossAmount, fixedAmount);
-              components.push({
-                type: "base",
-                label: "混合方案固定部分（按生效区间折算）",
-                amount: fixedAmount,
-                planVersionId: version.id,
-                planVersion: version.version,
-                quantity: String(segmentSeconds),
-                unit: "period_second",
-                trace: { effectiveFrom: segmentStart, effectiveTo: segmentEnd },
-              });
-            }
-          }
-        } else if (version.type === "daily") {
-          const dailyWork = workSecondsByLocalDate(
-            versionIntervals.filter(
-              (interval) =>
-                interval.approvalStatus === "approved" ||
-                version.pendingReviewCountsInEstimate,
-            ),
-            period.timezone,
-          );
-          const dates = [...dailyWork.keys()];
-          const amount = multiplyDecimalAmount(version.baseAmount, dates.length);
-          grossAmount = addDecimalAmounts(grossAmount, amount);
-          estimate ||=
-            [...dailyWork.values()].some((seconds) => seconds.approvedSeconds === 0 && seconds.pendingSeconds > 0);
-          components.push({
-            type: "base",
-            label: "按工作日计薪",
-            amount,
-            planVersionId: version.id,
-            planVersion: version.version,
-            quantity: String(dates.length),
-            unit: "day",
-            rate: version.baseAmount,
-            trace: { dates, effectiveFrom: segmentStart, effectiveTo: segmentEnd },
-          });
-        } else if (version.type === "project_based") {
-          // A project amount is not time-proportional. Only the newest version
-          // in the period is proposed and it always requires human review.
-          if (version.id === latestVersion.id) {
-            grossAmount = addDecimalAmounts(grossAmount, version.baseAmount);
-            needsReview = true;
-            components.push({
-              type: "project",
-              label: "项目制金额（待人工确认项目范围）",
-              amount: version.baseAmount,
-              planVersionId: version.id,
-              planVersion: version.version,
-              quantity: "1",
-              unit: version.baseUnit,
-              trace: { effectiveFrom: segmentStart, effectiveTo: segmentEnd },
-            });
-          }
-        } else {
-          const segmentSeconds = Math.floor(
-            (segmentEnd.getTime() - segmentStart.getTime()) / 1_000,
-          );
-          const amount = prorateDecimalAmount(
-            version.baseAmount,
-            segmentSeconds,
-            periodSeconds,
-          );
-          grossAmount = addDecimalAmounts(grossAmount, amount);
-          components.push({
-            type: "base",
-            label:
-              version.type === "monthly"
-                ? "月度固定薪资（按生效区间折算）"
-                : "周期固定薪资（按生效区间折算）",
-            amount,
-            planVersionId: version.id,
-            planVersion: version.version,
-            quantity: String(segmentSeconds),
-            unit: "period_second",
-            trace: { effectiveFrom: segmentStart, effectiveTo: segmentEnd },
-          });
-        }
-
-        const segmentSeconds = Math.floor(
-          (segmentEnd.getTime() - segmentStart.getTime()) / 1_000,
-        );
-        for (const subsidy of planSubsidies(version.config)) {
-          const amount = subsidy.distribution === "period_end"
-            ? (segmentEnd.getTime() === period.endsAt.getTime() ? subsidy.amount : "0.000000")
-            : prorateDecimalAmount(subsidy.amount, segmentSeconds, periodSeconds);
-          grossAmount = addDecimalAmounts(grossAmount, amount);
-          components.push({
-            type: "allowance",
-            label: subsidy.name,
-            amount,
-            planVersionId: version.id,
-            planVersion: version.version,
-            quantity: String(segmentSeconds),
-            unit: "period_second",
-            rate: subsidy.amount,
-            trace: {
-              kind: "configured_subsidy",
-              configuredAmount: subsidy.amount,
-              distribution: subsidy.distribution ?? "daily",
-              effectiveFrom: segmentStart,
-              effectiveTo: segmentEnd,
-            },
-          });
-        }
-      }
+      const { grossAmount, estimate, needsReview, components, latestVersion } =
+        versionedSalary(period, versions, rulesByVersion, intervals, weeklyContextIntervals);
 
       const memberAdjustments = adjustments.filter(
         (adjustment) =>
@@ -1964,7 +1944,7 @@ export class PayrollService {
         throw new PayrollConflictError("已批准调整或报销与薪资方案币种不一致，请核对方案；系统不会将不同币种直接相加。");
       }
       const adjustmentAmount = addDecimalAmounts(
-        ...memberAdjustments.map((adjustment) => adjustment.amount),
+        ...memberAdjustments.map((adjustment) => roundMoney(adjustment.amount)),
       );
       const finalAmount = addDecimalAmounts(grossAmount, adjustmentAmount);
       // A valid rate can still overflow after hours, multipliers or several
@@ -2149,8 +2129,8 @@ export class PayrollService {
                 label: adjustment.reason,
                 sourceEntityType: "payroll_adjustment",
                 sourceEntityId: adjustment.id,
-                amount: adjustment.amount,
-                calculationTrace: { approvedBy: adjustment.approvedBy },
+                amount: roundMoney(adjustment.amount),
+                calculationTrace: { approvedBy: adjustment.approvedBy, rounding: { policy: "half_up_2_decimals", unroundedAmount: adjustment.amount } },
               };
             }),
           );
@@ -2491,9 +2471,9 @@ export class PayrollService {
       (item.approvedSeconds / 3_600).toFixed(4),
       (item.pendingSeconds / 3_600).toFixed(4),
       ((bonusByItem.get(item.id) ?? 0) / 3_600).toFixed(4),
-      item.grossAmount,
-      item.adjustmentAmount,
-      item.finalAmount,
+      roundMoney(item.grossAmount),
+      roundMoney(item.adjustmentAmount),
+      roundMoney(item.finalAmount),
       item.estimate ? "是" : "否",
       item.needsReview ? "是" : "否",
       record.run.runNumber,
@@ -2673,6 +2653,9 @@ export class PayrollService {
           date?: unknown;
           dates?: unknown;
           estimate?: unknown;
+          distribution?: unknown;
+          effectiveFrom?: unknown;
+          effectiveTo?: unknown;
         };
         const tracedDates =
           typeof trace.date === "string"
@@ -2684,8 +2667,11 @@ export class PayrollService {
           ? tracedDates
           : component.sourceEntityType === "payroll_adjustment"
             ? periodDates.slice(-1)
-            : periodDates;
-        const allocations = splitMicros(decimalMicros(component.amount), dates.length || 1);
+            : trace.distribution === "period_end" ? periodDates.slice(-1)
+            : typeof trace.effectiveFrom === "string" && typeof trace.effectiveTo === "string"
+              ? localDateKeysForIntervals([{ startAt: new Date(trace.effectiveFrom), endAt: new Date(trace.effectiveTo) }], record.period.timezone)
+              : periodDates;
+        const allocations = allocateRoundedMoney(splitMicros(decimalMicros(component.amount), dates.length || 1).map(formatMicros)).map(decimalMicros);
         (dates.length ? dates : [periodDates.at(-1)!]).forEach(
           (date, index) => addDaily(date, allocations[index] ?? 0n, trace.estimate === true),
         );

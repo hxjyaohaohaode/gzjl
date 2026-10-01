@@ -832,6 +832,8 @@ test("Owner can configure a versioned hourly plan and create a pay period", asyn
   await page.getByRole("button", { name: "添加补贴" }).click();
   await page.getByLabel("第 1 项补贴名称").fill("交通补贴");
   await page.getByLabel("第 1 项补贴金额").fill("500");
+  await expect(page.getByLabel("第 1 项补贴计入方式")).toHaveValue("period_end");
+  await page.getByLabel("第 1 项补贴计入方式").selectOption("daily");
   await page.getByRole("button", { name: "添加补贴" }).click();
   await page.getByLabel("第 2 项补贴名称").fill("通信补贴");
   await page.getByLabel("第 2 项补贴金额").fill("300");
@@ -6473,6 +6475,9 @@ for (const logoutStatus of [204, 401]) {
       return route.fulfill({ status: 401, json: { error: "unauthorized" } });
     });
     await loginForResilience(page, "/work");
+    // page.goto resolves before the asynchronous session has mounted the shell.
+    // Wait for the page before deciding whether its mobile drawer is available.
+    await expect(page.getByRole("heading", { name: "工作记录", exact: true })).toBeVisible();
     const openNavigation = page.getByRole("button", { name: "打开导航", exact: true });
     if (await openNavigation.isVisible()) await openNavigation.click();
     await page.getByRole("button", { name: "退出登录", exact: true }).click();

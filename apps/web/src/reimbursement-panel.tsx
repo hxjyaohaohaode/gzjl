@@ -6,6 +6,7 @@ import { api } from "./api.js";
 import { ErrorMessage, EvidencePanel, ReadOnlyEvidenceList } from "./pages.js";
 import { HistoricalRangePicker, type HistoricalRange } from "./history-range.js";
 import { toZonedInputValue } from "./timezone.js";
+import { formatMoney } from "@workbench/shared";
 
 interface Claim {
   id: string; title: string; description: string; expenseDate: string; amount: string; currency: string;
@@ -19,7 +20,7 @@ interface ClaimsResponse {
 }
 const statusLabel = { draft: "草稿", pending: "待审批", approved: "已批准 · 待按周期结算", rejected: "已驳回", cancelled: "已撤回" };
 const field = "reimbursement-input";
-const amountLabel = (claim: Claim) => new Intl.NumberFormat("zh-CN", { style: "currency", currency: claim.currency }).format(Number(claim.amount));
+const amountLabel = (claim: Claim) => formatMoney(claim.currency, claim.amount);
 
 export function ReimbursementPanel({ reviewOnly = false }: { reviewOnly?: boolean }) {
   const client = useQueryClient();
@@ -78,7 +79,7 @@ export function ReimbursementPanel({ reviewOnly = false }: { reviewOnly?: boolea
       {creating && <form onSubmit={(event) => { event.preventDefault(); if (!create.isPending) create.mutate(); }}><fieldset disabled={create.isPending} className="reimbursement-form" style={{ minWidth: 0 }}>
         <label>报销事项<input className={field} required minLength={2} maxLength={120} value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} /></label>
         <label>发生日期<input className={field} required type="date" value={form.expenseDate} onChange={(e) => setForm({ ...form, expenseDate: e.target.value })} /></label>
-        <label>报销金额<input className={field} required type="number" min="0.000001" step="0.000001" inputMode="decimal" value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} /></label>
+        <label>报销金额<input className={field} required type="number" min="0.01" step="0.01" inputMode="decimal" value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} /></label>
         <label>币种<select className={field} value={form.currency} onChange={(e) => setForm({ ...form, currency: e.target.value })}>{["CNY", "USD", "EUR", "HKD"].map((value) => <option key={value}>{value}</option>)}</select></label>
         <label className="reimbursement-wide">用途说明<textarea className={field} required minLength={2} maxLength={4000} value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} /></label>
         <Button disabled={create.isPending} type="submit">{create.isPending ? "正在保存…" : "保存草稿并添加凭证"}</Button>

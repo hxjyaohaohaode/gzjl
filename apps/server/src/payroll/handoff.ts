@@ -4,9 +4,9 @@ import { createHash } from "node:crypto";
 import { and, asc, desc, eq, gt, isNull, lt, ne, or, sql } from "drizzle-orm";
 import type { Database } from "@workbench/db";
 import { auditLogs, compensationPlans, compensationPlanVersions, organizationOwners, orgMemberships, payrollAdjustments, payrollItemComponents, payrollExportBatches, payrollExportProfiles, payrollItems, payrollRuns, payPeriods, users, workSessions, workSessionCorrections } from "@workbench/db/schema";
-import { addDecimalAmounts } from "@workbench/shared";
+import { roundMoney, addDecimalAmounts } from "@workbench/shared";
 import { lockPayrollInputs } from "./input-lock.js";
-import { PayrollConflictError, PayrollNotFoundError, PayrollService, type PayrollActor } from "./service.js";
+import { PAYROLL_CALCULATION_VERSION, PayrollConflictError, PayrollNotFoundError, PayrollService, type PayrollActor } from "./service.js";
 
 const hash = (value: string) => createHash("sha256").update(value, "utf8").digest("hex");
 function escapeCsvCell(value: string, column: number) {
@@ -101,6 +101,8 @@ export class PayrollHandoffService {
     for (const row of previewRows) { if (externalIds.has(row.externalId)) repeatedExternalIds.add(row.externalId); externalIds.add(row.externalId); }
     if (repeatedExternalIds.size) blockers.push("导出行存在重复的外部人员编号，请分别保存唯一映射后重新核对。");
     if (corrections.length) blockers.push(`${corrections.length} 条更正申请尚待处理，请先核对更正，避免锁定旧事实。`);
+    if (!batch && record.run.calculationVersion !== PAYROLL_CALCULATION_VERSION)
+      blockers.push("该账单使用旧计算规则，请点击“更新计算并查看”重新计算工资和补贴，不能直接沿用旧金额导出。");
     if (!batch && record.period.endsAt > new Date()) blockers.push("老板指定的周期尚未结束，可以下载当前统计表；正式交接请在该周期结束后更新计算并核对。");
     const previewHash = hash(JSON.stringify({ run: record.run, period: record.period, rows: previewRows, facts, missingPlans, corrections }));
     return { ...record, rows: batch ? (batch.manifest as { rows: typeof previewRows }).rows : previewRows, missingPlans, pending, drafts, anomalies, corrections, blockers, previewHash, batch: batch ? { id: batch.id, fileName: batch.fileName, sha256: batch.sha256, ruleVersion: batch.ruleVersion, createdAt: batch.createdAt, manifest: publicManifest(batch.manifest) } : null };
@@ -115,7 +117,7 @@ export class PayrollHandoffService {
       if (preview.previewHash !== previewHash) throw new PayrollConflictError("预览后记录、金额或成员匹配信息已变化，请刷新预览并重新核对。");
       if (preview.blockers.length) throw new PayrollConflictError(preview.blockers.join(" "));
       const header = ["成员唯一编号", "外部人员编号", "员工", "薪资周期", "周期开始（含）", "周期结束（不含）", "周期时区", "币种", "已批准工时（小时）", "待审核工时（小时）", "应计金额", "调整金额", "最终金额", "计薪方案版本", "批次唯一编号", "批次号", "计算规则版本", "发薪状态"];
-      const csv = `${[header, ...preview.rows.map((r) => [r.membershipId, r.externalId, r.displayName, preview.period.name, preview.period.startsAt.toISOString(), preview.period.endsAt.toISOString(), preview.period.timezone, r.currency, (r.approvedSeconds / 3600).toFixed(6), (r.pendingSeconds / 3600).toFixed(6), r.grossAmount, r.adjustmentAmount, r.finalAmount, r.planVersionId, runId, String(preview.run.runNumber), preview.run.calculationVersion, "本平台仅导出依据，发薪由外部平台办理"])].map((r) => r.map(escapeCsvCell).join(",")).join("\r\n")}\r\n`;
+      const csv = `${[header, ...preview.rows.map((r) => [r.membershipId, r.externalId, r.displayName, preview.period.name, preview.period.startsAt.toISOString(), preview.period.endsAt.toISOString(), preview.period.timezone, r.currency, (r.approvedSeconds / 3600).toFixed(2), (r.pendingSeconds / 3600).toFixed(2), roundMoney(r.grossAmount), roundMoney(r.adjustmentAmount), roundMoney(r.finalAmount), r.planVersionId, runId, String(preview.run.runNumber), preview.run.calculationVersion, "本平台仅导出依据，发薪由外部平台办理"])].map((r) => r.map(escapeCsvCell).join(",")).join("\r\n")}\r\n`;
       const fileName = `${payrollExportName(preview.period.name)}-薪资交接-批次${preview.run.runNumber}-${runId.slice(0, 8)}.csv`;
       const workbook = await capturePayrollWorkbook(tx as unknown as Database, actor, preview, fileName);
       await new PayrollService(tx as unknown as Database).settle(actor, runId);

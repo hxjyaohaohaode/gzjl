@@ -303,15 +303,15 @@ describe("AI payroll provenance", () => {
         }),
         item: expect.objectContaining({
           id: seeded.item.id,
-          finalAmount: "1280.000000",
+          finalAmount: "1280.00",
           estimate: true,
           needsReview: true,
         }),
         components: [
           expect.objectContaining({
             id: seeded.component.id,
-            amount: "1200.000000",
-            rate: "80.000000",
+            amount: "1200.00",
+            rate: "80.00",
           }),
         ],
       }),
