@@ -40,7 +40,9 @@ const planSchema = z.object({
   subsidies: z.array(z.object({
     name: z.string().trim().min(1, "补贴名称不能为空。").max(60),
     amount: money,
-    distribution: z.enum(["daily", "period_end"]).default("period_end"),
+    // Legacy daily was an implicit default. Ordinary amounts are fixed;
+    // only the separately named explicit option enables proration.
+    distribution: z.enum(["daily", "period_end", "prorated"]).default("period_end"),
   })).max(20, "每份薪资方案最多配置 20 项补贴。").default([]),
   effectiveFrom: z.iso.datetime({ offset: true }).transform((value) => new Date(value)),
   pendingReviewCountsInEstimate: z.boolean().default(true),

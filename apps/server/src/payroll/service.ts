@@ -42,7 +42,7 @@ import {
 } from "@workbench/shared";
 import { lockPayrollInputs } from "./input-lock.js";
 
-export const PAYROLL_CALCULATION_VERSION = "payroll-engine-v9-versioned-cent-reconciliation";
+export const PAYROLL_CALCULATION_VERSION = "payroll-engine-v10-fixed-member-subsidies";
 
 export interface PayrollActor {
   organizationId: string;
@@ -66,7 +66,7 @@ export interface ConfigureCompensationPlanInput {
   effectiveFrom: Date;
   pendingReviewCountsInEstimate: boolean;
   fixedAmount?: string | undefined;
-  subsidies?: Array<{ name: string; amount: string; distribution?: "daily" | "period_end" }> | undefined;
+  subsidies?: Array<{ name: string; amount: string; distribution?: "daily" | "period_end" | "prorated" }> | undefined;
   rules: Array<
     | {
         type: "weekly_bonus";
@@ -157,7 +157,7 @@ function splitMicros(value: bigint, count: number): bigint[] {
   });
 }
 
-function planSubsidies(config: unknown): Array<{ name: string; amount: string; distribution?: "daily" | "period_end" }> {
+function planSubsidies(config: unknown): Array<{ name: string; amount: string; distribution: "period_end" | "prorated"; configuredDistribution: string }> {
   if (!config || typeof config !== "object") return [];
   const subsidies = (config as Record<string, unknown>).subsidies;
   if (!Array.isArray(subsidies)) return [];
@@ -165,7 +165,8 @@ function planSubsidies(config: unknown): Array<{ name: string; amount: string; d
     if (!item || typeof item !== "object") return [];
     const { name, amount, distribution } = item as Record<string, unknown>;
     return typeof name === "string" && typeof amount === "string"
-      ? [{ name, amount, distribution: distribution === "period_end" ? "period_end" as const : "daily" as const }]
+      ? [{ name, amount, distribution: distribution === "prorated" ? "prorated" as const : "period_end" as const,
+        configuredDistribution: typeof distribution === "string" ? distribution : "legacy_default" }]
       : [];
   });
 }
@@ -669,7 +670,9 @@ function versionedSalary(
         trace: {
           kind: "configured_subsidy",
           configuredAmount: subsidy.amount,
-          distribution: subsidy.distribution ?? "daily",
+          distribution: subsidy.distribution,
+          configuredDistribution: subsidy.configuredDistribution,
+          subsidyPolicy: subsidy.distribution === "prorated" ? "explicit_effective_time_proration_v10" : "fixed_configured_amount_once_per_cycle_v10",
           effectiveFrom: segmentStart,
           effectiveTo: segmentEnd,
         },
@@ -874,7 +877,7 @@ export class PayrollService {
     const subsidies = salary.components.filter((component) => component.type === "allowance").map((component) => {
       const trace = component.trace as Record<string, unknown>;
       return { name: component.label, amount: component.amount, configuredAmount: String(trace.configuredAmount),
-        distribution: trace.distribution as "daily" | "period_end", effectiveFrom: trace.effectiveFrom,
+        distribution: trace.distribution as "prorated" | "period_end", effectiveFrom: trace.effectiveFrom,
         effectiveTo: trace.effectiveTo, planVersion: component.planVersion };
     });
     const subsidyTotal = addDecimalAmounts(...subsidies.map((subsidy) => subsidy.amount));
@@ -1526,7 +1529,8 @@ export class PayrollService {
         ...(input.type === "hybrid" && input.fixedAmount
           ? { fixedAmount: input.fixedAmount }
           : {}),
-        subsidies: input.subsidies ?? [],
+        subsidies: (input.subsidies ?? []).map((subsidy) => ({ ...subsidy,
+          distribution: subsidy.distribution === "prorated" ? "prorated" : "period_end" })),
       };
       const existing = existingPlans[0];
       let plan: typeof compensationPlans.$inferSelect;

@@ -144,7 +144,11 @@ test("long content, evidence queue, restoration, contextual approval and exact h
     expect(createHash("sha256").update(bytes).digest("hex")).toBe(saved.batch.sha256); expect(exported.headers()["x-content-sha256"]).toBe(saved.batch.sha256);
     const workbook = await owner.request.get(`/api/payroll-runs/${run.id}/handoff.xlsx`);
     expect(workbook.ok()).toBeTruthy(); expect(createHash("sha256").update(await workbook.body()).digest("hex")).toBe(saved.batch.manifest.workbookSha256);
-    const xlsxDownload = owner.waitForEvent("download"); await owner.getByRole("button", { name: "下载薪资及完整工作单 Excel" }).click(); expect((await xlsxDownload).suggestedFilename()).toBe(saved.batch.manifest.workbookFileName);
+    const xlsxDownload = owner.waitForEvent("download"); await owner.getByRole("button", { name: "下载薪资及完整工作单 Excel" }).click();
+    const completeFile = await xlsxDownload; expect(completeFile.suggestedFilename()).toBe(saved.batch.manifest.workbookFileName);
+    await completeFile.saveAs(testInfo.outputPath("周期工作记录-薪资账单示例.xlsx"));
+    expect(createHash("sha256").update(await readFile((await completeFile.path())!)).digest("hex")).toBe(saved.batch.manifest.workbookSha256);
+    expect(saved.batch.manifest.worksheetOrder.slice(0, 2)).toEqual(["薪资总览", "周期工作记录"]);
     const download = owner.waitForEvent("download"); await owner.getByRole("button", { name: "重取已确认原文件" }).click(); expect((await download).suggestedFilename()).toBe(saved.batch.fileName);
     expect(errors).toEqual([]);
     const authCsrf = (await (await owner.request.get("/api/auth/csrf")).json()).csrfToken;

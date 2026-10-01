@@ -83,9 +83,87 @@ it("rounds the reported base salary to cents and reconciles preview, components 
   const bundle = await capturePayrollWorkbook(db, reviewer, handoff, "九月.csv");
   const book = new ExcelJS.Workbook();
   await book.xlsx.load(Buffer.from(bundle.workbookBase64, "base64") as unknown as Parameters<typeof book.xlsx.load>[0]);
-  expect(book.getWorksheet("薪资汇总")!.getCell("K2").value).toBe("2866.92");
-  expect(book.getWorksheet("薪资汇总")!.getCell("M2").value).toBe("168.19");
-  expect(book.getWorksheet("薪资汇总")!.getCell("R2").value).toBe("3035.11");
+  expect(book.getWorksheet("薪资总览")!.getCell("K2").value).toBe("2866.92");
+  expect(book.getWorksheet("薪资总览")!.getCell("M2").value).toBe("168.19");
+  expect(book.getWorksheet("薪资总览")!.getCell("R2").value).toBe("3035.11");
+});
+
+it.each(["full_month", "boss_custom_range"] as const)("keeps individually configured legacy 168.19 benefits identical across all plan types in %s", async (range) => {
+  const { db, reviewer, period, payroll } = await fixture();
+  if (range === "boss_custom_range") {
+    period.startsAt = new Date("2026-09-05T00:00Z"); period.endsAt = new Date("2026-09-25T00:00Z");
+    await db.update(payPeriods).set({ startsAt: period.startsAt, endsAt: period.endsAt }).where(eq(payPeriods.id, period.id));
+  }
+  const scenarios = (["hourly", "daily", "monthly", "fixed_period", "project_based", "hybrid"] as const)
+    .flatMap((type, index) => ([undefined, "daily", "period_end"] as const).map((distribution, offset) => ({ type, distribution,
+      effectiveFrom: new Date(period.startsAt.getTime() + (index + offset) * 86400_000) })));
+  const ids: string[] = [];
+  for (const [index, scenario] of scenarios.entries()) {
+    const [person] = await db.insert(users).values({ displayName: `单独设置补贴 ${index}` }).returning();
+    const [member] = await db.insert(orgMemberships).values({ organizationId: reviewer.organizationId, userId: person!.id, status: "active" }).returning();
+    ids.push(member!.id);
+    const [plan] = await db.insert(compensationPlans).values({ organizationId: reviewer.organizationId, membershipId: member!.id,
+      name: "独立计薪方案", type: scenario.type, currency: "CNY", createdBy: reviewer.membershipId }).returning();
+    await db.insert(compensationPlanVersions).values({ compensationPlanId: plan!.id, version: 1, type: scenario.type,
+      baseAmount: "0", baseUnit: "period", effectiveFrom: scenario.effectiveFrom, createdBy: reviewer.membershipId,
+      config: { fixedAmount: "0", subsidies: [{ name: "每人独立设置的补贴", amount: "168.19", ...(scenario.distribution ? { distribution: scenario.distribution } : {}) }] } });
+    const live = (await payroll.listOwn({ ...reviewer, membershipId: member!.id })).livePreview!;
+    expect(live).toMatchObject({ subsidyTotal: "168.190000", estimatedAmount: "168.190000" });
+    expect(live.subsidies).toHaveLength(1);
+    expect(live.subsidies[0]).toMatchObject({ configuredAmount: "168.19", amount: "168.19", distribution: "period_end" });
+  }
+  const run = await payroll.calculate(reviewer, period.id);
+  const overview = await new PayrollHandoffService(db).preview(reviewer, run.id);
+  const rows = overview.rows.filter((row) => ids.includes(row.membershipId));
+  expect(rows).toHaveLength(scenarios.length);
+  for (const row of rows) expect(row).toMatchObject({ grossAmount: "168.190000", finalAmount: "168.190000", amounts: { subsidies: "168.190000" } });
+  const components = await db.select({ memberId: payrollItems.membershipId, component: payrollItemComponents })
+    .from(payrollItems).innerJoin(payrollItemComponents, eq(payrollItems.id, payrollItemComponents.payrollItemId))
+    .where(eq(payrollItems.payrollRunId, run.id));
+  for (const [index, id] of ids.entries()) {
+    const benefits = components.filter((row) => row.memberId === id && row.component.type === "allowance");
+    expect(benefits).toHaveLength(1);
+    expect(benefits[0]!.component.calculationTrace).toMatchObject({ configuredDistribution: scenarios[index]!.distribution ?? "legacy_default",
+      distribution: "period_end", subsidyPolicy: "fixed_configured_amount_once_per_cycle_v10" });
+  }
+  const capture = await capturePayrollWorkbook(db, reviewer, overview, "独立补贴.csv");
+  const book = new ExcelJS.Workbook(); await book.xlsx.load(Buffer.from(capture.workbookBase64, "base64") as unknown as Parameters<typeof book.xlsx.load>[0]);
+  const sheet = book.worksheets[0]!;
+  expect(sheet.name).toBe("薪资总览"); expect(book.worksheets[1]!.name).toBe("周期工作记录");
+  for (let index = 2; index <= sheet.rowCount; index++) if (ids.includes(String(sheet.getCell(index, 1).value))) {
+    expect(sheet.getCell(index, 13).value).toBe("168.19"); expect(sheet.getCell(index, 18).value).toBe("168.19");
+  }
+});
+
+it("uses the last configured amount once when legacy daily settings change and only prorates explicit opt-ins", async () => {
+  const { db, employee, reviewer, period, version, payroll } = await fixture();
+  await db.update(compensationPlanVersions).set({ effectiveTo: new Date("2026-09-16Z"), baseAmount: "0",
+    config: { subsidies: [{ name: "个人补贴", amount: "168.19", distribution: "daily" }] },
+  }).where(eq(compensationPlanVersions.id, version.id));
+  await db.insert(compensationPlanVersions).values({ compensationPlanId: version.compensationPlanId, version: 2,
+    type: "hourly", baseAmount: "0", baseUnit: "hour", createdBy: reviewer.membershipId, effectiveFrom: new Date("2026-09-16Z"),
+    config: { subsidies: [{ name: "个人补贴", amount: "200.01", distribution: "daily" },
+      { name: "自愿折算项目", amount: "168.19", distribution: "prorated" }] },
+  });
+  await db.update(compensationPlans).set({ activeVersion: 2 }).where(eq(compensationPlans.id, version.compensationPlanId));
+  const live = (await payroll.listOwn(employee)).livePreview!;
+  expect(live.subsidies).toEqual(expect.arrayContaining([
+    expect.objectContaining({ name: "个人补贴", amount: "200.01", distribution: "period_end" }),
+    expect.objectContaining({ name: "自愿折算项目", amount: "84.10", distribution: "prorated" }),
+  ]));
+  expect(live.subsidies).toHaveLength(2); expect(live.subsidyTotal).toBe("284.110000");
+  const run = await payroll.calculate(reviewer, period.id);
+  const preview = await new PayrollHandoffService(db).preview(reviewer, run.id);
+  expect(preview.rows[0]!.amounts!.subsidies).toBe("284.110000");
+});
+
+it.each([undefined, "daily", "period_end", "prorated"] as const)("saves ordinary %s settings as fixed while preserving explicit proration", async (distribution) => {
+  const { employee, reviewer, payroll } = await fixture();
+  const saved = await payroll.configurePlan(reviewer, { membershipId: employee.membershipId, name: "每人单独设置",
+    type: "hourly", currency: "CNY", baseAmount: "100", effectiveFrom: new Date("2026-09-08Z"),
+    pendingReviewCountsInEstimate: true, rules: [], subsidies: [{ name: "个人补贴", amount: "168.19", ...(distribution ? { distribution } : {}) }],
+  });
+  expect(saved.version.config).toMatchObject({ subsidies: [{ name: "个人补贴", amount: "168.19", distribution: distribution === "prorated" ? "prorated" : "period_end" }] });
 });
 
 it("reconciles category half-cent amounts and negative deductions before saving the final payment", async () => {
@@ -128,7 +206,7 @@ it("blocks unconfirmed old calculation rules and rolls back stale report recalcu
   const { db, reviewer, period, payroll } = await fixture();
   vi.setSystemTime(new Date("2026-10-08T12:00Z"));
   const run = await payroll.calculate(reviewer, period.id);
-  await db.update(payrollRuns).set({ calculationVersion: "payroll-engine-v8-effective-millisecond-budget", inputHash: "8".repeat(64) })
+  await db.update(payrollRuns).set({ calculationVersion: "payroll-engine-v9-versioned-cent-reconciliation", inputHash: "9".repeat(64) })
     .where(eq(payrollRuns.id, run.id));
   const periodsBefore = await db.select().from(payPeriods);
   const handoff = new PayrollHandoffService(db);
@@ -177,14 +255,14 @@ it("keeps review-visible work evidence readable after approval without exposing 
   expect(await evidence.listForSession(workReviewer, work!.id)).toEqual([expect.objectContaining({ textContent: "审批后仍需可读的交付结果" })]);
 });
 
-it("prorates daily subsidies but pays a period-end subsidy only from the final effective version", async () => {
+it("prorates explicitly opted-in subsidies but pays a period-end subsidy only from the final effective version", async () => {
   const { db, reviewer, period, version, payroll } = await fixture();
   await db.update(compensationPlanVersions).set({ effectiveTo: new Date("2026-09-16Z"), config: { subsidies: [
-    { name: "交通", amount: "300", distribution: "daily" }, { name: "月末", amount: "100", distribution: "period_end" },
+    { name: "交通", amount: "300", distribution: "prorated" }, { name: "月末", amount: "100", distribution: "period_end" },
   ] } }).where(eq(compensationPlanVersions.id, version.id));
   await db.insert(compensationPlanVersions).values({ compensationPlanId: version.compensationPlanId, version: 2, type: "hourly", baseAmount: "100", baseUnit: "hour",
     effectiveFrom: new Date("2026-09-16Z"), createdBy: reviewer.membershipId,
-    config: { subsidies: [{ name: "交通", amount: "600", distribution: "daily" }, { name: "月末", amount: "200", distribution: "period_end" }] } });
+    config: { subsidies: [{ name: "交通", amount: "600", distribution: "prorated" }, { name: "月末", amount: "200", distribution: "period_end" }] } });
   await payroll.calculate(reviewer, period.id);
   expect((await db.select().from(payrollItems))[0]).toMatchObject({ grossAmount: "650.000000" });
   const components = await db.select().from(payrollItemComponents);
@@ -229,10 +307,16 @@ it("paginates monthly claims with identical timestamps without truncating or exp
   expect((await expense.list(reviewer)).items.every((r) => r.status !== "draft")).toBe(true);
 });
 
-it("exports a whole month's work, wages, subsidies, reimbursements and deductions as separately reconciled totals", async () => {
+it("exports one workbook with the full salary overview first and only cycle work records second", async () => {
   const { db, employee, reviewer, period, version, expense, evidence, payroll } = await fixture();
   await db.update(compensationPlanVersions).set({ config: { subsidies: [{ name: "月末交通补贴", amount: "30", distribution: "period_end" }] } }).where(eq(compensationPlanVersions.id, version.id));
   await db.insert(workSessions).values({ organizationId: employee.organizationId, membershipId: employee.membershipId, startAt: new Date("2026-09-03T08:00Z"), endAt: new Date("2026-09-03T09:00Z"), timezone: "UTC", source: "manual", grossSeconds: 3600, netSeconds: 3600, content: "九月完整工作提交单", result: "交付完成", submissionStatus: "submitted", approvalStatus: "approved" });
+  await db.insert(workSessions).values([
+    { startAt: new Date("2026-08-31T23:00Z"), endAt: period.startsAt, content: "周期之前的工作不可混入" },
+    { startAt: period.endsAt, endAt: new Date("2026-10-01T01:00Z"), content: "周期之后的工作不可混入" },
+  ].map((r) => ({ ...r, organizationId: employee.organizationId, membershipId: employee.membershipId,
+    timezone: "UTC", source: "manual" as const, grossSeconds: 3600, netSeconds: 3600,
+    submissionStatus: "submitted" as const, approvalStatus: "approved" as const })));
   const claim = await expense.create(employee, { title: "九月交通报销", description: "客户现场交通费", expenseDate: "2026-09-03", amount: "128.35", currency: "CNY" });
   await evidence.createReference(employee, claim.id, { kind: "text", textContent: "交通凭证", visibility: "management_only" });
   const pending = await expense.act(employee, claim.id, { action: "submit", expectedVersion: claim.version });
@@ -243,12 +327,19 @@ it("exports a whole month's work, wages, subsidies, reimbursements and deduction
   expect(preview.rows.find((r) => r.membershipId === employee.membershipId)?.amounts).toEqual({ wages: "100.000000", bonus: "0.000000", subsidies: "30.000000", reimbursements: "128.350000", other: "-5.000000" });
   const captured = await capturePayrollWorkbook(db, reviewer, preview, "九月.csv");
   const book = new ExcelJS.Workbook(); await book.xlsx.load(Buffer.from(captured.workbookBase64, "base64") as unknown as Parameters<typeof book.xlsx.load>[0]);
-  const sheet = book.getWorksheet("薪资汇总")!;
+  expect(book.worksheets.map((sheet) => sheet.name)).toEqual([
+    "薪资总览", "周期工作记录", "工资组成", "报销明细", "工作证据目录", "规则与来源",
+  ]);
+  const sheet = book.getWorksheet("薪资总览")!;
   const column = (name: string) => { let found = 0; sheet.getRow(1).eachCell((cell, index) => { if (cell.value === name) found = index; }); expect(found).toBeGreaterThan(0); return found; };
   const value = (name: string) => sheet.getCell(2, column(name)).value;
   expect(value("工作工资")).toBe("100.00"); expect(value("补贴")).toBe("30.00");
   expect(value("已批准报销")).toBe("128.35"); expect(value("其他调整（含扣减及更正）")).toBe("-5.00");
   expect(value("最终金额")).toBe("253.35"); expect(value("薪资周期")).toBe("九月");
-  expect(JSON.stringify(book.getWorksheet("工作提交单")!.getSheetValues())).toContain("九月完整工作提交单");
+  expect(JSON.stringify(book.getWorksheet("周期工作记录")!.getSheetValues())).toContain("九月完整工作提交单");
+  expect(JSON.stringify(sheet.getSheetValues())).not.toContain("九月完整工作提交单");
+  expect(captured.workRowCount).toBe(1);
+  expect(JSON.stringify(book.getWorksheet("周期工作记录")!.getSheetValues())).not.toContain("周期之前");
+  expect(JSON.stringify(book.getWorksheet("周期工作记录")!.getSheetValues())).not.toContain("周期之后");
   expect(JSON.stringify(book.getWorksheet("报销明细")!.getSheetValues())).toContain("九月交通报销");
 });

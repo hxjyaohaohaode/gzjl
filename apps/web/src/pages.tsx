@@ -8029,7 +8029,7 @@ interface PayrollOwnResponse {
     currency: string;
     planType: CompensationPlanType;
     baseAmount: string;
-    subsidies?: Array<{ name: string; amount: string; configuredAmount?: string; distribution?: "daily" | "period_end"; effectiveFrom?: string; effectiveTo?: string; planVersion?: number }>;
+    subsidies?: Array<{ name: string; amount: string; configuredAmount?: string; distribution?: "daily" | "period_end" | "prorated"; effectiveFrom?: string; effectiveTo?: string; planVersion?: number }>;
     subsidyTotal?: string;
     approvedReimbursementAmount?: string;
     approvedSeconds: number;
@@ -8143,7 +8143,7 @@ interface PayrollManagementOverview {
         effectiveTo: string | null;
         config: {
           fixedAmount?: string;
-          subsidies?: Array<{ name: string; amount: string; configuredAmount?: string; distribution?: "daily" | "period_end"; effectiveFrom?: string; effectiveTo?: string; planVersion?: number }>;
+          subsidies?: Array<{ name: string; amount: string; configuredAmount?: string; distribution?: "daily" | "period_end" | "prorated"; effectiveFrom?: string; effectiveTo?: string; planVersion?: number }>;
         };
       };
       rules: Array<{
@@ -8292,7 +8292,7 @@ function PayrollManagementPanel({ me }: { me: Me }) {
     currency: "CNY",
     baseAmount: "",
     fixedAmount: "",
-    subsidies: [] as Array<{ id: string; name: string; amount: string; distribution?: "daily" | "period_end" }>,
+    subsidies: [] as Array<{ id: string; name: string; amount: string; distribution?: "period_end" | "prorated" }>,
     effectiveFrom: localInput(new Date(Date.now() + 60_000)),
     pendingReviewCountsInEstimate: true,
     weekdayEnabled: false,
@@ -8406,6 +8406,7 @@ function PayrollManagementPanel({ me }: { me: Me }) {
           id: `${index}-${subsidy.name}-${subsidy.amount}`,
           ...subsidy,
           amount: roundMoney(subsidy.amount),
+          distribution: subsidy.distribution === "prorated" ? "prorated" : "period_end",
         }),
       ),
       pendingReviewCountsInEstimate:
@@ -8493,7 +8494,7 @@ function PayrollManagementPanel({ me }: { me: Me }) {
           subsidies: planForm.subsidies.map(({ name, amount, distribution }) => ({
             name: name.trim(),
             amount,
-            distribution: distribution ?? "daily",
+            distribution: distribution === "prorated" ? "prorated" : "period_end",
           })),
           effectiveFrom: zonedInputToDate(planForm.effectiveFrom).toISOString(),
           pendingReviewCountsInEstimate: planForm.pendingReviewCountsInEstimate,
@@ -8821,7 +8822,7 @@ function PayrollManagementPanel({ me }: { me: Me }) {
               <div className="salary-subsidy-editor-head">
                 <div>
                   <h3>固定补贴</h3>
-                  <p>可配置多项名称与月度金额；保存后进入方案版本、实时预测及正式结算明细。</p>
+                  <p>普通补贴按每人填写的金额、每个薪资周期计入一次，不因工时、计薪类型或本期内的生效日期改变。只有明确选择“按生效时长折算”才会折算；周期内同名补贴采用期末生效版本。</p>
                 </div>
                 <Button
                   onClick={() => setPlanForm((current) => ({
@@ -8886,13 +8887,13 @@ function PayrollManagementPanel({ me }: { me: Me }) {
                       <label>
                         <span>计入方式</span>
                         <select aria-label={`第 ${index + 1} 项补贴计入方式`} className={fieldClass}
-                          value={subsidy.distribution ?? "daily"}
+                          value={subsidy.distribution ?? "period_end"}
                           onChange={(event) => setPlanForm((current) => ({ ...current,
                             subsidies: current.subsidies.map((item) => item.id === subsidy.id
-                              ? { ...item, distribution: event.target.value as "daily" | "period_end" } : item),
+                              ? { ...item, distribution: event.target.value as "period_end" | "prorated" } : item),
                           }))}>
-                          <option value="daily">按生效时长折算（不足整期会减少）</option>
-                          <option value="period_end">每期全额一次计入（统一补贴选此项）</option>
+                          <option value="period_end">固定金额：每期按填写金额计入一次</option>
+                          <option value="prorated">明确按生效时长折算（金额随生效日期变化）</option>
                         </select>
                       </label>
                       <Button
@@ -9453,7 +9454,7 @@ export function PayrollPage({ me }: { me: Me }) {
           <Card><CardContent><StatusLine label={livePreview.currentWeek ? `本周已记录工时 · ${payrollWeekRangeLabel(livePreview.currentWeek)}` : "本周已记录工时"} value={formatDuration(livePreview.currentWeek?.totalSeconds ?? 0)} /><p className="mt-1 text-xs text-[var(--text-muted)]">已批准 {formatDuration(livePreview.currentWeek?.approvedSeconds ?? 0)}{livePreview.currentWeek?.pendingSeconds ? ` · 待审核 ${formatDuration(livePreview.currentWeek.pendingSeconds)}` : ""}</p></CardContent></Card>
           <Card><CardContent><StatusLine label="本月总工时" value={formatDuration(livePreview.approvedSeconds + livePreview.pendingSeconds)} /><p className="mt-1 text-xs text-[var(--text-muted)]">已批准 {formatDuration(livePreview.approvedSeconds)}{livePreview.pendingSeconds ? ` · 待审核 ${formatDuration(livePreview.pendingSeconds)}` : ""}</p></CardContent></Card>
           <Card><CardContent><StatusLine label={livePreview.weeklyBonusEstimatedSeconds ? "周奖励工时（含预估）" : "周奖励工时"} value={formatDuration(livePreview.weeklyBonusSeconds + livePreview.weeklyBonusEstimatedSeconds)} /><p className="mt-1 text-xs text-[var(--text-muted)]">已确认 {formatDuration(livePreview.weeklyBonusSeconds)}{livePreview.weeklyBonusEstimatedSeconds ? ` · 待审核预估 ${formatDuration(livePreview.weeklyBonusEstimatedSeconds)}` : ""}</p></CardContent></Card>
-          {salarySubsidies.length ? <Card><CardContent><StatusLine label={`${salarySubsidies.length} 项固定补贴`} value={money(livePreview.currency, salarySubsidyTotal)} /><p className="mt-1 break-words text-xs text-[var(--text-muted)]">{salarySubsidies.map((item) => `${item.name} ${money(livePreview.currency, item.amount)}${item.distribution === "daily" ? `（设定 ${money(livePreview.currency, item.configuredAmount ?? item.amount)}，按生效区间折算）` : "（每期全额）"}${item.planVersion ? ` · v${item.planVersion}` : ""}`).join(" · ")}</p></CardContent></Card> : null}
+          {salarySubsidies.length ? <Card><CardContent><StatusLine label={`${salarySubsidies.length} 项${salarySubsidies.some((item) => item.distribution === "prorated") ? "补贴（含折算）" : "固定补贴"}`} value={money(livePreview.currency, salarySubsidyTotal)} /><p className="mt-1 break-words text-xs text-[var(--text-muted)]">{salarySubsidies.map((item) => `${item.name} ${money(livePreview.currency, item.amount)}${item.distribution === "prorated" ? `（设定 ${money(livePreview.currency, item.configuredAmount ?? item.amount)}，按生效区间折算）` : "（每期全额）"}${item.planVersion ? ` · v${item.planVersion}` : ""}`).join(" · ")}</p></CardContent></Card> : null}
           <Card><CardContent><StatusLine label="本月实时预估" value={money(livePreview.currency, livePreview.estimatedAmount)} /></CardContent></Card>
           <Card><CardContent><StatusLine label="月末趋势预测" value={money(livePreview.currency, livePreview.projectedPeriodAmount)} />{monthEndForecast ? <p className="mt-1 text-xs text-[var(--text-muted)]">合理区间 {money(livePreview.currency, monthEndForecast.projectedLowerCumulativeAmount)} – {money(livePreview.currency, monthEndForecast.projectedUpperCumulativeAmount)}{livePreview.projectedWeeklyBonusSeconds ? ` · 另预计奖励 ${formatDuration(livePreview.projectedWeeklyBonusSeconds)}` : ""}</p> : null}</CardContent></Card>
           <Card><CardContent><StatusLine label="结算截止 / 计划导出" value={formatDateTime(livePreview.period.cutoffAt)} /></CardContent></Card>
