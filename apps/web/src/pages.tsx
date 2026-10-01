@@ -6,7 +6,7 @@ import { AiDraftEditor, AiFactAnswer, CycleOverview, WorkFactContext, PayrollHan
 import { DraftArchiveButton, ArchivedDrafts } from "./work-recovery.js";
 import { RecordReadiness } from "./fact-explorer.js";
 import { WorkReviewDraft } from "./work-review.js";
-import { sourceHref } from "@workbench/shared";
+import { sourceHref, formatCurrencyMoney, roundMoney, addDecimalAmounts } from "@workbench/shared";
 import { WorkProgressReporter } from "./work-progress-reporter.js";
 import { ReimbursementPanel } from "./reimbursement-panel.js";
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -8029,7 +8029,7 @@ interface PayrollOwnResponse {
     currency: string;
     planType: CompensationPlanType;
     baseAmount: string;
-    subsidies?: Array<{ name: string; amount: string; distribution?: "daily" | "period_end" }>;
+    subsidies?: Array<{ name: string; amount: string; configuredAmount?: string; distribution?: "daily" | "period_end"; effectiveFrom?: string; effectiveTo?: string; planVersion?: number }>;
     subsidyTotal?: string;
     approvedReimbursementAmount?: string;
     approvedSeconds: number;
@@ -8143,7 +8143,7 @@ interface PayrollManagementOverview {
         effectiveTo: string | null;
         config: {
           fixedAmount?: string;
-          subsidies?: Array<{ name: string; amount: string; distribution?: "daily" | "period_end" }>;
+          subsidies?: Array<{ name: string; amount: string; configuredAmount?: string; distribution?: "daily" | "period_end"; effectiveFrom?: string; effectiveTo?: string; planVersion?: number }>;
         };
       };
       rules: Array<{
@@ -8239,16 +8239,10 @@ function cutoffTimeMinutes(value: string): number {
 }
 
 function formatPayrollMoney(currency: string, amount: string): string {
-  try {
-    return new Intl.NumberFormat("zh-CN", {
-      style: "currency",
-      currency,
-      minimumFractionDigits: 2,
-      maximumFractionDigits: 2,
-    }).format(Number(amount));
-  } catch {
-    return `${currency} ${Number(amount).toFixed(2)}`;
-  }
+  // Decimal source strings stay exact; chart-only numbers may use exponential notation.
+  if (!Number.isFinite(Number(amount))) return `${currency} —`;
+  const decimal = /^-?\d+(?:\.\d+)?$/.test(amount) ? amount : Number(amount).toFixed(6);
+  return formatCurrencyMoney(currency, decimal);
 }
 
 function formatPayrollAxis(currency: string, value: number): string {
@@ -8405,12 +8399,13 @@ function PayrollManagementPanel({ me }: { me: Me }) {
       name: selected?.plan?.plan.name ?? "主薪资方案",
       type: selected?.plan?.version.type ?? "hourly",
       currency: selected?.plan?.plan.currency ?? "CNY",
-      baseAmount: selected?.plan?.version.baseAmount ?? "",
-      fixedAmount: selected?.plan?.version.config.fixedAmount ?? "",
+      baseAmount: selected?.plan ? roundMoney(selected.plan.version.baseAmount) : "",
+      fixedAmount: selected?.plan?.version.config.fixedAmount ? roundMoney(selected.plan.version.config.fixedAmount) : "",
       subsidies: (selected?.plan?.version.config.subsidies ?? []).map(
         (subsidy, index) => ({
           id: `${index}-${subsidy.name}-${subsidy.amount}`,
           ...subsidy,
+          amount: roundMoney(subsidy.amount),
         }),
       ),
       pendingReviewCountsInEstimate:
@@ -8736,7 +8731,7 @@ function PayrollManagementPanel({ me }: { me: Me }) {
               <StatusLine
                 label="本月预估金额"
                 value={teamPayrollGroups.map(({ currency, records }) =>
-                  formatPayrollMoney(currency, String(records.reduce((sum, record) => sum + Number(record.preview.estimatedAmount), 0))),
+                  formatPayrollMoney(currency, addDecimalAmounts(...records.map((record) => record.preview.estimatedAmount))),
                 ).join(" · ")}
               />
             </div>
@@ -8806,7 +8801,7 @@ function PayrollManagementPanel({ me }: { me: Me }) {
               </select>
             </Field>
             <Field label={planForm.type === "hourly" || planForm.type === "hybrid" ? "基础时薪" : "基础金额"}>
-              <input className={fieldClass} inputMode="decimal" min="0" onChange={(event) => setPlanForm({ ...planForm, baseAmount: event.target.value })} placeholder="例如 80.00" required step="0.000001" type="number" value={planForm.baseAmount} />
+              <input className={fieldClass} inputMode="decimal" min="0" onChange={(event) => setPlanForm({ ...planForm, baseAmount: event.target.value })} placeholder="例如 80.00" required step="0.01" type="number" value={planForm.baseAmount} />
             </Field>
             <Field label="币种">
               <input className={fieldClass} maxLength={3} onChange={(event) => setPlanForm({ ...planForm, currency: event.target.value.toUpperCase() })} required value={planForm.currency} />
@@ -8819,7 +8814,7 @@ function PayrollManagementPanel({ me }: { me: Me }) {
             </Field>
             {planForm.type === "hybrid" ? (
               <Field label="固定部分金额">
-                <input className={fieldClass} min="0" onChange={(event) => setPlanForm({ ...planForm, fixedAmount: event.target.value })} required step="0.000001" type="number" value={planForm.fixedAmount} />
+                <input className={fieldClass} min="0" onChange={(event) => setPlanForm({ ...planForm, fixedAmount: event.target.value })} required step="0.01" type="number" value={planForm.fixedAmount} />
               </Field>
             ) : null}
             <section className="salary-subsidy-editor xl:col-span-4" aria-label="补贴配置">
@@ -8833,7 +8828,7 @@ function PayrollManagementPanel({ me }: { me: Me }) {
                     ...current,
                     subsidies: [
                       ...current.subsidies,
-                      { id: crypto.randomUUID(), name: "", amount: "", distribution: "daily" },
+                      { id: crypto.randomUUID(), name: "", amount: "", distribution: "period_end" },
                     ],
                   }))}
                   size="compact"
@@ -8883,7 +8878,7 @@ function PayrollManagementPanel({ me }: { me: Me }) {
                           }))}
                           placeholder="例如：500.00"
                           required
-                          step="0.000001"
+                          step="0.01"
                           type="number"
                           value={subsidy.amount}
                         />
@@ -8896,8 +8891,8 @@ function PayrollManagementPanel({ me }: { me: Me }) {
                             subsidies: current.subsidies.map((item) => item.id === subsidy.id
                               ? { ...item, distribution: event.target.value as "daily" | "period_end" } : item),
                           }))}>
-                          <option value="daily">按天摊分（随生效区间折算）</option>
-                          <option value="period_end">期末一次计入（不摊分）</option>
+                          <option value="daily">按生效时长折算（不足整期会减少）</option>
+                          <option value="period_end">每期全额一次计入（统一补贴选此项）</option>
                         </select>
                       </label>
                       <Button
@@ -9458,7 +9453,7 @@ export function PayrollPage({ me }: { me: Me }) {
           <Card><CardContent><StatusLine label={livePreview.currentWeek ? `本周已记录工时 · ${payrollWeekRangeLabel(livePreview.currentWeek)}` : "本周已记录工时"} value={formatDuration(livePreview.currentWeek?.totalSeconds ?? 0)} /><p className="mt-1 text-xs text-[var(--text-muted)]">已批准 {formatDuration(livePreview.currentWeek?.approvedSeconds ?? 0)}{livePreview.currentWeek?.pendingSeconds ? ` · 待审核 ${formatDuration(livePreview.currentWeek.pendingSeconds)}` : ""}</p></CardContent></Card>
           <Card><CardContent><StatusLine label="本月总工时" value={formatDuration(livePreview.approvedSeconds + livePreview.pendingSeconds)} /><p className="mt-1 text-xs text-[var(--text-muted)]">已批准 {formatDuration(livePreview.approvedSeconds)}{livePreview.pendingSeconds ? ` · 待审核 ${formatDuration(livePreview.pendingSeconds)}` : ""}</p></CardContent></Card>
           <Card><CardContent><StatusLine label={livePreview.weeklyBonusEstimatedSeconds ? "周奖励工时（含预估）" : "周奖励工时"} value={formatDuration(livePreview.weeklyBonusSeconds + livePreview.weeklyBonusEstimatedSeconds)} /><p className="mt-1 text-xs text-[var(--text-muted)]">已确认 {formatDuration(livePreview.weeklyBonusSeconds)}{livePreview.weeklyBonusEstimatedSeconds ? ` · 待审核预估 ${formatDuration(livePreview.weeklyBonusEstimatedSeconds)}` : ""}</p></CardContent></Card>
-          {salarySubsidies.length ? <Card><CardContent><StatusLine label={`${salarySubsidies.length} 项固定补贴`} value={money(livePreview.currency, salarySubsidyTotal)} /><p className="mt-1 break-words text-xs text-[var(--text-muted)]">{salarySubsidies.map((item) => `${item.name} ${money(livePreview.currency, item.amount)}`).join(" · ")}</p></CardContent></Card> : null}
+          {salarySubsidies.length ? <Card><CardContent><StatusLine label={`${salarySubsidies.length} 项固定补贴`} value={money(livePreview.currency, salarySubsidyTotal)} /><p className="mt-1 break-words text-xs text-[var(--text-muted)]">{salarySubsidies.map((item) => `${item.name} ${money(livePreview.currency, item.amount)}${item.distribution === "daily" ? `（设定 ${money(livePreview.currency, item.configuredAmount ?? item.amount)}，按生效区间折算）` : "（每期全额）"}${item.planVersion ? ` · v${item.planVersion}` : ""}`).join(" · ")}</p></CardContent></Card> : null}
           <Card><CardContent><StatusLine label="本月实时预估" value={money(livePreview.currency, livePreview.estimatedAmount)} /></CardContent></Card>
           <Card><CardContent><StatusLine label="月末趋势预测" value={money(livePreview.currency, livePreview.projectedPeriodAmount)} />{monthEndForecast ? <p className="mt-1 text-xs text-[var(--text-muted)]">合理区间 {money(livePreview.currency, monthEndForecast.projectedLowerCumulativeAmount)} – {money(livePreview.currency, monthEndForecast.projectedUpperCumulativeAmount)}{livePreview.projectedWeeklyBonusSeconds ? ` · 另预计奖励 ${formatDuration(livePreview.projectedWeeklyBonusSeconds)}` : ""}</p> : null}</CardContent></Card>
           <Card><CardContent><StatusLine label="结算截止 / 计划导出" value={formatDateTime(livePreview.period.cutoffAt)} /></CardContent></Card>
@@ -9476,7 +9471,7 @@ export function PayrollPage({ me }: { me: Me }) {
               {` + ${money(livePreview.currency, livePreview.calculationBreakdown.pendingWorkAmount)} 待审核工作预估`}
               {` + ${money(livePreview.currency, livePreview.calculationBreakdown.confirmedBonusAmount)} 已触发周奖励`}
               {` + ${money(livePreview.currency, livePreview.calculationBreakdown.estimatedBonusAmount)} 待审核奖励预估`}
-              {` = ${money(livePreview.currency, livePreview.estimatedAmount)}`}
+              {` + ${money(livePreview.currency, livePreview.approvedReimbursementAmount ?? "0")} 已批准报销 = ${money(livePreview.currency, livePreview.estimatedAmount)}`}
             </p>
             {salarySubsidies.length ? (
               <p className="mt-2 text-xs leading-5 text-[var(--text-muted)]">
@@ -9485,7 +9480,7 @@ export function PayrollPage({ me }: { me: Me }) {
             ) : null}
             {(livePreview.planType === "hourly" || livePreview.planType === "hybrid") ? (
               <p className="mt-2 text-xs leading-5 text-[var(--text-muted)]">
-                工作计薪以 {money(livePreview.currency, livePreview.baseAmount)} / 小时 × 本月有效工时为基础；若启用了周末、节假日、夜间或超时倍率，上述金额已经逐段包含对应倍率。
+                工作工资按工时发生时生效的方案版本逐段计算，不用当前单价覆盖历史工时；周末、节假日、夜间、超时倍率及奖励均保留计算依据。
               </p>
             ) : null}
             {livePreview.weeklyBonusRule ? (

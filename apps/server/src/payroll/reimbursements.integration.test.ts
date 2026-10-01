@@ -5,7 +5,7 @@ import { drizzle } from "drizzle-orm/pglite";
 import { eq } from "drizzle-orm";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { Database } from "@workbench/db";
-import { attachments, compensationPlans, compensationPlanVersions, notifications, organizations, orgMemberships, payPeriods, payrollAdjustments, payrollItems, payrollItemComponents, reimbursementRequests, users, workSessions } from "@workbench/db/schema";
+import { attachments, compensationPlans, compensationPlanVersions, notifications, organizations, orgMemberships, payPeriods, payrollAdjustments, payrollItems, payrollItemComponents, payrollRuns, payrollExportBatches, reimbursementRequests, users, workSessions } from "@workbench/db/schema";
 import type { AuthContext } from "../auth/service.js";
 import { loadServerConfig } from "../config.js";
 import { EvidenceService } from "../evidence/service.js";
@@ -14,6 +14,7 @@ import { ReimbursementService } from "./reimbursements.js";
 import { PayrollHandoffService } from "./handoff.js";
 import { capturePayrollWorkbook } from "./bundle.js";
 import ExcelJS from "exceljs";
+import { addDecimalAmounts, prorateDecimalAmount } from "@workbench/shared";
 
 const clients: PGlite[] = [];
 beforeEach(() => { vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(new Date("2026-09-08T12:00:00Z")); });
@@ -40,6 +41,105 @@ async function fixture() {
   const config = loadServerConfig({ NODE_ENV: "test", SESSION_SECRET: "test-secret-that-is-at-least-thirty-two-bytes", DATABASE_URL: "postgresql://test:test@localhost:5432/test" });
   return { db, employee: actors[0]!, reviewer: actors[1]!, period: period!, version: version!, expense: new ReimbursementService(db), evidence: new EvidenceService(db, config), payroll: new PayrollService(db) };
 }
+
+it.each([
+  [143_992, "177.533370"], [143_886, "177.526492"],
+])("reproduces the reported %s-second subsidy change and prevents %s instead of 168.19", async (seconds, oldIncorrectAmount) => {
+  const { db, employee, reviewer, period, version, payroll } = await fixture();
+  const transition = new Date(period.startsAt.getTime() + seconds * 1000);
+  expect(addDecimalAmounts("168.19", prorateDecimalAmount("168.19", seconds, 30 * 86400)))
+    .toBe(oldIncorrectAmount);
+  await db.update(compensationPlanVersions).set({ effectiveTo: transition,
+    config: { subsidies: [{ name: "统一补贴", amount: "168.19", distribution: "daily" }] },
+  }).where(eq(compensationPlanVersions.id, version.id));
+  await db.insert(compensationPlanVersions).values({ compensationPlanId: version.compensationPlanId,
+    version: 2, type: "hourly", baseAmount: "100", baseUnit: "hour", createdBy: reviewer.membershipId,
+    effectiveFrom: transition, config: { subsidies: [{ name: "统一补贴", amount: "168.19", distribution: "period_end" }] },
+  });
+  await db.update(compensationPlans).set({ activeVersion: 2 }).where(eq(compensationPlans.id, version.compensationPlanId));
+  const preview = (await payroll.listOwn(employee)).livePreview!;
+  expect(preview).toMatchObject({ subsidyTotal: "168.190000", estimatedAmount: "168.190000" });
+  const run = await payroll.calculate(reviewer, period.id);
+  const [item] = await db.select().from(payrollItems).where(eq(payrollItems.payrollRunId, run.id));
+  expect(item).toMatchObject({ grossAmount: "168.190000", finalAmount: "168.190000" });
+  const components = await db.select().from(payrollItemComponents).where(eq(payrollItemComponents.payrollItemId, item!.id));
+  expect(components.filter((component) => component.type === "allowance")).toHaveLength(1);
+  expect(components.find((component) => component.type === "allowance")!.calculationTrace).toMatchObject({
+    distribution: "period_end", rounding: { policy: "category_half_up_2_decimals_largest_remainder", roundedAmount: "168.19" },
+  });
+});
+
+it("rounds the reported base salary to cents and reconciles preview, components and workbook", async () => {
+  const { db, employee, reviewer, period, version, payroll } = await fixture();
+  await db.update(compensationPlanVersions).set({ type: "monthly", baseAmount: "2866.920833", baseUnit: "month",
+    config: { subsidies: [{ name: "统一补贴", amount: "168.19", distribution: "period_end" }] },
+  }).where(eq(compensationPlanVersions.id, version.id));
+  const preview = (await payroll.listOwn(employee)).livePreview!;
+  expect(preview).toMatchObject({ subsidyTotal: "168.190000", estimatedAmount: "3035.110000" });
+  const run = await payroll.calculate(reviewer, period.id);
+  const handoff = await new PayrollHandoffService(db).preview(reviewer, run.id);
+  expect(handoff.rows[0]).toMatchObject({ grossAmount: "3035.110000", finalAmount: "3035.110000",
+    amounts: { wages: "2866.920000", subsidies: "168.190000" } });
+  const bundle = await capturePayrollWorkbook(db, reviewer, handoff, "九月.csv");
+  const book = new ExcelJS.Workbook();
+  await book.xlsx.load(Buffer.from(bundle.workbookBase64, "base64") as unknown as Parameters<typeof book.xlsx.load>[0]);
+  expect(book.getWorksheet("薪资汇总")!.getCell("K2").value).toBe("2866.92");
+  expect(book.getWorksheet("薪资汇总")!.getCell("M2").value).toBe("168.19");
+  expect(book.getWorksheet("薪资汇总")!.getCell("R2").value).toBe("3035.11");
+});
+
+it("reconciles category half-cent amounts and negative deductions before saving the final payment", async () => {
+  const { db, employee, reviewer, period, version, payroll } = await fixture();
+  await db.update(compensationPlanVersions).set({ baseAmount: "10.005",
+    config: { subsidies: [{ name: "半分核对补贴", amount: "1.005", distribution: "period_end" }] },
+  }).where(eq(compensationPlanVersions.id, version.id));
+  await db.insert(workSessions).values({ organizationId: employee.organizationId, membershipId: employee.membershipId,
+    startAt: new Date("2026-09-03T08:00:00Z"), endAt: new Date("2026-09-03T09:00:00Z"), timezone: "UTC",
+    grossSeconds: 3600, netSeconds: 3600, source: "manual", content: "十进制半分核对事实", approvalStatus: "approved", submissionStatus: "submitted",
+  });
+  await db.insert(payrollAdjustments).values({ organizationId: employee.organizationId, membershipId: employee.membershipId,
+    payPeriodId: period.id, amount: "-0.005", currency: "CNY", reason: "半分扣减核对", createdBy: reviewer.membershipId,
+    approvedBy: reviewer.membershipId, approvedAt: new Date(),
+  });
+  const run = await payroll.calculate(reviewer, period.id);
+  const preview = await new PayrollHandoffService(db).preview(reviewer, run.id);
+  expect(preview.rows[0]).toMatchObject({ grossAmount: "11.020000", adjustmentAmount: "-0.010000", finalAmount: "11.010000",
+    amounts: { wages: "10.010000", subsidies: "1.010000", other: "-0.010000" } });
+  const components = await db.select().from(payrollItemComponents);
+  expect(addDecimalAmounts(...components.map((component) => component.amount))).toBe("11.010000");
+});
+
+it("rejects normalized duplicate benefits in new settings and legacy calculations without partial writes", async () => {
+  const { db, employee, reviewer, period, version, payroll } = await fixture();
+  const subsidies = [{ name: "补贴Ａ", amount: "168.19", distribution: "period_end" as const },
+    { name: "补贴A", amount: "168.19", distribution: "period_end" as const }];
+  await expect(payroll.configurePlan(reviewer, { membershipId: employee.membershipId, name: "重复补贴检查",
+    type: "hourly", baseAmount: "100", currency: "CNY", rules: [], subsidies,
+    effectiveFrom: new Date("2026-09-02Z"), pendingReviewCountsInEstimate: true,
+  })).rejects.toThrow("不能重复设置同名补贴");
+  expect(await db.select().from(compensationPlanVersions)).toHaveLength(1);
+  await db.update(compensationPlanVersions).set({ config: { subsidies } }).where(eq(compensationPlanVersions.id, version.id));
+  await expect(payroll.calculate(reviewer, period.id)).rejects.toThrow("同名补贴");
+  expect(await db.select().from(payrollItems)).toHaveLength(0);
+  expect(await db.select().from(payrollRuns)).toHaveLength(0);
+});
+
+it("blocks unconfirmed old calculation rules and rolls back stale report recalculation", async () => {
+  const { db, reviewer, period, payroll } = await fixture();
+  vi.setSystemTime(new Date("2026-10-08T12:00Z"));
+  const run = await payroll.calculate(reviewer, period.id);
+  await db.update(payrollRuns).set({ calculationVersion: "payroll-engine-v8-effective-millisecond-budget", inputHash: "8".repeat(64) })
+    .where(eq(payrollRuns.id, run.id));
+  const periodsBefore = await db.select().from(payPeriods);
+  const handoff = new PayrollHandoffService(db);
+  const preview = await handoff.preview(reviewer, run.id);
+  expect(preview.blockers.join(" ")).toContain("旧计算规则");
+  await expect(handoff.confirm(reviewer, run.id, preview.previewHash)).rejects.toThrow("旧计算规则");
+  await expect(handoff.report(reviewer, run.id)).rejects.toThrow("更新计算并查看");
+  expect(await db.select().from(payrollRuns)).toHaveLength(1);
+  expect(await db.select().from(payrollExportBatches)).toHaveLength(0);
+  expect(await db.select().from(payPeriods)).toEqual(periodsBefore);
+});
 
 it("freezes submitted evidence, rejects self approval and accounts an expense exactly once through settlement", async () => {
   const { db, employee, reviewer, period, expense, evidence, payroll } = await fixture();
@@ -89,7 +189,7 @@ it("prorates daily subsidies but pays a period-end subsidy only from the final e
   expect((await db.select().from(payrollItems))[0]).toMatchObject({ grossAmount: "650.000000" });
   const components = await db.select().from(payrollItemComponents);
   expect(components.filter((item) => item.label === "交通").map((item) => item.amount)).toEqual(["150.000000", "300.000000"]);
-  expect(components.filter((item) => item.label === "月末").map((item) => item.amount)).toEqual(["0.000000", "200.000000"]);
+  expect(components.filter((item) => item.label === "月末").map((item) => item.amount)).toEqual(["200.000000"]);
 });
 
 it("keeps approved expenses in their assigned month and preserves historical, pending and notification access", async () => {
@@ -146,9 +246,9 @@ it("exports a whole month's work, wages, subsidies, reimbursements and deduction
   const sheet = book.getWorksheet("薪资汇总")!;
   const column = (name: string) => { let found = 0; sheet.getRow(1).eachCell((cell, index) => { if (cell.value === name) found = index; }); expect(found).toBeGreaterThan(0); return found; };
   const value = (name: string) => sheet.getCell(2, column(name)).value;
-  expect(value("工作工资")).toBe("100.000000"); expect(value("补贴")).toBe("30.000000");
-  expect(value("已批准报销")).toBe("128.350000"); expect(value("其他调整（含扣减及更正）")).toBe("-5.000000");
-  expect(value("最终金额")).toBe("253.350000"); expect(value("薪资周期")).toBe("九月");
+  expect(value("工作工资")).toBe("100.00"); expect(value("补贴")).toBe("30.00");
+  expect(value("已批准报销")).toBe("128.35"); expect(value("其他调整（含扣减及更正）")).toBe("-5.00");
+  expect(value("最终金额")).toBe("253.35"); expect(value("薪资周期")).toBe("九月");
   expect(JSON.stringify(book.getWorksheet("工作提交单")!.getSheetValues())).toContain("九月完整工作提交单");
   expect(JSON.stringify(book.getWorksheet("报销明细")!.getSheetValues())).toContain("九月交通报销");
 });

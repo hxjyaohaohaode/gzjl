@@ -86,6 +86,7 @@ jobs:
             test-results/wide
             test-results/engines
             test-results/upgrades
+            test-results/payroll
           if-no-files-found: ignore
           retention-days: 7
 
