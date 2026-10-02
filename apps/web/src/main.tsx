@@ -5,7 +5,9 @@ import { BrowserRouter } from "react-router-dom";
 
 import { App } from "./app.js";
 import { WorkspaceErrorBoundary } from "./error-boundary.js";
+import { InteractionProvider } from "./interaction-system.js";
 import "./styles.css";
+import "./interaction-system.css";
 
 const queryClient = new QueryClient({
   mutationCache: new MutationCache({
@@ -36,7 +38,7 @@ createRoot(rootElement).render(
   <StrictMode>
     <BrowserRouter>
       <QueryClientProvider client={queryClient}>
-        <WorkspaceErrorBoundary><App /></WorkspaceErrorBoundary>
+        <InteractionProvider><WorkspaceErrorBoundary><App /></WorkspaceErrorBoundary></InteractionProvider>
       </QueryClientProvider>
     </BrowserRouter>
   </StrictMode>,

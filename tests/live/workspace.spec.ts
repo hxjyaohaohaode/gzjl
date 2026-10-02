@@ -105,11 +105,12 @@ test("real API, database and file bytes connect the employee and management work
       startsAt: new Date(Date.now() - 6 * 86400_000).toISOString(),
       endsAt: new Date(Date.now() + 86400_000).toISOString(), cutoffAt: new Date(Date.now() + 86400_000).toISOString(),
     })).period;
-    await employee.goto("/payroll");
-    await owner.goto("/payroll");
+    await employee.goto("/reimbursements");
+    await owner.goto("/payroll-management/periods");
     // Wait for management data to render before temporarily exercising the
     // browser's text fallback. React's initial data commit restores input.type.
-    await expect(owner.getByRole("heading", { name: "本月实时预估", exact: true })).toBeVisible();
+    await expect(owner.getByRole("heading", { name: "薪资周期与批次", exact: true })).toBeVisible();
+    await owner.getByText("新建结算周期", { exact: true }).click();
     const monthInput = owner.getByLabel("结算月份", { exact: true });
     const savedMonth = await monthInput.inputValue();
     await monthInput.evaluate((element) => { (element as HTMLInputElement).type = "text"; });
@@ -128,7 +129,7 @@ test("real API, database and file bytes connect the employee and management work
     await expect(employee.getByText(`交通发票${suffix}：128.35元`, { exact: true }).first()).toBeVisible();
     await employee.getByRole("button", { name: "提交报销审批" }).click();
     await expect(employee.locator(".reimbursement-summary")).toContainText("待审批");
-    await owner.goto("/approvals");
+    await owner.goto("/approvals/reimbursements");
     await owner.locator(".reimbursement-summary").filter({ hasText: `交通报销${suffix}` }).click();
     await owner.getByLabel("计入薪资周期").selectOption(period.id);
     await owner.getByRole("button", { name: "批准并计入薪资", exact: true }).click();
@@ -168,8 +169,8 @@ test("real API, database and file bytes connect the employee and management work
 
     const inventory: unknown[] = [];
     for (const [role, page, paths] of [
-      ["owner", owner, ["/", "/work", "/calendar", "/projects", `/projects/${projectId}`, "/team", "/analytics", "/payroll", "/ai", "/approvals", "/organization", "/security", "/notification-preferences", "/imports"]],
-      ["employee", employee, ["/", "/work", "/calendar", "/projects", `/projects/${projectId}`, "/team", "/analytics", "/payroll", "/ai", "/security", "/notification-preferences"]],
+      ["owner", owner, ["/", "/work", "/calendar", "/projects", `/projects/${projectId}`, "/team", "/analytics", "/payroll", "/payroll/history", "/payroll-management", "/payroll-management/plans", "/payroll-management/periods", "/payroll-management/settings", "/reimbursements", "/organization/work-policy", "/ai", "/approvals", "/approvals/reimbursements", "/organization", "/security", "/notification-preferences", "/imports"]],
+      ["employee", employee, ["/", "/work", "/calendar", "/projects", `/projects/${projectId}`, "/team", "/analytics", "/payroll", "/payroll/history", "/reimbursements", "/ai", "/security", "/notification-preferences"]],
     ] as const) {
       for (const path of paths) {
         await page.goto(path);
@@ -221,8 +222,10 @@ test("real API, database and file bytes connect the employee and management work
           text: element.getAttribute("aria-label") || element.getAttribute("aria-labelledby")?.split(/\s+/).map((id) => document.getElementById(id)?.textContent).join(" ") || element.getAttribute("title") || Array.from((element as HTMLInputElement).labels ?? []).map((label) => label.textContent?.trim()).join(" ") || (element.matches("input, select, textarea") ? "" : element.textContent?.trim().slice(0, 100)),
           type: element.getAttribute("type"), href: element.getAttribute("href"),
           disabled: element.hasAttribute("disabled"), width: element.getBoundingClientRect().width, height: element.getBoundingClientRect().height,
+          interactionId: element.getAttribute("data-interaction-id"), interactionKind: element.getAttribute("data-interaction-kind"),
         })));
         expect(controls.filter((control) => ["INPUT", "SELECT", "TEXTAREA"].includes(control.tag) && !control.text), `${role} ${path} unnamed form fields`).toEqual([]);
+        expect(controls.filter((control) => control.type !== "hidden" && (control.tag !== "A" || control.href) && !control.interactionId), `${role} ${path} controls missing interaction registration`).toEqual([]);
         inventory.push({ role, path, controls });
         await page.screenshot({ path: testInfo.outputPath(`${role}-${path.replaceAll("/", "_") || "home"}.png`), fullPage: true });
       }

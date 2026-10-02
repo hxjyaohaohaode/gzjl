@@ -20,6 +20,7 @@ import {
   PanelLeftOpen,
   Plus,
   RotateCcw,
+  ReceiptText,
   Search,
   Settings,
   ShieldCheck,
@@ -46,6 +47,9 @@ import { readPreference, writePreference } from "./browser-preferences.js";
 import { useDialogFocus } from "./dialog-focus.js";
 import { WorkspaceErrorBoundary } from "./error-boundary.js";
 import { getOrganizationTimezone } from "./timezone.js";
+import { hasOrganizationGrant } from "./api.js";
+import { MotionSettings, WorkspaceOrientation } from "./interaction-system.js";
+import { reducedMotion } from "./motion-preference.js";
 
 interface NavigationItem {
   label: string;
@@ -55,6 +59,8 @@ interface NavigationItem {
   section: "workspace" | "management" | "personal";
   permission?: string;
   organizationPermission?: string;
+  approvalEntry?: boolean;
+  ownerOnly?: boolean;
 }
 interface NotificationItem {
   id: string;
@@ -212,6 +218,14 @@ const pageCopilotDefaults: Record<
 };
 
 function resolvePageCopilotContext(pathname: string): PageCopilotContext {
+  if (pathname.startsWith("/payroll-management")) return {
+    area: "payroll", label: "薪资管理", conversationId: "page_payroll_management",
+    suggestions: ["解释当前薪资核对中需要关注的事项", "结算前需要核对哪些工作依据？"], allowTeam: true,
+  };
+  if (pathname.startsWith("/reimbursements")) return {
+    area: "payroll", label: "我的报销", conversationId: "page_reimbursements",
+    suggestions: ["报销与薪资账单是什么关系？", "报销提交前需要准备哪些凭证？"], allowTeam: false,
+  };
   const projectMatch = pathname.match(/^\/projects\/([0-9a-f-]{36})(?:\/|$)/i);
   if (projectMatch?.[1]) {
     const entityId = projectMatch[1].toLowerCase();
@@ -313,7 +327,23 @@ const navigation: NavigationItem[] = [
     to: "/approvals",
     icon: FileCheck2,
     section: "management",
-    permission: "work.review",
+    approvalEntry: true,
+  },
+  {
+    label: "薪资管理",
+    shortLabel: "薪资管理",
+    to: "/payroll-management",
+    icon: CircleDollarSign,
+    section: "management",
+    organizationPermission: "payroll.configure",
+  },
+  {
+    label: "工时提交规则",
+    shortLabel: "提交规则",
+    to: "/organization/work-policy",
+    icon: Settings,
+    section: "management",
+    ownerOnly: true,
   },
   {
     label: "组织与人员",
@@ -340,6 +370,14 @@ const navigation: NavigationItem[] = [
     permission: "payroll.view_own",
   },
   {
+    label: "我的报销",
+    shortLabel: "报销",
+    to: "/reimbursements",
+    icon: ReceiptText,
+    section: "personal",
+    permission: "payroll.view_own",
+  },
+  {
     label: "账户安全",
     shortLabel: "安全",
     to: "/security",
@@ -358,7 +396,7 @@ const navigation: NavigationItem[] = [
 const sectionNames: Record<NavigationItem["section"], string> = {
   workspace: "工作空间",
   management: "管理工作",
-  personal: "个人设置",
+  personal: "个人事务",
 };
 
 function formatHeaderDate(): string {
@@ -627,6 +665,8 @@ export function AppShell({
       navigation.filter(
         (item) =>
           (!item.permission || hasGrant(me, item.permission)) &&
+          (!item.ownerOnly || me.user.isOwner) &&
+          (!item.approvalEntry || hasGrant(me, "work.review") || hasOrganizationGrant(me, "payroll.settle")) &&
           (!item.organizationPermission ||
             me.permissions.some(
               (grant) =>
@@ -636,7 +676,7 @@ export function AppShell({
       ),
     [me],
   );
-  const mobileNavigation = ["/", "/work", "/projects", "/analytics", "/payroll"]
+  const mobileNavigation = ["/", "/work", "/projects", "/analytics", hasOrganizationGrant(me, "payroll.configure") ? "/payroll-management" : "/payroll"]
     .map((path) => visibleNavigation.find((item) => item.to === path))
     .filter((item): item is NavigationItem => Boolean(item));
   const logout = useMutation({
@@ -829,7 +869,7 @@ export function AppShell({
     if (!contextOpen) return;
     const container = contextScrollRef.current;
     if (!container) return;
-    container.scrollTo({ top: container.scrollHeight, behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "instant" : "smooth" });
+    container.scrollTo({ top: container.scrollHeight, behavior: reducedMotion() ? "instant" : "smooth" });
   }, [contextOpen, copilotUpdateKey]);
   return (
     <div
@@ -925,7 +965,7 @@ export function AppShell({
                             isActive && "app-nav-link--active",
                           )
                         }
-                        end={item.to === "/"}
+                        end={item.to === "/" || item.to === "/organization"}
                         key={item.to}
                         onClick={() => setSidebarOpen(false)}
                         title={item.label}
@@ -1312,6 +1352,7 @@ export function AppShell({
                     </Button>
                   ))}
                 </div>
+                <MotionSettings />
                 <div className="mt-4">
                   <p className="text-xs font-semibold text-[var(--text-muted)]">
                     强调色
@@ -1334,6 +1375,7 @@ export function AppShell({
           className="app-main w-full px-4 py-6 md:px-7 md:py-8 xl:px-9"
           id="main-content"
         >
+          <WorkspaceOrientation me={me} />
           {logout.error ? <div className="mb-4 rounded-xl bg-[var(--danger-soft)] p-4 text-sm text-[var(--danger)]" role="alert">
             <p>{logout.error.message}</p>
             <Button className="mt-2" disabled={logout.isPending} onClick={() => logout.mutate()} variant="secondary" size="compact">重试退出</Button>

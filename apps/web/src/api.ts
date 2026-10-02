@@ -206,3 +206,7 @@ export interface Me {
 export function hasGrant(me: Me, permission: string): boolean {
   return me.permissions.some((grant) => grant.permission === permission);
 }
+
+export function hasOrganizationGrant(me: Me, permission: string): boolean {
+  return me.permissions.some((grant) => grant.permission === permission && grant.scopeKind === "organization");
+}

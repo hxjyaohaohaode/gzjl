@@ -1,3 +1,4 @@
+import { reducedMotion } from "./motion-preference.js";
 import {
   Background,
   Controls,
@@ -501,7 +502,7 @@ export default function ProjectCanvas({
   const resetLayout = () => {
     setCanvasNodes(flowNodes);
     window.requestAnimationFrame(() =>
-      void flowInstanceRef.current?.fitView({ padding: 0.22, duration: 260 }),
+      void flowInstanceRef.current?.fitView({ padding: 0.22, duration: reducedMotion() ? 0 : 260 }),
     );
   };
 

@@ -24,7 +24,8 @@ import {
 import { api } from "./api.js";
 import { getCalendarAlmanac } from "./calendar-almanac.js";
 import { calendarDayBoundary, calendarDayDifference, calendarPeriodSeconds, loadCalendarRecords, shiftCalendarMonth, splitCalendarInterval, type CalendarIntervalSegment } from "./calendar-model.js";
-import { EmptyState, ErrorMessage, LoadingBlock, PageHeader } from "./pages.js";
+import { EmptyState, ErrorMessage, LoadingBlock, PageHeader } from "./workspace-primitives.js";
+
 import {
   getOrganizationTimezone,
   toZonedInputValue,

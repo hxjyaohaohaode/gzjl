@@ -12,8 +12,8 @@ export const canReviewReimbursements = (actor: AuthContext) =>
 export class ReimbursementService {
   constructor(private readonly db: Database) {}
 
-  async list(actor: AuthContext, input: { from?: string | undefined; to?: string | undefined; pendingOnly?: boolean | undefined; id?: string | undefined; before?: string | undefined; limit?: number | undefined } = {}) {
-    const reviewer = canReviewReimbursements(actor);
+  async list(actor: AuthContext, input: { from?: string | undefined; to?: string | undefined; pendingOnly?: boolean | undefined; ownOnly?: boolean | undefined; reviewedOnly?: boolean | undefined; id?: string | undefined; before?: string | undefined; limit?: number | undefined } = {}) {
+    const reviewer = canReviewReimbursements(actor) && !input.ownOnly;
     const [organization] = await this.db.select({ timezone: organizations.timezone }).from(organizations).where(eq(organizations.id, actor.organizationId));
     const timezone = organization?.timezone ?? "Asia/Shanghai";
     const parts = new Intl.DateTimeFormat("en-CA", { timeZone: timezone, year: "numeric", month: "2-digit" }).formatToParts(new Date());
@@ -39,6 +39,8 @@ export class ReimbursementService {
       .leftJoin(payPeriods, eq(payPeriods.id, reimbursementRequests.payPeriodId))
       .where(and(eq(reimbursementRequests.organizationId, actor.organizationId),
         reviewer ? or(eq(reimbursementRequests.membershipId, actor.membershipId), ne(reimbursementRequests.status, "draft")) : eq(reimbursementRequests.membershipId, actor.membershipId),
+        reviewer && (input.pendingOnly || input.reviewedOnly) ? ne(reimbursementRequests.membershipId, actor.membershipId) : undefined,
+        input.reviewedOnly ? inArray(reimbursementRequests.status, ["approved", "rejected"]) : undefined,
         input.id ? eq(reimbursementRequests.id, input.id) : input.pendingOnly ? eq(reimbursementRequests.status, "pending") : range,
         beforeAt && beforeId ? or(lt(reimbursementRequests.createdAt, new Date(beforeAt)), and(eq(reimbursementRequests.createdAt, new Date(beforeAt)), lt(reimbursementRequests.id, beforeId))) : undefined))
       .orderBy(desc(reimbursementRequests.createdAt), desc(reimbursementRequests.id)).limit(limit + 1);
@@ -120,8 +122,8 @@ export class ReimbursementService {
       if (reviewing) await tx.insert(notifications).values({ organizationId: actor.organizationId,
         recipientMembershipId: request.membershipId, category: "reimbursement_result", severity: "info",
         title: input.action === "approve" ? "报销申请已批准" : "报销申请已驳回",
-        body: `“${request.title}”已处理，请在薪资页查看审批说明和结算周期。`,
-        actionUrl: `/payroll#reimbursement-${id}`, dedupeKey: `reimbursement:${id}:${updated!.version}` });
+        body: `“${request.title}”已处理，请在“我的报销”查看审批说明和结算周期。`,
+        actionUrl: `/reimbursements#reimbursement-${id}`, dedupeKey: `reimbursement:${id}:${updated!.version}` });
       return updated!;
     });
   }

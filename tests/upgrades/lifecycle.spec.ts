@@ -23,7 +23,7 @@ test("long content, evidence queue, restoration, contextual approval and exact h
     await call(member.request, "POST", "/api/auth/invitations/accept", { token, password: "Acceptance-Only-Password-2026!" });
     await login(member, "deep@acceptance.test");
     const me = await call(member.request, "GET", "/api/me");
-    await owner.goto("/payroll");
+    await owner.goto("/organization/work-policy");
     await owner.getByLabel("最多补录多少天前的工作").fill("7");
     await owner.getByRole("button", { name: "保存提交与补录规则" }).click();
     await expect(owner.getByText("规则已生效。", { exact: true })).toBeVisible();
@@ -31,7 +31,7 @@ test("long content, evidence queue, restoration, contextual approval and exact h
     const csrf = (await (await member.request.get("/api/auth/csrf")).json()).csrfToken;
     expect((await member.request.put("/api/work-policy", { headers: { "x-csrf-token": csrf }, data: { manualEntryLookbackDays: 366, expectedVersion: 1 } })).status()).toBe(403);
     await expect(member.getByText("当前没有生效的计薪方案", { exact: false })).toBeVisible();
-    await owner.goto("/payroll"); await expect(owner.getByRole("heading", { name: "已加入但缺计薪方案" })).toBeVisible();
+    await owner.goto("/payroll-management"); await expect(owner.getByRole("heading", { name: "已加入但缺计薪方案" })).toBeVisible();
     await call(owner.request, "PUT", `/api/payroll/members/${me.user.membershipId}/plan`, { name: "验收时薪", type: "hourly", baseAmount: "100.00", effectiveFrom: new Date(Date.now() - 7 * 86400_000).toISOString(), rules: [] });
     const createdProject = await call(owner.request, "POST", "/api/projects", { key: "DEEP", name: "手机项目名称包含长内容和多个交付节点".repeat(4), description: "项目背景与完整交付要求\n".repeat(150) });
     await call(member.request, "POST", `/api/projects/${createdProject.project.id}/members/self`, {});
@@ -59,7 +59,7 @@ test("long content, evidence queue, restoration, contextual approval and exact h
     await expect(owner.getByText("提交人：同名成员与多附件长文本验收", { exact: true })).toBeVisible();
     await expect(owner.getByText("图片证据.png", { exact: true }).first()).toBeVisible();
     // A boss-defined partial cycle must be usable through the actual form.
-    await owner.goto("/payroll");
+    await owner.goto("/payroll-management/periods");
     const localInput = (date: Date) => new Intl.DateTimeFormat("sv-SE", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" }).format(date).replace(" ", "T");
     await owner.getByLabel("周期名称", { exact: true }).fill("老板指定非自然月交接验收");
     await owner.getByLabel("周期开始（含）", { exact: true }).fill(localInput(new Date(Date.now() - 86400_000)));
@@ -70,7 +70,7 @@ test("long content, evidence queue, restoration, contextual approval and exact h
     expect(period).toBeTruthy();
     await owner.getByRole("button", { name: "计算并查看薪资总览", exact: true }).click();
     await expect(owner.getByRole("heading", { name: "老板核对：每人薪资总览 + 本周期工作明细" })).toBeVisible();
-    await expect(owner).toHaveURL(/handoff=/);
+    await expect(owner).toHaveURL(/\/payroll-management\/runs\//);
     await expect(owner.getByRole("button", { name: "确认导出并锁定", exact: true })).toBeDisabled();
     const statisticsResponse = owner.waitForResponse((r) => r.url().endsWith("/report.xlsx"));
     const statisticsDownload = owner.waitForEvent("download");
@@ -79,7 +79,7 @@ test("long content, evidence queue, restoration, contextual approval and exact h
     expect(statistics.suggestedFilename()).toContain("未确认");
     const response = await statisticsResponse; expect(response.ok()).toBeTruthy();
     expect(createHash("sha256").update(await readFile(statisticsFile!)).digest("hex")).toBe(response.headers()["x-content-sha256"]);
-    const pendingRunId = new URL(owner.url()).searchParams.get("handoff");
+    const pendingRunId = new URL(owner.url()).pathname.split("/").at(-1);
     expect((await call(owner.request, "GET", `/api/payroll-runs/${pendingRunId}/handoff`)).batch).toBeNull();
     expect((await member.request.get(`/api/payroll-runs/${pendingRunId}/report.xlsx`)).status()).toBe(403);
     await owner.reload(); await expect(owner.getByRole("heading", { name: "老板核对：每人薪资总览 + 本周期工作明细" })).toBeVisible();
@@ -107,7 +107,7 @@ test("long content, evidence queue, restoration, contextual approval and exact h
     await description.locator("summary").click();
     for (const [width, height] of [[320, 740], [360, 800], [390, 844], [844, 390], [768, 1024], [1920, 1080]]) {
       await owner.setViewportSize({ width: width!, height: height! }); await member.setViewportSize({ width: width!, height: height! });
-      for (const [page, path] of [[member, `/work?record=${session.id}&version=1`], [owner, "/team"], [owner, `/projects/${createdProject.project.id}?node=${node.id}`], [owner, "/analytics"], [owner, "/payroll"]] as const) {
+      for (const [page, path] of [[member, `/work?record=${session.id}&version=1`], [owner, "/team"], [owner, `/projects/${createdProject.project.id}?node=${node.id}`], [owner, "/analytics"], [owner, "/payroll-management/periods"]] as const) {
         await page.goto(path); await expect(page.locator("#main-content")).toBeVisible(); await expect(page.locator("main .animate-spin")).toHaveCount(0);
         expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), `${width}x${height} ${path} overflow`).toBe(true);
         if (path.startsWith("/projects/")) {
@@ -128,7 +128,7 @@ test("long content, evidence queue, restoration, contextual approval and exact h
     await owner.getByLabel("历史月份", { exact: true }).fill("2026-03");
     const historyResponse = owner.waitForResponse((response) => response.url().includes("/api/analytics/summary?") && new URL(response.url()).searchParams.get("from") === "2026-02-28T16:00:00.000Z");
     await owner.getByRole("button", { name: "应用历史范围" }).click(); expect((await historyResponse).ok()).toBeTruthy();
-    await owner.goto("/payroll"); await owner.getByRole("button", { name: "核对导出预览", exact: true }).click();
+    await owner.goto("/payroll-management/periods"); await owner.getByRole("button", { name: "核对导出预览", exact: true }).click();
     const preview = await call(owner.request, "GET", `/api/payroll-runs/${run.id}/handoff`);
     expect(preview.blockers).toEqual([]);
     await owner.getByText("正式交接：核对外部人员编号和方案版本", { exact: true }).click();

@@ -136,7 +136,7 @@ test("reimbursement saving locks the submitted snapshot and failures preserve in
     await new Promise<void>((resolve) => { release = resolve; });
     await route.fulfill({ status: 422, json: { error: "invalid_expense", message: "请核对费用发生日期后重新保存。" } });
   });
-  await page.goto("/payroll");
+  await page.goto("/reimbursements");
   await page.getByRole("button", { name: "申请报销", exact: true }).click();
   await page.getByLabel("报销事项", { exact: true }).fill("现场交通费用");
   await page.getByLabel("发生日期").fill("2026-09-22");
@@ -179,7 +179,7 @@ test("reimbursement history selects the requested month and notification links l
     const old = url.searchParams.get("from") === "2026-09-01" || url.searchParams.get("id") === oldId;
     return route.fulfill({ json: { items: [old ? claim(oldId, "九月已批准报销") : claim(currentId, "十月归属报销")], canReview: false, membershipId: memberId, periods: [], nextCursor: null, range: { from: old ? "2026-09-01" : "2026-10-01", to: old ? "2026-10-01" : "2026-11-01", timezone: "Asia/Shanghai" } } });
   });
-  await page.goto("/payroll"); const panel = page.locator(".reimbursement-panel");
+  await page.goto("/reimbursements"); const panel = page.locator(".reimbursement-panel");
   await expect(panel.getByText("十月归属报销", { exact: true })).toBeVisible(); await expect(panel.getByText("九月已批准报销", { exact: true })).toHaveCount(0);
   await panel.locator(".reimbursement-history > summary").click(); await panel.getByLabel("历史月份", { exact: true }).fill("2026-09");
   await panel.getByRole("button", { name: "应用历史范围" }).click();
@@ -200,7 +200,7 @@ test("salary export month filters both periods and their ready or settled batche
     { id: "august", name: "八月账单", startsAt: "2026-07-31T16:00:00Z", endsAt: "2026-08-31T16:00:00Z", timezone: "Asia/Shanghai", cutoffAt: "2026-09-10T10:00:00Z", status: "pending_confirmation" },
   ];
   await page.route("**/api/payroll/management", (route) => route.fulfill({ json: { members: [], periods, runs: periods.map((period, i) => ({ period, run: { id: period.id, runNumber: 1, status: i ? "ready" : "settled", createdAt: period.endsAt } })), latestItems: [], liveItems: [], liveItemIssues: [], settings: { timezone: "Asia/Shanghai", payrollCutoffDay: 10, payrollCutoffMinute: 1080 } } }));
-  await page.goto("/payroll"); await expect(page.getByLabel("结算月份", { exact: true })).toHaveValue("2026-09");
+  await page.goto("/payroll-management/periods"); await page.getByText("新建结算周期", { exact: true }).click(); await expect(page.getByLabel("结算月份", { exact: true })).toHaveValue("2026-09");
   await page.getByLabel("查看 / 导出指定月份", { exact: true }).fill("2026-07");
   await expect(page.getByText("七月账单 · 批次 #1 · 已导出并锁定", { exact: true })).toBeVisible(); await expect(page.getByText("八月账单 · 批次 #1 · 可导出锁定", { exact: true })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "重新导出账单", exact: true })).toBeVisible(); await expect(page.getByRole("button", { name: "核对导出预览", exact: true })).toHaveCount(0);
@@ -212,7 +212,7 @@ test("salary export month filters both periods and their ready or settled batche
 test("a failed reimbursement query keeps the date selector available and does not claim the month is empty", async ({ page }) => {
   await workspace(page);
   await page.route(/\/api\/reimbursements(?:\?.*)?$/, (route) => route.fulfill({ status: 503, json: { error: "unavailable", message: "报销暂时无法读取" } }));
-  await page.goto("/payroll"); const panel = page.locator(".reimbursement-panel");
+  await page.goto("/reimbursements"); const panel = page.locator(".reimbursement-panel");
   await expect(panel.getByText("报销暂时无法读取", { exact: true })).toBeVisible();
   await expect(panel.getByText("暂无报销申请，可先填写事项，再上传发票或添加凭证链接。", { exact: true })).toHaveCount(0);
   await panel.locator(".reimbursement-history > summary").click(); await expect(panel.getByLabel("历史月份", { exact: true })).toBeVisible();

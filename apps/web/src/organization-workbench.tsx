@@ -27,15 +27,8 @@ import { Badge, Button, Card, cn } from "@workbench/ui";
 
 import { api, ApiError, type Me } from "./api.js";
 import { useVersionedDraft } from "./versioned-draft.js";
-import {
-  ErrorMessage,
-  fieldClass,
-  Field,
-  LoadingBlock,
-  PageHeader,
-  PasswordInput,
-  textAreaClass,
-} from "./pages.js";
+import { ErrorMessage, Field, LoadingBlock, PageHeader } from "./workspace-primitives.js";
+import { fieldClass, PasswordInput, textAreaClass } from "./pages.js";
 
 type OrganizationTab = "tree" | "members" | "layers";
 type ScopeKind = "organization" | "org_unit" | "project" | "self";

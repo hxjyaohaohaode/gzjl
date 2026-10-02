@@ -32,7 +32,7 @@ test("reimbursements save evidence and submit without creating fictitious work",
   await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
   await page.getByRole("button", { name: "登录", exact: true }).click();
   await expect(page).not.toHaveURL(/\/login(?:[?#].*)?$/);
-  await page.goto("/payroll");
+  await page.goto("/reimbursements");
   await page.getByRole("button", { name: "申请报销", exact: true }).click();
   await page.getByLabel("报销事项", { exact: true }).fill("客户现场交通与设备配送费用");
   await page.getByLabel("发生日期").fill("2026-09-03");
@@ -113,6 +113,7 @@ async function mockAuthenticatedWorkspace(
               isOwner: options.isOwner ?? true,
             },
             permissions: [
+              ...((options.isOwner ?? true) ? [{ permission: "work.review", scopeKind: "organization", scopeId: null }] : []),
               {
                 permission: "work.view_own",
                 scopeKind: "self",
@@ -750,6 +751,7 @@ test("Owner can configure a versioned hourly plan and create a pay period", asyn
   await page.route("**/api/payroll/me", (route) =>
     route.fulfill({ json: { items: [] } }),
   );
+  let savedCutoffMinute = 1080;
   await page.route("**/api/payroll/management", (route) =>
     route.fulfill({
       json: {
@@ -788,13 +790,14 @@ test("Owner can configure a versioned hourly plan and create a pay period", asyn
             },
           },
         ],
-        settings: { timezone: "Asia/Shanghai", payrollCutoffDay: 15 },
+        settings: { timezone: "Asia/Shanghai", payrollCutoffDay: 15, payrollCutoffMinute: savedCutoffMinute },
       },
     }),
   );
   let settingsPayload: Record<string, unknown> | null = null;
   await page.route("**/api/payroll/settings", async (route) => {
     settingsPayload = route.request().postDataJSON() as Record<string, unknown>;
+    savedCutoffMinute = Number(settingsPayload.payrollCutoffMinute);
     await route.fulfill({ json: { settings: settingsPayload } });
   });
   let planPayload: Record<string, unknown> | null = null;
@@ -819,11 +822,12 @@ test("Owner can configure a versioned hourly plan and create a pay period", asyn
   await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
   await page.getByRole("button", { name: "登录", exact: true }).click();
   await expect(page).not.toHaveURL(/\/login(?:[?#].*)?$/);
-  await page.goto("/payroll");
+  await page.goto("/payroll-management");
   await expect(
     page.getByRole("heading", { name: "薪资管理" }),
   ).toBeVisible();
   await expect(page.getByRole("img", { name: "团队成员薪资对比" })).toBeVisible();
+  await page.getByRole("navigation", { name: "薪资管理导航" }).getByRole("link", { name: "成员方案", exact: true }).click();
   await page
     .getByRole("combobox", { name: "成员", exact: true })
     .selectOption(memberId);
@@ -862,6 +866,7 @@ test("Owner can configure a versioned hourly plan and create a pay period", asyn
     },
   ]);
 
+  await page.getByRole("navigation", { name: "薪资管理导航" }).getByRole("link", { name: "结算设置", exact: true }).click();
   await expect(page.getByLabel("结算截止日（每月）")).toHaveValue("15");
   await expect(page.getByLabel("结算截止 / 计划导出时间", { exact: true })).toHaveValue("18:00");
   await page.getByLabel("结算截止 / 计划导出时间", { exact: true }).fill("09:30");
@@ -870,6 +875,7 @@ test("Owner can configure a versioned hourly plan and create a pay period", asyn
     payrollCutoffDay: 15,
     payrollCutoffMinute: 570,
   });
+  await page.getByRole("navigation", { name: "薪资管理导航" }).getByRole("link", { name: "周期结算", exact: true }).click();
   await page.getByRole("button", { name: "保存老板指定周期" }).click();
   await expect.poll(() => periodPayload).not.toBeNull();
   expect(periodPayload).toMatchObject({ timezone: "Asia/Shanghai" });
@@ -928,7 +934,7 @@ for (const distribution of [undefined, "daily", "prorated"]) {
     await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
     await page.getByRole("button", { name: "登录", exact: true }).click();
     await expect(page).not.toHaveURL(/\/login(?:[?#].*)?$/);
-    await page.goto("/payroll");
+    await page.goto("/payroll-management/plans");
     await page.getByRole("combobox", { name: "成员", exact: true }).selectOption(memberId);
     const expected = distribution === "prorated" ? "prorated" : "period_end";
     await expect(page.getByLabel("第 1 项补贴金额")).toHaveValue("168.19");
@@ -953,10 +959,12 @@ test("Owner payroll keeps settlement controls visible when one live estimate has
   await page.getByLabel("邮箱或手机号").fill("owner@example.test");
   await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
   await page.getByRole("button", { name: "登录", exact: true }).click();
-  await page.goto("/payroll");
+  await page.goto("/payroll-management");
   await expect(page.getByText("部分成员的实时薪资预估暂不可用")).toBeVisible();
   await expect(page.getByText(/00000000-0000-4000-8000-000000000456/)).toBeVisible();
+  await page.getByRole("navigation", { name: "薪资管理导航" }).getByRole("link", { name: "成员方案", exact: true }).click();
   await expect(page.getByRole("heading", { name: "成员薪资方案" })).toBeVisible();
+  await page.getByRole("navigation", { name: "薪资管理导航" }).getByRole("link", { name: "周期结算", exact: true }).click();
   await expect(page.getByRole("heading", { name: "薪资周期与批次" })).toBeVisible();
 });
 
@@ -1015,8 +1023,8 @@ test("Owner can undo an unexported calculation and remove an accidental period",
   await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
   await page.getByRole("button", { name: "登录", exact: true }).click();
   await expect(page).not.toHaveURL(/\/login(?:[?#].*)?$/);
-  await page.goto("/payroll");
-  await expect(page.getByText("可下载统计表核对；尚未正式交接、尚未锁定。确认交接后保留不可变原文件。")).toBeVisible();
+  await page.goto("/payroll-management/periods");
+  await expect(page.locator(".payroll-period-card[data-settlement-state=ready]")).toContainText("核对金额和人员编号，确认后锁定并保留原文件");
   page.once("dialog", (dialog) => dialog.accept());
   await page.getByRole("button", { name: "撤销本次计算" }).click();
   await expect(page.getByRole("button", { name: "撤销误建周期" })).toBeVisible();
@@ -1289,6 +1297,8 @@ test("personal payroll renders reconciled totals, daily pay, period trend, and c
   const secondPanelBox = await salaryPanels.nth(1).boundingBox();
   expect(Math.abs((firstPanelBox?.width ?? 0) - (secondPanelBox?.width ?? 0))).toBeLessThan(2);
   await expect(page.getByText(/84 天滚动历史/).first()).toBeVisible();
+  await page.getByRole("navigation", { name: "个人薪资导航" }).getByRole("link", { name: "历史工资单", exact: true }).click();
+  await expect(page.getByText("本月实时预估", { exact: true })).toHaveCount(0);
   await expect(page.getByText("当前应结")).toBeVisible();
   await expect(page.getByText("¥900.00", { exact: true }).first()).toBeVisible();
   await expect(page.getByRole("img", { name: "2026 年 9 月每日薪资" })).toBeVisible();
@@ -1319,12 +1329,12 @@ test("payroll managers follow their own cited item and missing sources cannot se
   await expect(page.getByRole("heading", { name: "我的薪资", exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "计薪明细", exact: true })).toBeVisible();
   await expect(page.getByText("本人已核对基础工时", { exact: true })).toBeVisible();
-  await expect(page.getByRole("link", { name: "返回组织薪资管理" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "薪资管理", exact: true })).toHaveCount(0);
   await page.goto("/payroll?source=unknown-old-source");
   await expect(page.getByRole("alert").filter({ hasText: "该来源未出现在当前授权与日期范围内" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "计薪明细", exact: true })).toHaveCount(0);
   await page.getByRole("button", { name: "查看当前可用薪资批次" }).click();
-  await expect(page).toHaveURL(/\/payroll\?view=own$/);
+  await expect(page).toHaveURL(/\/payroll\/history$/);
   await expect(page.getByText("本人已核对基础工时", { exact: true })).toBeVisible();
 });
 
@@ -1488,7 +1498,7 @@ test("account security creates a pending phone binding through the authenticated
   );
   await page.getByRole("button", { name: "发送验证链接" }).click();
   expect((await deliveryResponse).status()).toBe(202);
-  await expect(page.getByRole("status")).toContainText("手机号验证消息已发送");
+  await expect(page.getByRole("status").filter({ hasText: "手机号验证消息已发送" })).toContainText("手机号验证消息已发送");
 });
 
 test("notification panel marks one item read or unread and supports all read", async ({
@@ -1657,7 +1667,7 @@ test("CSV import blocks invalid previews and confirms only the previewed content
   await page.getByRole("button", { name: "预览并校验" }).click();
   await expect(page.getByText("校验通过，可以确认导入。")).toBeVisible();
   await page.getByRole("button", { name: "确认原子导入" }).click();
-  await expect(page.getByRole("status")).toHaveText(
+  await expect(page.getByRole("status").filter({ hasText: "已原子导入" })).toHaveText(
     "已原子导入 1 条工时记录。",
   );
 });
@@ -1711,7 +1721,7 @@ test("mobile navigation exposes the five primary destinations", async ({
   await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
   await page.getByRole("button", { name: "登录", exact: true }).click();
   const navigation = page.getByRole("navigation", { name: "移动端主导航" });
-  for (const label of ["今日", "记录", "项目", "分析", "薪资"]) {
+  for (const label of ["今日", "记录", "项目", "分析", "薪资管理"]) {
     await expect(navigation.getByText(label, { exact: true })).toBeVisible();
   }
 });
@@ -5576,7 +5586,7 @@ test("project progress modes and node assignees use versioned server-side contra
   await canvas.getByText("工作台正式版", { exact: true }).click();
   await expect(page.getByText("协作者与负责人", { exact: true })).toBeVisible();
   await expect(
-    page.getByRole("spinbutton", { name: /进度 自动模式只读/ }),
+    page.getByRole("spinbutton", { name: "进度", exact: true }),
   ).toBeDisabled();
   await expect(
     page.getByRole("combobox", { name: /进度计算/ }),

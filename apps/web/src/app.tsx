@@ -30,6 +30,7 @@ import {
   PasswordResetPage,
   PasswordResetRequestPage,
   PayrollPage,
+  PayrollManagementPanel,
   ProjectDetailPage,
   ProjectsPage,
   SecurityPage,
@@ -38,6 +39,9 @@ import {
   VerifyContactPage,
   WorkPage,
 } from "./pages.js";
+import { AccessUnavailable, PersonalPayrollWorkspace, PayrollHandoffPage, PayrollManagementWorkspace, ReimbursementsPage, WorkPolicyPage } from "./payroll-workspace.js";
+import { hasGrant } from "./api.js";
+import { hasOrganizationGrant } from "./api.js";
 
 async function getMe({ signal }: { signal: AbortSignal }): Promise<Me | null> {
   try {
@@ -197,10 +201,24 @@ export function App() {
         />
         <Route path="team" element={<TeamPage />} />
         <Route path="analytics" element={<AnalyticsPage me={me!} />} />
-        <Route path="payroll" element={<PayrollPage me={me!} />} />
+        <Route path="payroll" element={<PersonalPayrollWorkspace me={me!} />}>
+          <Route index element={<PayrollPage key="current" view="current" />} />
+          <Route path="history" element={<PayrollPage key="history" view="history" />} />
+        </Route>
+        <Route path="payroll-management" element={<PayrollManagementWorkspace me={me!} />}>
+          <Route index element={<PayrollManagementPanel me={me!} key="overview" section="overview" />} />
+          <Route path="plans" element={<PayrollManagementPanel me={me!} key="plans" section="plans" />} />
+          <Route path="periods" element={<PayrollManagementPanel me={me!} key="periods" section="periods" />} />
+          <Route path="settings" element={<PayrollManagementPanel me={me!} key="settings" section="settings" />} />
+          <Route path="runs/:runId" element={<PayrollHandoffPage me={me!} />} />
+        </Route>
+        <Route path="reimbursements" element={<ReimbursementsPage me={me!} />} />
         <Route path="ai" element={<AiPage me={me!} />} />
-        <Route path="approvals" element={<ApprovalsPage />} />
+        <Route path="approvals" element={me && hasGrant(me, "work.review") ? <ApprovalsPage /> : me && hasOrganizationGrant(me, "payroll.settle") ? <Navigate replace to="/approvals/reimbursements" /> : <AccessUnavailable />} />
+        <Route path="approvals/reimbursements" element={<ReimbursementsPage me={me!} reviewOnly />} />
+        <Route path="approvals/reimbursements/history" element={<ReimbursementsPage me={me!} reviewOnly reviewHistory />} />
         <Route path="organization" element={<OrganizationPage me={me!} />} />
+        <Route path="organization/work-policy" element={<WorkPolicyPage me={me!} />} />
         <Route path="security" element={<SecurityPage />} />
         <Route
           path="notification-preferences"
