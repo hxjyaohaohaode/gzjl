@@ -1,11 +1,11 @@
 import { expect, test, type Page } from "@playwright/test";
 
-async function workspace(page: Page, membershipId = "member") {
+async function workspace(page: Page, membershipId = "member", canReview = false) {
   await page.routeWebSocket("**/api/realtime", (socket) => socket.send(JSON.stringify({ type: "realtime.ready" })));
   await page.route("**/api/**", (route) => {
     const path = new URL(route.request().url()).pathname;
     const json = path === "/api/me"
-      ? { user: { id: membershipId, membershipId, organizationId: "organization", displayName: "录入验收", timezone: "Asia/Shanghai", isOwner: false }, permissions: [{ permission: "work.view_own", scopeKind: "self", scopeId: membershipId }] }
+      ? { user: { id: membershipId, membershipId, organizationId: "organization", displayName: "录入验收", timezone: "Asia/Shanghai", isOwner: false }, permissions: [{ permission: "work.view_own", scopeKind: "self", scopeId: membershipId }, ...(canReview ? [{ permission: "work.review", scopeKind: "organization", scopeId: null }] : [])] }
       : path === "/api/auth/csrf" ? { csrfToken: "work-recovery-test-token" }
       : path === "/api/timer" ? { timer: null }
         : path === "/api/evidence/capabilities" ? { fileUploads: { available: true, maxFileBytes: 1000000 } }
@@ -140,7 +140,7 @@ test("work history can continue beyond the first page and retains loaded rows wh
 });
 
 test("approving overlapping work requires an explicit review note", async ({ page }) => {
-  await workspace(page);
+  await workspace(page, "member", true);
   await page.route("**/api/approvals?**", (route) => route.fulfill({ json: { items: [{
     request: { id: "review", priority: "high", anomalyFlags: ["overlapping_work_requires_review"] },
     session: { id: "work", content: "计时与手工记录重叠", result: "", startAt: "2026-09-21T01:00:00Z", endAt: "2026-09-21T02:00:00Z", netSeconds: 3600, version: 2 },

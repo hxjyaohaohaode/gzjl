@@ -8764,3 +8764,40 @@ body,
 .project-description-full p { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 0.85rem; }
 
 .payroll-preview-anchor { min-width: 0; scroll-margin-top: 5rem; }
+/* Task-specific workspace navigation stays reachable on narrow screens. */
+.workspace-section-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 20px;
+  padding: 5px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface);
+}
+.workspace-section-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  padding: 8px 18px;
+  border-radius: 10px;
+  color: var(--text-muted);
+  font-size: 14px;
+  font-weight: 600;
+  text-decoration: none;
+}
+.workspace-section-link:hover { background: var(--surface-subtle); color: var(--text); }
+.workspace-section-link--active { background: var(--accent-soft); color: var(--accent-strong); }
+.workspace-section-link:focus-visible, .workspace-text-link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+.workspace-text-link { color: var(--accent-strong); font-size: 14px; font-weight: 600; }
+.workspace-text-link:hover { text-decoration: underline; }
+.workspace-page-description { margin: 0 0 20px; color: var(--text-muted); font-size: 14px; line-height: 1.7; }
+.payroll-create-period { margin-bottom: 20px; border-bottom: 1px solid var(--border); padding-bottom: 16px; }
+.payroll-create-period > summary { cursor: pointer; padding: 12px 0; font-size: 14px; font-weight: 700; color: var(--accent-strong); }
+@media (max-width: 480px) {
+  .workspace-section-link { flex: 1 1 auto; padding-inline: 12px; }
+}

@@ -42,6 +42,32 @@ async function fixture() {
   return { db, employee: actors[0]!, reviewer: actors[1]!, period: period!, version: version!, expense: new ReimbursementService(db), evidence: new EvidenceService(db, config), payroll: new PayrollService(db) };
 }
 
+it("keeps an approver's personal claims separate from other members and excludes self-approval from the queue", async () => {
+  const { db, employee, reviewer, expense } = await fixture();
+  const input = { title: "现场交通", description: "真实交通凭证", expenseDate: "2026-09-08", amount: "28.50", currency: "CNY" };
+  const own = await expense.create(reviewer, input);
+  const other = await expense.create(employee, input);
+  const privateDraft = await expense.create(employee, input);
+  for (const request of [own, other]) await db.update(reimbursementRequests).set({ status: "pending" }).where(eq(reimbursementRequests.id, request.id));
+
+  const personal = await expense.list(reviewer, { ownOnly: true });
+  expect(personal.items.map((item) => item.id)).toEqual([own.id]);
+  expect(personal.canReview).toBe(false);
+  expect(personal.periods).toEqual([]);
+  expect((await expense.list(reviewer, { ownOnly: true, id: other.id })).items).toEqual([]);
+  const queue = await expense.list(reviewer, { pendingOnly: true });
+  expect(queue.items.map((item) => item.id)).toEqual([other.id]);
+  expect(queue.canReview).toBe(true);
+  expect((await expense.list(reviewer)).items.map((item) => item.id)).not.toContain(privateDraft.id);
+  expect((await expense.list(employee, { ownOnly: false, id: own.id })).items).toEqual([]);
+  for (const request of [own, other]) await db.update(reimbursementRequests).set({ status: "rejected", reviewNote: "补充凭证后重新提交" }).where(eq(reimbursementRequests.id, request.id));
+  expect((await expense.list(reviewer, { pendingOnly: true })).items).toEqual([]);
+  const history = await expense.list(reviewer, { reviewedOnly: true, from: "2026-09-01", to: "2026-10-01" });
+  expect(history.items.map((item) => item.id)).toEqual([other.id]);
+  expect(history.items[0]?.reviewNote).toBe("补充凭证后重新提交");
+  expect((await expense.list(reviewer, { reviewedOnly: true, from: "2026-08-01", to: "2026-09-01" })).items).toEqual([]);
+});
+
 it.each([
   [143_992, "177.533370"], [143_886, "177.526492"],
 ])("reproduces the reported %s-second subsidy change and prevents %s instead of 168.19", async (seconds, oldIncorrectAmount) => {

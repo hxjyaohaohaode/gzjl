@@ -44,6 +44,9 @@ export function Button({
 }: ButtonProps) {
   return (
     <button
+      data-ui="button"
+      data-variant={variant ?? "primary"}
+      data-size={size ?? "default"}
       type={type}
       className={cn(buttonVariants({ variant, size }), className)}
       {...props}

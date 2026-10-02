@@ -1,14 +1,20 @@
+import { reducedMotion } from "./motion-preference.js";
 import { HistoricalRangePicker, type HistoricalRange } from "./history-range.js";
 import { isSalaryMonth, previousSalaryMonth, salaryMonthForm, salaryPeriodMatchesMonth, suggestedPeriodCutoff } from "./payroll-month.js";
 import { WorkPolicyPanel } from "./submission-policy.js";
 import { aiGenerationOptionsSchema, type AiGenerationOptions } from "@workbench/shared";
-import { AiDraftEditor, AiFactAnswer, CycleOverview, WorkFactContext, PayrollHandoffPanel, CitedText, type CycleOverviewData } from "./lifecycle-workbench.js";
+import { AiDraftEditor, AiFactAnswer, CycleOverview, WorkFactContext, CitedText, type CycleOverviewData } from "./lifecycle-workbench.js";
 import { DraftArchiveButton, ArchivedDrafts } from "./work-recovery.js";
 import { RecordReadiness } from "./fact-explorer.js";
 import { WorkReviewDraft } from "./work-review.js";
 import { sourceHref, formatCurrencyMoney, roundMoney, addDecimalAmounts } from "@workbench/shared";
 import { WorkProgressReporter } from "./work-progress-reporter.js";
-import { ReimbursementPanel } from "./reimbursement-panel.js";
+import { PayrollPeriodList } from "./payroll-period-list.js";
+import { latestPeriodRuns, settlementState } from "./payroll-period-model.js";
+import { useWorkspaceDraft } from "./workspace-draft.js";
+import { ApprovalNavigation } from "./workspace-navigation.js";
+import { PageHeader, Field, EmptyState, ErrorMessage, LoadingBlock } from "./workspace-primitives.js";
+export { PageHeader, Field, EmptyState, ErrorMessage, LoadingBlock } from "./workspace-primitives.js";
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { EChartsCoreOption } from "echarts/core";
 import {
@@ -31,7 +37,6 @@ import {
   FolderKanban,
   KeyRound,
   ListTodo,
-  LoaderCircle,
   Paperclip,
   Pause,
   Play,
@@ -63,6 +68,7 @@ import {
   api,
   ApiError,
   hasGrant,
+  hasOrganizationGrant,
   notifySessionChanged,
   resetCsrfToken,
   type Me,
@@ -199,103 +205,6 @@ function ProjectCanvas({
   );
 }
 
-export function PageHeader({
-  title,
-  description,
-  actions,
-}: {
-  title: string;
-  description?: string;
-  actions?: ReactNode;
-}) {
-  return (
-    <header className="app-page-header flex flex-col gap-4 sm:flex-row sm:flex-wrap sm:items-end sm:justify-between">
-      <div className="app-page-title">
-        <h1 className="text-[28px] leading-none md:text-[34px]">{title}</h1>
-        {description ? <p className="sr-only">{description}</p> : null}
-      </div>
-      {actions ? (
-        <div className="app-page-actions flex flex-wrap items-center gap-2">
-          {actions}
-        </div>
-      ) : null}
-    </header>
-  );
-}
-
-export function Field({
-  label,
-  children,
-  hint,
-}: {
-  label: string;
-  children: ReactNode;
-  hint?: string;
-}) {
-  return (
-    <label className="app-field block">
-      <span className="mb-1.5 block text-sm font-semibold">{label}</span>
-      {children}
-      {hint ? (
-        <span className="mt-1.5 block text-xs text-[var(--text-muted)]">
-          {hint}
-        </span>
-      ) : null}
-    </label>
-  );
-}
-
-export function EmptyState({
-  icon,
-  title,
-  description,
-  action,
-}: {
-  icon: ReactNode;
-  title: string;
-  description: string;
-  action?: ReactNode;
-}) {
-  return (
-    <div className="app-empty-state flex min-h-64 flex-col items-center justify-center px-6 py-12 text-center">
-      <div className="grid size-12 place-items-center rounded-2xl bg-[var(--surface-subtle)] text-[var(--text-muted)]">
-        {icon}
-      </div>
-      <h2 className="mt-4 font-bold">{title}</h2>
-      <p className="mt-2 max-w-md text-sm leading-6 text-[var(--text-muted)]">
-        {description}
-      </p>
-      {action ? <div className="mt-5">{action}</div> : null}
-    </div>
-  );
-}
-
-export function ErrorMessage({ error, onRetry, retrying = false }: { error: unknown; onRetry?: (() => void) | undefined; retrying?: boolean }) {
-  if (!error) return null;
-  return (
-    <div
-      className="flex gap-2 rounded-xl border border-[color-mix(in_srgb,var(--danger)_16%,transparent)] bg-[var(--danger-soft)] p-3 text-sm text-[var(--danger)]"
-      role="alert"
-    >
-      <AlertCircle className="mt-0.5 shrink-0" size={17} />
-      <span className="min-w-0 flex-1 break-words">
-        {error instanceof Error ? error.message : "操作失败，请重试。"}
-      </span>
-      {onRetry ? <Button variant="secondary" size="compact" disabled={retrying} onClick={onRetry}>{retrying ? "正在重试…" : "重新加载"}</Button> : null}
-    </div>
-  );
-}
-
-export function LoadingBlock() {
-  return (
-    <div role="status" aria-live="polite" className="flex min-h-48 flex-col items-center justify-center gap-3 text-sm text-[var(--text-muted)]">
-      <span className="grid size-9 place-items-center rounded-xl bg-[var(--surface-subtle)] text-[var(--accent-strong)]">
-        <LoaderCircle className="animate-spin" size={17} />
-      </span>
-      正在加载真实数据…
-    </div>
-  );
-}
 
 function formatDateTime(value: string | Date): string {
   const date = new Date(value);
@@ -3391,7 +3300,7 @@ export function HomePage({ me }: { me: Me }) {
                 <p className="text-xs font-semibold text-[var(--text-muted)]">
                   本周已记录工时
                 </p>
-                <p className="text-2xl font-extrabold tracking-[-0.04em] tabular-nums">
+                <p data-ui="metric" className="text-2xl font-extrabold tracking-[-0.04em] tabular-nums">
                   {weeklyWork.isPending || weeklyWork.isError
                     ? "—"
                     : formatDuration(weeklyWork.data?.totals.totalSeconds ?? 0)}
@@ -3405,7 +3314,7 @@ export function HomePage({ me }: { me: Me }) {
                 <p className="text-xs font-semibold text-[var(--text-muted)]">
                   本结算周期待审核
                 </p>
-                <p className="text-2xl font-extrabold tracking-[-0.04em] tabular-nums">
+                <p data-ui="metric" className="text-2xl font-extrabold tracking-[-0.04em] tabular-nums">
                   {cycle.isPending || cycle.isError ? "—" : pendingCount}
                   <span className="ml-1 text-sm font-semibold text-[var(--text-muted)]">
                     条
@@ -3516,7 +3425,7 @@ function StatusLine({ label, value }: { label: string; value: string }) {
   return (
     <div className="home-fact-line flex items-center justify-between gap-4 rounded-xl px-3 py-3 text-sm">
       <span className="text-[var(--text-muted)]">{label}</span>
-      <strong className="text-right">{value}</strong>
+      <strong data-ui="metric" className="text-right">{value}</strong>
     </div>
   );
 }
@@ -5601,7 +5510,7 @@ export function WorkPage() {
       links.find((link) => link.isPrimary)?.projectId ?? links[0]?.projectId ?? "",
     );
     setShowForm(true);
-    window.requestAnimationFrame(() => document.getElementById("work-editor")?.scrollIntoView({ block: "start", behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "instant" : "smooth" }));
+    window.requestAnimationFrame(() => document.getElementById("work-editor")?.scrollIntoView({ block: "start", behavior: reducedMotion() ? "instant" : "smooth" }));
   };
   const latestConflictedSession = conflictSessionId
     ? work.data?.items.find((item) => item.id === conflictSessionId) ?? null
@@ -5611,7 +5520,7 @@ export function WorkPage() {
     const targetId = window.location.hash.slice(1);
     window.requestAnimationFrame(() => {
       document.getElementById(targetId)?.scrollIntoView({
-        behavior: "smooth",
+        behavior: reducedMotion() ? "instant" : "smooth",
         block: "center",
       });
     });
@@ -5658,7 +5567,7 @@ export function WorkPage() {
         "",
     );
     setShowForm(true);
-    window.requestAnimationFrame(() => document.getElementById("work-editor")?.scrollIntoView({ block: "start", behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "instant" : "smooth" }));
+    window.requestAnimationFrame(() => document.getElementById("work-editor")?.scrollIntoView({ block: "start", behavior: reducedMotion() ? "instant" : "smooth" }));
   };
   const saveLocalPrefill = () => {
     if (editingSession || correctionSession) return;
@@ -7670,8 +7579,8 @@ export function ApprovalsPage() {
         title="审批"
         description="仅显示当前角色和授权范围内的待审事实；批准、退回与更正均保留前后快照。"
       />
-      <div className="approval-queue-controls"><label>队列优先顺序<select value={approvalGrouping} onChange={(e) => setApprovalGrouping(e.target.value)}><option value="export">临近本期导出</option><option value="waiting">等待最长</option><option value="anomaly">异常优先</option></select></label><p>每页显示最多 100 项；核对项目节点、相邻时段、证据和历史依据后作出决定。</p></div>
-      <ReimbursementPanel reviewOnly />
+      {me && <ApprovalNavigation me={me} />}
+      <div className="approval-queue-controls"><label>队列优先顺序<select value={approvalGrouping} onChange={(e) => setApprovalGrouping(e.target.value)}><option value="export">临近本期导出</option><option value="waiting">等待最长</option><option value="anomaly">异常优先</option></select></label><p>每页显示最多 50 项；核对项目节点、相邻时段、证据和历史依据后作出决定。</p></div>
       {approvals.isPending ? (
         <Card>
           <LoadingBlock />
@@ -8211,24 +8120,6 @@ const compensationTypeLabels: Record<CompensationPlanType, string> = {
   hybrid: "混合计薪",
 };
 
-const payPeriodStatusLabels: Record<string, string> = {
-  open: "可计算",
-  calculating: "计算中",
-  pending_confirmation: "待导出锁定",
-  settled: "已导出",
-  locked: "已导出并锁定",
-};
-
-const payrollRunStatusLabels: Record<string, string> = {
-  queued: "排队中",
-  calculating: "计算中",
-  review_required: "需要复核",
-  ready: "可导出锁定",
-  settled: "已导出并锁定",
-  failed: "计算失败",
-  cancelled: "已撤销",
-};
-
 function cutoffTimeValue(minutes: number): string {
   return `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
 }
@@ -8258,35 +8149,8 @@ function formatPayrollAxis(currency: string, value: number): string {
   }
 }
 
-function PayrollManagementPanel({ me }: { me: Me }) {
-  const [handoffSearch, setHandoffSearch] = useSearchParams();
-  const handoffRunId = handoffSearch.get("handoff");
-  const setHandoffRunId = (id: string | null) => { const next = new URLSearchParams(handoffSearch); if (id) next.set("handoff", id); else next.delete("handoff"); setHandoffSearch(next, { replace: true }); };
-  const queryClient = useQueryClient();
-  const chartPalette = useChartPalette();
-  const management = useQuery({
-    queryKey: ["payroll-management"],
-    queryFn: () => api<PayrollManagementOverview>("/api/payroll/management"),
-  });
-  const visibleRuns = useMemo(() => {
-    const newest = new Map<string, PayrollManagementOverview["runs"][number]>();
-    for (const entry of management.data?.runs ?? []) {
-      if (!["ready", "review_required", "settled"].includes(entry.run.status)) continue;
-      const previous = newest.get(entry.period.id);
-      if (!previous || entry.run.runNumber > previous.run.runNumber) newest.set(entry.period.id, entry);
-    }
-    return [...newest.values()];
-  }, [management.data?.runs]);
-  const [periodMonth, setPeriodMonth] = useState("");
-  const activeMembers = useMemo(
-    () =>
-      management.data?.members.filter(
-        (member) => member.status === "active" && !member.isOwner,
-      ) ?? [],
-    [management.data?.members],
-  );
-  const [selectedMemberId, setSelectedMemberId] = useState("");
-  const [planForm, setPlanForm] = useState(() => ({
+function emptyPlanForm() {
+  return {
     name: "主薪资方案",
     type: "hourly" as CompensationPlanType,
     currency: "CNY",
@@ -8312,7 +8176,94 @@ function PayrollManagementPanel({ me }: { me: Me }) {
     weeklyBonusEnabled: false,
     weeklyBonusThresholdHours: 30,
     weeklyBonusRewardHours: 5,
-  }));
+  };
+}
+
+function memberPlanForm(selected: PayrollManagementOverview["members"][number] | undefined) {
+    const selectedRules = selected?.plan?.rules ?? [];
+    const weekdayRule = selectedRules.find((item) => item.type === "weekday");
+    const weekendRule = selectedRules.find((item) => item.type === "weekend");
+    const holidayRule = selectedRules.find((item) => item.type === "holiday");
+    const nightRule = selectedRules.find((item) => item.type === "night_window");
+    const overtimeRule = selectedRules.find((item) => item.type === "overtime");
+    const weeklyBonusRule = selectedRules.find((item) => item.type === "weekly_bonus");
+    return {
+      ...emptyPlanForm(),
+      name: selected?.plan?.plan.name ?? "主薪资方案",
+      type: selected?.plan?.version.type ?? "hourly",
+      currency: selected?.plan?.plan.currency ?? "CNY",
+      baseAmount: selected?.plan ? roundMoney(selected.plan.version.baseAmount) : "",
+      fixedAmount: selected?.plan?.version.config.fixedAmount ? roundMoney(selected.plan.version.config.fixedAmount) : "",
+      subsidies: (selected?.plan?.version.config.subsidies ?? []).map(
+        (subsidy, index) => ({
+          id: `${index}-${subsidy.name}-${subsidy.amount}`,
+          ...subsidy,
+          amount: roundMoney(subsidy.amount),
+          distribution: subsidy.distribution === "prorated" ? "prorated" : "period_end",
+        }),
+      ),
+      pendingReviewCountsInEstimate:
+        selected?.plan?.version.pendingReviewCountsInEstimate ?? true,
+      weekdayEnabled: Boolean(weekdayRule),
+      weekdayMultiplier: weekdayRule?.multiplier ?? "1",
+      weekendEnabled: Boolean(weekendRule),
+      weekendMultiplier: weekendRule?.multiplier ?? "2",
+      holidayEnabled: Boolean(holidayRule),
+      holidayMultiplier: holidayRule?.multiplier ?? "3",
+      holidayDates: holidayRule?.holidayDates?.join(", ") ?? "",
+      nightEnabled: Boolean(nightRule),
+      nightMultiplier: nightRule?.multiplier ?? "1.5",
+      nightStartHour: nightRule?.startHour ?? 22,
+      nightEndHour: nightRule?.endHour ?? 6,
+      overtimeEnabled: Boolean(overtimeRule),
+      overtimeMultiplier: overtimeRule?.multiplier ?? "1.5",
+      overtimeHours: (overtimeRule?.thresholdSeconds ?? 28_800) / 3_600,
+      weeklyBonusEnabled: Boolean(weeklyBonusRule),
+      weeklyBonusThresholdHours: (weeklyBonusRule?.thresholdSeconds ?? 108_000) / 3_600,
+      weeklyBonusRewardHours: (weeklyBonusRule?.rewardSeconds ?? 18_000) / 3_600,
+      effectiveFrom: localInput(new Date(Math.max(Date.now(), Date.parse(selected?.plan?.version.effectiveFrom ?? "") || 0) + 60_000)),
+    };
+}
+
+export function PayrollManagementPanel({ me, section }: { me: Me; section: "overview" | "plans" | "periods" | "settings" }) {
+  const navigate = useNavigate();
+  const canSettle = hasOrganizationGrant(me, "payroll.settle");
+  const [periodSearch, setPeriodSearch] = useSearchParams();
+  const openHandoff = (id: string) => navigate(`/payroll-management/runs/${id}${periodSearch.size ? `?${periodSearch}` : ""}`);
+  const queryClient = useQueryClient();
+  const chartPalette = useChartPalette();
+  const management = useQuery({
+    queryKey: ["payroll-management"],
+    queryFn: () => api<PayrollManagementOverview>("/api/payroll/management"),
+  });
+  const periodMonth = periodSearch.get("month") ?? "";
+  const setPeriodMonth = (month: string) => {
+    const next = new URLSearchParams(periodSearch);
+    if (month) next.set("month", month); else next.delete("month");
+    setPeriodSearch(next, { replace: true });
+  };
+  const activeMembers = useMemo(
+    () =>
+      management.data?.members.filter(
+        (member) => member.status === "active" && !member.isOwner,
+      ) ?? [],
+    [management.data?.members],
+  );
+  const selectedMemberId = periodSearch.get("member") ?? "";
+  const selectedMember = activeMembers.find((member) => member.membershipId === selectedMemberId);
+  const defaultPlan = useMemo(() => memberPlanForm(selectedMember), [selectedMember]);
+  const planDraft = useWorkspaceDraft({ identity: `${me.user.organizationId}:${me.user.membershipId}`, entity: `payroll-plan:${selectedMemberId}`, version: selectedMember?.plan?.version.version ?? 0, initial: defaultPlan });
+  const planForm = planDraft.value;
+  const setPlanForm = planDraft.setValue;
+  const memberSearch = periodSearch.get("q") ?? "";
+  const missingOnly = periodSearch.get("plans") === "missing";
+  const updateMemberFilter = (key: string, value: string) => {
+    const next = new URLSearchParams(periodSearch);
+    if (value) next.set(key, value); else next.delete(key);
+    setPeriodSearch(next, { replace: true });
+  };
+  const filteredMembers = activeMembers.filter((member) => (!missingOnly || !member.plan)
+    && `${member.displayName} ${member.membershipId} ${member.plan?.plan.name ?? ""}`.toLocaleLowerCase().includes(memberSearch.trim().toLocaleLowerCase()));
   const [settlementMonth, setSettlementMonth] = useState(() => previousSalaryMonth());
   const [customPeriod, setCustomPeriod] = useState(false);
   const [periodForm, setPeriodForm] = useState(() => salaryMonthForm(previousSalaryMonth()));
@@ -8385,51 +8336,10 @@ function PayrollManagementPanel({ me }: { me: Me }) {
     } satisfies EChartsCoreOption,
   })), [chartPalette, teamPayrollGroups]);
   const selectMember = (membershipId: string) => {
-    setSelectedMemberId(membershipId);
-    const selected = activeMembers.find((item) => item.membershipId === membershipId);
-    const selectedRules = selected?.plan?.rules ?? [];
-    const weekdayRule = selectedRules.find((item) => item.type === "weekday");
-    const weekendRule = selectedRules.find((item) => item.type === "weekend");
-    const holidayRule = selectedRules.find((item) => item.type === "holiday");
-    const nightRule = selectedRules.find((item) => item.type === "night_window");
-    const overtimeRule = selectedRules.find((item) => item.type === "overtime");
-    const weeklyBonusRule = selectedRules.find((item) => item.type === "weekly_bonus");
-    setPlanForm((current) => ({
-      ...current,
-      name: selected?.plan?.plan.name ?? "主薪资方案",
-      type: selected?.plan?.version.type ?? "hourly",
-      currency: selected?.plan?.plan.currency ?? "CNY",
-      baseAmount: selected?.plan ? roundMoney(selected.plan.version.baseAmount) : "",
-      fixedAmount: selected?.plan?.version.config.fixedAmount ? roundMoney(selected.plan.version.config.fixedAmount) : "",
-      subsidies: (selected?.plan?.version.config.subsidies ?? []).map(
-        (subsidy, index) => ({
-          id: `${index}-${subsidy.name}-${subsidy.amount}`,
-          ...subsidy,
-          amount: roundMoney(subsidy.amount),
-          distribution: subsidy.distribution === "prorated" ? "prorated" : "period_end",
-        }),
-      ),
-      pendingReviewCountsInEstimate:
-        selected?.plan?.version.pendingReviewCountsInEstimate ?? true,
-      weekdayEnabled: Boolean(weekdayRule),
-      weekdayMultiplier: weekdayRule?.multiplier ?? "1",
-      weekendEnabled: Boolean(weekendRule),
-      weekendMultiplier: weekendRule?.multiplier ?? "2",
-      holidayEnabled: Boolean(holidayRule),
-      holidayMultiplier: holidayRule?.multiplier ?? "3",
-      holidayDates: holidayRule?.holidayDates?.join(", ") ?? "",
-      nightEnabled: Boolean(nightRule),
-      nightMultiplier: nightRule?.multiplier ?? "1.5",
-      nightStartHour: nightRule?.startHour ?? 22,
-      nightEndHour: nightRule?.endHour ?? 6,
-      overtimeEnabled: Boolean(overtimeRule),
-      overtimeMultiplier: overtimeRule?.multiplier ?? "1.5",
-      overtimeHours: (overtimeRule?.thresholdSeconds ?? 28_800) / 3_600,
-      weeklyBonusEnabled: Boolean(weeklyBonusRule),
-      weeklyBonusThresholdHours: (weeklyBonusRule?.thresholdSeconds ?? 108_000) / 3_600,
-      weeklyBonusRewardHours: (weeklyBonusRule?.rewardSeconds ?? 18_000) / 3_600,
-      effectiveFrom: localInput(new Date(Date.now() + 60_000)),
-    }));
+    savePlan.reset();
+    const next = new URLSearchParams(periodSearch);
+    if (membershipId) next.set("member", membershipId); else next.delete("member");
+    setPeriodSearch(next);
   };
   const refresh = async () => {
     await Promise.all([
@@ -8438,7 +8348,9 @@ function PayrollManagementPanel({ me }: { me: Me }) {
     ]);
   };
   const savePlan = useMutation({
-    mutationFn: () => {
+    mutationFn: async () => {
+      const commitSavedDraft = planDraft.saved;
+      const submittedMemberId = selectedMemberId;
       const rules = [
         ...(planForm.weekdayEnabled
           ? [{ type: "weekday", priority: 50, multiplier: planForm.weekdayMultiplier }]
@@ -8483,7 +8395,7 @@ function PayrollManagementPanel({ me }: { me: Me }) {
             }]
           : []),
       ];
-      return api<{ result: { version: { effectiveFrom: string } } }>(`/api/payroll/members/${selectedMemberId}/plan`, {
+      const response = await api<{ result: { version: { effectiveFrom: string } } }>(`/api/payroll/members/${selectedMemberId}/plan`, {
         method: "PUT",
         body: {
           name: planForm.name,
@@ -8501,13 +8413,10 @@ function PayrollManagementPanel({ me }: { me: Me }) {
           rules,
         },
       });
+      return { response, submitted: planForm, submittedMemberId, commitSavedDraft };
     },
-    onSuccess: async (response) => {
-      const savedEffectiveAt = new Date(response.result.version.effectiveFrom).getTime();
-      setPlanForm((current) => ({
-        ...current,
-        effectiveFrom: localInput(new Date(Math.max(Date.now(), savedEffectiveAt) + 60_000)),
-      }));
+    onSuccess: async ({ submitted, commitSavedDraft }) => {
+      commitSavedDraft(submitted);
       await refresh();
     },
   });
@@ -8523,7 +8432,7 @@ function PayrollManagementPanel({ me }: { me: Me }) {
           cutoffAt: zonedInputToDate(effectivePeriodCutoffAt).toISOString(),
         },
       }),
-    onSuccess: async () => { await refresh(); setPeriodMonth(""); setHandoffRunId(null); },
+    onSuccess: async () => { await refresh(); setPeriodMonth(""); },
   });
   const saveSettings = useMutation({
     mutationFn: () =>
@@ -8539,7 +8448,7 @@ function PayrollManagementPanel({ me }: { me: Me }) {
   const calculatePeriod = useMutation({
     mutationFn: (periodId: string) =>
       api<{ run: { id: string } }>(`/api/pay-periods/${periodId}/calculate`, { method: "POST" }),
-    onSuccess: async (response: { run: { id: string } }) => { await refresh(); setHandoffRunId(response.run.id); },
+    onSuccess: async (response: { run: { id: string } }) => { await refresh(); openHandoff(response.run.id); },
   });
   const reopenRun = useMutation({
     mutationFn: (runId: string) =>
@@ -8556,22 +8465,65 @@ function PayrollManagementPanel({ me }: { me: Me }) {
       api(`/api/payroll/periods/${periodId}`, { method: "DELETE" }),
     onSuccess: refresh,
   });
+  const periodQuery = periodSearch.get("q") ?? "";
+  const periodState = periodSearch.get("status") ?? "all";
+  const latestRuns = latestPeriodRuns(management.data?.runs ?? []);
+  const filteredPeriods = (management.data?.periods ?? []).filter((period) => {
+    const state = settlementState(period, latestRuns.get(period.id));
+    return salaryPeriodMatchesMonth({ ...period, timezone: management.data?.settings.timezone ?? getOrganizationTimezone() }, periodMonth)
+      && period.name.toLocaleLowerCase().includes(periodQuery.trim().toLocaleLowerCase())
+      && (periodState === "all" || (periodState === "action" ? state !== "settled" : state === periodState));
+  });
+  if (management.isPending) return <Card><LoadingBlock /></Card>;
+  if (management.isError) return <Card><CardContent><ErrorMessage error={management.error} onRetry={() => void management.refetch()} retrying={management.isFetching} /></CardContent></Card>;
   return (
     <section className="mb-6 space-y-5" aria-label="薪资管理">
-      {me.user.isOwner ? <WorkPolicyPanel editable /> : null}
+      {section === "overview" && <div className="grid gap-3 sm:grid-cols-3">
+        <Card><CardContent><StatusLine label="计薪成员" value={String(activeMembers.length)} /><Link className="workspace-text-link mt-3 inline-flex" to="/payroll-management/plans">管理成员方案 →</Link></CardContent></Card>
+        <Card><CardContent><StatusLine label="待完善方案" value={String(activeMembers.filter((member) => !member.plan).length)} /></CardContent></Card>
+        <Card><CardContent><StatusLine label="待处理周期" value={String(management.data.periods.filter((period) => ["open", "pending_confirmation"].includes(period.status)).length)} /><Link className="workspace-text-link mt-3 inline-flex" to="/payroll-management/periods">进入周期结算 →</Link></CardContent></Card>
+      </div>}
+      {section === "periods" && <>
       <Card>
         <CardHeader>
-          <label className="history-month">查看 / 导出指定月份<input aria-label="查看 / 导出指定月份" type="month" value={periodMonth} onChange={(e) => { setPeriodMonth(e.target.value); setHandoffRunId(null); }} /><Button variant="ghost" onClick={() => { setPeriodMonth(""); setHandoffRunId(null); }}>显示所有周期</Button></label>
           <div><p className="app-page-kicker">结算控制</p><h2 className="mt-1 text-lg font-bold">薪资周期与批次</h2></div>
+          <Badge>{filteredPeriods.length} 个周期</Badge>
         </CardHeader>
         <CardContent>
+          <div className="mb-4 flex flex-wrap items-end gap-3">
+            <label className="history-month">查看 / 导出指定月份<input aria-label="查看 / 导出指定月份" type="month" value={periodMonth} onChange={(event) => setPeriodMonth(event.target.value)} /></label>
+            <label className="payroll-period-search">搜索结算周期<input className={fieldClass} type="search" placeholder="按周期名称查找" value={periodQuery} onChange={(event) => updateMemberFilter("q", event.target.value)} /></label>
+            <label className="payroll-period-search">结算状态<select aria-label="结算状态" className={fieldClass} value={periodState} onChange={(event) => updateMemberFilter("status", event.target.value)}><option value="all">全部状态</option><option value="action">待处理</option><option value="review">需要复核</option><option value="ready">待确认交接</option><option value="settled">已锁定</option></select></label>
+            <Button variant="ghost" onClick={() => setPeriodSearch(new URLSearchParams(), { replace: true })}>显示所有周期</Button>
+          </div>
+          <details className="payroll-create-period" open={management.data.periods.length === 0}><summary>新建结算周期</summary>
+          <form onSubmit={(event) => { event.preventDefault(); if (!createPeriod.isPending && (customPeriod || isSalaryMonth(settlementMonth))) createPeriod.mutate(); }}><fieldset disabled={createPeriod.isPending} className="grid min-w-0 gap-4 lg:grid-cols-4">
+            <Field hint="月份仅用于快捷填入整月范围，最终以老板指定的起止时间为准，可跨月或使用其他周期。" label="结算月份"><input aria-label="结算月份" aria-invalid={!customPeriod && !isSalaryMonth(settlementMonth)} min="0100-01" max="9998-12" placeholder="YYYY-MM，例如 2026-09" className={fieldClass} required={!customPeriod} type="month" value={settlementMonth} onChange={(event) => { const month = event.target.value; setSettlementMonth(month); if (isSalaryMonth(month)) { setPeriodForm(salaryMonthForm(month)); setPeriodCutoffTouched(false); setCustomPeriod(false); } }} /></Field>
+            <Field label="周期名称"><input className={fieldClass} onChange={(event) => setPeriodForm({ ...periodForm, name: event.target.value })} required value={periodForm.name} /></Field>
+            <Field label="本周期结算截止 / 计划导出时间"><input aria-label="本周期结算截止 / 计划导出时间" className={fieldClass} onChange={(event) => { setPeriodCutoffTouched(true); setPeriodForm({ ...periodForm, cutoffAt: event.target.value }); }} required type="datetime-local" value={effectivePeriodCutoffAt} /></Field>
+            <div className="lg:col-span-4">{!customPeriod && !isSalaryMonth(settlementMonth) ? <p role="alert">请填写完整有效的结算月份，格式为 YYYY-MM，例如 2026-09。</p> : null}<p className="lifecycle-caption">结算范围：{periodForm.startsAt.replace("T", " ")}（含）至 {periodForm.endsAt.replace("T", " ")}（不含） · {getOrganizationTimezone()}。导出完整周期的工资、补贴、报销及工作提交单。</p><label className="flex items-center gap-2"><input type="checkbox" checked={customPeriod} onChange={(event) => { setCustomPeriod(event.target.checked); if (!event.target.checked && isSalaryMonth(settlementMonth)) { setPeriodForm(salaryMonthForm(settlementMonth)); setPeriodCutoffTouched(false); } }} />由老板自定义起止时间</label></div>
+            <><Field label="周期开始（含）"><input aria-label="周期开始（含）" className={fieldClass} onChange={(event) => { setCustomPeriod(true); setPeriodForm({ ...periodForm, startsAt: event.target.value }); }} required step="1" type="datetime-local" value={periodForm.startsAt} /></Field><Field hint="到这个时刻之前为止。整月填写下月 1 日 00:00，自动包含本月最后一天的全部时间。" label="周期结束（不含）"><input aria-label="周期结束（不含）" className={fieldClass} onChange={(event) => { setCustomPeriod(true); setPeriodForm({ ...periodForm, endsAt: event.target.value }); }} required step="1" type="datetime-local" value={periodForm.endsAt} /></Field></>
+            <div className="lg:col-span-4"><Button disabled={createPeriod.isPending || (!customPeriod && !isSalaryMonth(settlementMonth))} type="submit">{createPeriod.isPending ? "正在保存周期…" : "保存老板指定周期"}</Button></div>
+          </fieldset></form>
+          </details>
+          {createPeriod.isSuccess ? <p role="status">老板指定周期已保存。点击该周期的“计算并查看薪资总览”，即可下载总览和工作明细。</p> : null}
+          <PayrollPeriodList periods={filteredPeriods} runs={management.data.runs} timezone={management.data.settings.timezone} canSettle={canSettle}
+            busy={calculatePeriod.isPending || deletePeriod.isPending || cancelRun.isPending || reopenRun.isPending}
+            calculatingId={calculatePeriod.isPending ? calculatePeriod.variables : undefined}
+            onCalculate={(id) => calculatePeriod.mutate(id)} onPreview={openHandoff} onDelete={(id) => deletePeriod.mutate(id)} onCancel={(id) => cancelRun.mutate(id)} onReopen={(id) => reopenRun.mutate(id)} />
+          {!filteredPeriods.length && <p className="py-5 text-sm text-[var(--text-muted)]" role="status">{management.data.periods.length ? "当前筛选没有匹配周期，可调整月份、状态或关键词。" : "暂无结算周期，请先新建结算周期。"}</p>}
+          {!canSettle && <p className="mt-4 text-sm text-[var(--text-muted)]">你可以配置周期；计算、核对和导出需要组织级薪资结算权限。</p>}
+          <ErrorMessage error={saveSettings.error ?? createPeriod.error ?? calculatePeriod.error ?? reopenRun.error ?? cancelRun.error ?? deletePeriod.error} />
+        </CardContent>
+      </Card>
+      </>}
+      {section === "settings" && <Card><CardHeader><h2 className="font-bold">默认结算时间</h2></CardHeader><CardContent>
           <form
-            className="mb-5 flex flex-wrap items-end gap-3"
             onSubmit={(event) => {
               event.preventDefault();
-              saveSettings.mutate();
+              if (!saveSettings.isPending) saveSettings.mutate();
             }}
-          >
+          ><fieldset disabled={saveSettings.isPending} className="mb-5 flex min-w-0 flex-wrap items-end gap-3">
             <Field hint="计划导出日期的默认值，可在每个周期中单独指定；不会限定工作统计的起止时间，实际付款由外部平台办理。" label="结算截止日（每月）">
               <input
                 className={`${fieldClass} w-32`}
@@ -8579,6 +8531,7 @@ function PayrollManagementPanel({ me }: { me: Me }) {
                 min="1"
                 onChange={(event) => {
                   const value = Number(event.target.value);
+                  saveSettings.reset();
                   setCutoffDayOverride(value);
                   setPeriodCutoffTouched(false);
                 }}
@@ -8592,6 +8545,7 @@ function PayrollManagementPanel({ me }: { me: Me }) {
                 aria-label="结算截止 / 计划导出时间"
                 className={`${fieldClass} w-36`}
                 onChange={(event) => {
+                  saveSettings.reset();
                   setCutoffMinuteOverride(cutoffTimeMinutes(event.target.value));
                   setPeriodCutoffTouched(false);
                 }}
@@ -8603,109 +8557,13 @@ function PayrollManagementPanel({ me }: { me: Me }) {
             <Button disabled={saveSettings.isPending} size="compact" type="submit" variant="secondary">
               {saveSettings.isPending ? "保存中…" : "保存结算截止 / 计划导出时间"}
             </Button>
-          </form>
-          <form className="grid gap-4 lg:grid-cols-4" onSubmit={(event) => { event.preventDefault(); if (customPeriod || isSalaryMonth(settlementMonth)) createPeriod.mutate(); }}>
-            <Field hint="月份仅用于快捷填入整月范围，最终以老板指定的起止时间为准，可跨月或使用其他周期。" label="结算月份"><input aria-label="结算月份" aria-invalid={!customPeriod && !isSalaryMonth(settlementMonth)} min="0100-01" max="9998-12" placeholder="YYYY-MM，例如 2026-09" className={fieldClass} required={!customPeriod} type="month" value={settlementMonth} onChange={(event) => { const month = event.target.value; setSettlementMonth(month); if (isSalaryMonth(month)) { setPeriodForm(salaryMonthForm(month)); setPeriodCutoffTouched(false); setPeriodMonth(month); setHandoffRunId(null); setCustomPeriod(false); } }} /></Field>
-            <Field label="周期名称"><input className={fieldClass} onChange={(event) => setPeriodForm({ ...periodForm, name: event.target.value })} required value={periodForm.name} /></Field>
-            <Field label="本周期结算截止 / 计划导出时间"><input aria-label="本周期结算截止 / 计划导出时间" className={fieldClass} onChange={(event) => { setPeriodCutoffTouched(true); setPeriodForm({ ...periodForm, cutoffAt: event.target.value }); }} required type="datetime-local" value={effectivePeriodCutoffAt} /></Field>
-            <div className="lg:col-span-4">{!customPeriod && !isSalaryMonth(settlementMonth) ? <p role="alert">请填写完整有效的结算月份，格式为 YYYY-MM，例如 2026-09。</p> : null}<p className="lifecycle-caption">结算范围：{periodForm.startsAt.replace("T", " ")}（含）至 {periodForm.endsAt.replace("T", " ")}（不含） · {getOrganizationTimezone()}。导出完整周期的工资、补贴、报销及工作提交单。</p><label className="flex items-center gap-2"><input type="checkbox" checked={customPeriod} onChange={(event) => { setCustomPeriod(event.target.checked); if (!event.target.checked && isSalaryMonth(settlementMonth)) { setPeriodForm(salaryMonthForm(settlementMonth)); setPeriodCutoffTouched(false); } }} />由老板自定义起止时间</label></div>
-            <><Field label="周期开始（含）"><input aria-label="周期开始（含）" className={fieldClass} onChange={(event) => { setCustomPeriod(true); setPeriodForm({ ...periodForm, startsAt: event.target.value }); }} required step="1" type="datetime-local" value={periodForm.startsAt} /></Field><Field hint="到这个时刻之前为止。整月填写下月 1 日 00:00，自动包含本月最后一天的全部时间。" label="周期结束（不含）"><input aria-label="周期结束（不含）" className={fieldClass} onChange={(event) => { setCustomPeriod(true); setPeriodForm({ ...periodForm, endsAt: event.target.value }); }} required step="1" type="datetime-local" value={periodForm.endsAt} /></Field></>
-            <div className="lg:col-span-4"><Button disabled={createPeriod.isPending || (!customPeriod && !isSalaryMonth(settlementMonth))} type="submit">保存老板指定周期</Button></div>
-          </form>
-          {createPeriod.isSuccess ? <p role="status">老板指定周期已保存。点击该周期的“计算并查看薪资总览”，即可下载总览和工作明细。</p> : null}
-          <div className="mt-5 space-y-2">
-            {management.data?.periods.filter((period) => salaryPeriodMatchesMonth(period, periodMonth)).map((period) => (
-              <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl bg-[var(--surface-subtle)] px-4 py-3" key={period.id}>
-                <div><p className="font-semibold">{period.name}</p><p className="text-xs text-[var(--text-muted)]">{formatDateTime(period.startsAt)} – {formatDateTime(period.endsAt)} · {payPeriodStatusLabels[period.status] ?? period.status} · 计划导出 {formatDateTime(period.cutoffAt)}</p></div>
-                {["open", "pending_confirmation"].includes(period.status) ? (
-                  <div className="flex flex-wrap gap-2">
-                    <Button disabled={calculatePeriod.isPending} onClick={() => calculatePeriod.mutate(period.id)} type="button" variant="secondary">计算并查看薪资总览</Button>
-                    <Button
-                      disabled={deletePeriod.isPending}
-                      onClick={() => {
-                        if (window.confirm("撤销这个误建周期？只会移除尚未导出、尚未锁定的周期和已撤销计算，不会删除任何工作记录；曾锁定的历史周期不能删除。")) deletePeriod.mutate(period.id);
-                      }}
-                      type="button"
-                      variant="ghost"
-                    >
-                      撤销误建周期
-                    </Button>
-                  </div>
-                ) : null}
-              </div>
-            ))}
-          </div>
-          {visibleRuns.length ? (
-            <div className="mt-5 space-y-2">
-              {visibleRuns.filter((entry) => salaryPeriodMatchesMonth(entry.period, periodMonth)).map((entry) => (
-                <div className={`flex flex-wrap items-center justify-between gap-3 rounded-xl px-4 py-3 ${entry.run.status === "settled" ? "bg-[var(--success-soft)]" : "bg-[var(--warning-soft)]"}`} key={entry.run.id}>
-                  <div>
-                    <p className="text-sm font-semibold">{entry.period.name} · 批次 #{entry.run.runNumber} · {payrollRunStatusLabels[entry.run.status] ?? entry.run.status}</p>
-                    {entry.run.status !== "settled" ? <p className="mt-1 text-xs text-[var(--text-muted)]">可下载统计表核对；尚未正式交接、尚未锁定。确认交接后保留不可变原文件。</p> : null}
-                  </div>
-                  <div className="flex flex-wrap gap-2">
-                    {entry.run.status === "ready" ? (
-                      <>
-                        <Button
-                          disabled={false}
-                          onClick={() => {
-                            setHandoffRunId(entry.run.id);
-                          }}
-                          type="button"
-                        >
-                          核对导出预览
-                        </Button>
-                        <Button
-                          disabled={cancelRun.isPending}
-                          onClick={() => {
-                            if (window.confirm("撤销这次尚未导出、尚未锁定的计算？周期会恢复为可计算，工作记录不会删除，计算快照仍保留审计。")) cancelRun.mutate(entry.run.id);
-                          }}
-                          type="button"
-                          variant="ghost"
-                        >
-                          撤销本次计算
-                        </Button>
-                      </>
-                    ) : entry.run.status === "review_required" ? (
-                      <>
-                        <Badge tone="warning">需先复核，不能锁定</Badge><Button onClick={() => setHandoffRunId(entry.run.id)} type="button">核对导出预览</Button>
-                        <Button
-                          disabled={cancelRun.isPending}
-                          onClick={() => {
-                            if (window.confirm("撤销这次待复核计算？周期会恢复为可计算，工作记录不会删除，计算快照仍保留审计。")) cancelRun.mutate(entry.run.id);
-                          }}
-                          type="button"
-                          variant="ghost"
-                        >
-                          撤销本次计算
-                        </Button>
-                      </>
-                    ) : (
-                      <>
-                        <Button onClick={() => setHandoffRunId(entry.run.id)} type="button" variant="secondary">重新导出账单</Button>
-                        <Button
-                          disabled={reopenRun.isPending}
-                          onClick={() => {
-                            if (window.confirm("撤销后会恢复本周期和对应工时的可编辑计薪状态，历史批次仍保留审计。确认撤销？")) reopenRun.mutate(entry.run.id);
-                          }}
-                          type="button"
-                          variant="ghost"
-                        >
-                          撤销导出锁定
-                        </Button>
-                      </>
-                    )}
-                  </div>
-                </div>
-              ))}
-            </div>
-          ) : null}
-          <ErrorMessage error={saveSettings.error ?? createPeriod.error ?? calculatePeriod.error ?? reopenRun.error ?? cancelRun.error ?? deletePeriod.error} />
-        </CardContent>
-      </Card>
-      {handoffRunId ? <PayrollHandoffPanel key={handoffRunId} runId={handoffRunId} onClose={() => setHandoffRunId(null)} onRecalculate={(id) => calculatePeriod.mutate(id)} canExportWork={hasGrant(me, "work.view_full_scope")} /> : null}
-      {activeMembers.filter((m) => !m.plan).length ? <Card><CardHeader><h2>已加入但缺计薪方案</h2></CardHeader><CardContent><p>请在导出前补齐方案与生效日期。</p><div className="fact-project-links">{activeMembers.filter((m) => !m.plan).map((m) => <Button variant="secondary" key={m.membershipId} onClick={() => selectMember(m.membershipId)}>{m.displayName} · 配置方案</Button>)}</div></CardContent></Card> : null}
-      {management.data?.liveItemIssues?.length ? (
+          </fieldset></form>
+
+        {saveSettings.isSuccess && <p role="status">默认结算时间已保存，新建周期将使用此设置。</p>}
+        <ErrorMessage error={saveSettings.error} />
+      </CardContent></Card>}
+      {section === "overview" && activeMembers.some((member) => !member.plan) && <Card><CardHeader><h2>已加入但缺计薪方案</h2></CardHeader><CardContent><p>请在导出前补齐方案与生效日期。</p><div className="payroll-member-shortcuts">{activeMembers.filter((member) => !member.plan).map((member) => <Link key={member.membershipId} to={`/payroll-management/plans?member=${encodeURIComponent(member.membershipId)}`}>{member.displayName} · 配置方案 →</Link>)}</div><Link className="workspace-text-link" to="/payroll-management/plans?plans=missing">查看全部待配置成员 →</Link></CardContent></Card>}
+      {section === "overview" && management.data?.liveItemIssues?.length ? (
         <Card>
           <CardContent>
             <p className="font-semibold text-[var(--warning)]">部分成员的实时薪资预估暂不可用</p>
@@ -8718,7 +8576,7 @@ function PayrollManagementPanel({ me }: { me: Me }) {
           </CardContent>
         </Card>
       ) : null}
-      {currentTeamPayroll.length ? (
+      {section === "overview" && currentTeamPayroll.length ? (
         <Card className="analytics-chart-card">
           <CardHeader>
             <div><p className="app-page-kicker">团队薪资</p><h2 className="mt-1 text-lg font-bold">本月实时预估</h2></div>
@@ -8747,18 +8605,32 @@ function PayrollManagementPanel({ me }: { me: Me }) {
           </CardContent>
         </Card>
       ) : null}
-      <Card>
+      {section === "overview" && !currentTeamPayroll.length && <Card><EmptyState title="暂无团队薪资预估" description="已激活成员配置生效方案后，这里会显示本月薪资预估。" icon={<CircleDollarSign />} /></Card>}
+      {section === "plans" && <Card>
         <CardHeader>
           <div>
-            <p className="app-page-kicker">Owner 管理</p>
+            <p className="app-page-kicker">计薪配置</p>
             <h2 className="mt-1 text-lg font-bold">成员薪资方案</h2>
           </div>
           <Badge tone="info">版本化 · 生效日期 · 审计</Badge>
         </CardHeader>
         <CardContent>
-          <div className="mb-5 grid gap-2 sm:grid-cols-2 xl:grid-cols-4" aria-label="薪资对象列表">
-            {activeMembers.map((member) => (
+          <div className="payroll-plan-workbench"><aside className="payroll-plan-members">
+          <label className="app-field">搜索成员或方案<input className={fieldClass} type="search" value={memberSearch} onChange={(event) => updateMemberFilter("q", event.target.value)} placeholder="姓名、编号或方案名称" /></label>
+          <label className="payroll-member-filter"><input type="checkbox" checked={missingOnly} onChange={(event) => updateMemberFilter("plans", event.target.checked ? "missing" : "")} />只看未配置成员 <span>{activeMembers.filter((member) => !member.plan).length}</span></label>
+          <div className="mb-4 max-w-md">
+            <Field label="成员">
+              <select disabled={savePlan.isPending} className={fieldClass} onChange={(event) => selectMember(event.target.value)} required value={selectedMemberId}>
+                <option value="">选择已激活成员</option>
+                {activeMembers.map((member) => <option key={member.membershipId} value={member.membershipId}>{member.displayName}</option>)}
+              </select>
+            </Field>
+          </div>
+          <p className="payroll-member-count">显示 {filteredMembers.length} / {activeMembers.length} 位成员</p>
+          <div className="payroll-member-list" aria-label="薪资对象列表">
+            {filteredMembers.map((member) => (
               <button
+                disabled={savePlan.isPending}
                 aria-pressed={selectedMemberId === member.membershipId}
                 className={`rounded-xl px-4 py-3 text-left transition ${selectedMemberId === member.membershipId ? "bg-[var(--accent-soft)] text-[var(--accent-strong)]" : "bg-[var(--surface-subtle)] hover:bg-[var(--surface-tint)]"}`}
                 key={member.membershipId}
@@ -8766,6 +8638,7 @@ function PayrollManagementPanel({ me }: { me: Me }) {
                 type="button"
               >
                 <span className="block font-bold">{member.displayName}</span>
+                <small className="block text-xs opacity-60">编号 …{member.membershipId.slice(-8)}</small>
                 <span className="mt-1 block text-xs opacity-70">
                   {member.plan
                     ? `${compensationTypeLabels[member.plan.version.type]} · ${member.plan.plan.currency} ${Number(member.plan.version.baseAmount).toFixed(2)}`
@@ -8773,20 +8646,18 @@ function PayrollManagementPanel({ me }: { me: Me }) {
                 </span>
               </button>
             ))}
+            {!filteredMembers.length && <p role="status">没有匹配的成员，可调整关键词或筛选条件。</p>}
           </div>
-          <form
-            className="grid gap-4 xl:grid-cols-4"
+          </aside><div className="payroll-plan-detail">
+          {selectedMember && <div className="payroll-editor-identity"><div><h3>{selectedMember.displayName}</h3><p>当前方案版本：{selectedMember.plan?.version.version ?? "未配置"} · 编号 …{selectedMember.membershipId.slice(-8)}</p></div><Badge tone={planDraft.dirty ? "warning" : "neutral"}>{planDraft.dirty ? "有未保存修改" : "正在查看方案"}</Badge></div>}
+          {selectedMember && planDraft.dirty && <p className="payroll-draft-note" role="status">输入已在当前登录期间保留，切换成员或页面后可继续；保存后才会生效，刷新或关闭前会提醒。</p>}
+          {selectedMember && planDraft.conflict && <div role="alert" className="payroll-draft-note">此成员的方案已被更新，你的输入仍保留。请先核对最新版本。<Button variant="secondary" onClick={() => { if (window.confirm("放弃本地未保存修改，加载最新方案？")) planDraft.discard(); }}>放弃修改并加载最新</Button></div>}
+          {selectedMember ? <form
             onSubmit={(event) => {
               event.preventDefault();
-              savePlan.mutate();
+              if (!savePlan.isPending && !planDraft.conflict) savePlan.mutate();
             }}
-          >
-            <Field label="成员">
-              <select className={fieldClass} onChange={(event) => selectMember(event.target.value)} required value={selectedMemberId}>
-                <option value="">选择已激活成员</option>
-                {activeMembers.map((member) => <option key={member.membershipId} value={member.membershipId}>{member.displayName}</option>)}
-              </select>
-            </Field>
+          ><fieldset disabled={savePlan.isPending} className="grid min-w-0 gap-4 xl:grid-cols-4">
             <Field label="计薪类型">
               <select className={fieldClass} onChange={(event) => {
                 const type = event.target.value as CompensationPlanType;
@@ -8863,7 +8734,7 @@ function PayrollManagementPanel({ me }: { me: Me }) {
                         />
                       </label>
                       <label>
-                        <span>月度金额</span>
+                        <span>每期金额</span>
                         <input
                           aria-label={`第 ${index + 1} 项补贴金额`}
                           className={fieldClass}
@@ -8987,30 +8858,31 @@ function PayrollManagementPanel({ me }: { me: Me }) {
                 <p className="mt-2 text-xs text-[var(--text-muted)]">以自然月为硬边界划分月内周段；达到阈值立即奖励，每人每段一次，真实工时与奖励工时分开显示。</p>
               </div>
             </div>
-            <div className="xl:col-span-4 flex flex-wrap items-center gap-3">
-              <Button disabled={!selectedMemberId || savePlan.isPending} type="submit">{savePlan.isPending ? "正在保存版本…" : "保存薪资方案新版本"}</Button>
+            <div className="payroll-plan-savebar xl:col-span-4 flex flex-wrap items-center gap-3">
+              <Button disabled={!selectedMember || savePlan.isPending || planDraft.conflict} type="submit">{savePlan.isPending ? "正在保存版本…" : "保存薪资方案新版本"}</Button>
+              {planDraft.dirty && <Button variant="ghost" type="button" onClick={() => { if (window.confirm("放弃此成员尚未保存的修改？")) { planDraft.discard(); savePlan.reset(); } }}>放弃修改</Button>}
               {selectedMemberId ? <span className="text-xs text-[var(--text-muted)]">当前版本：{activeMembers.find((item) => item.membershipId === selectedMemberId)?.plan?.version.version ?? "未配置"}</span> : null}
             </div>
-          </form>
-          <ErrorMessage error={management.error ?? savePlan.error} />
+          </fieldset></form>
+          : <p className="py-6 text-sm text-[var(--text-muted)]" role="status">{activeMembers.length ? "请选择上方成员，查看或编辑其计薪方案。" : "暂无已激活的计薪成员，请先在组织与人员中邀请成员。"}</p>}
+          {savePlan.isSuccess && savePlan.data.submittedMemberId === selectedMemberId && !planDraft.dirty && <p role="status">薪资方案新版本已保存。</p>}
+          <ErrorMessage error={savePlan.error} />
+          </div></div>
         </CardContent>
-      </Card>
+      </Card>}
     </section>
   );
 }
 
-export function PayrollPage({ me }: { me: Me }) {
+export function PayrollPage({ view }: { view: "current" | "history" }) {
   const chartPalette = useChartPalette();
   const [payrollSearch, setPayrollSearch] = useSearchParams();
   const sourceId = payrollSearch.get("source");
   const [payrollHistory, setPayrollHistory] = useState<HistoricalRange | null>(null);
   const queryClient = useQueryClient();
-  const canManagePayroll = hasGrant(me, "payroll.configure");
-  const isPayrollManager = canManagePayroll && !sourceId && payrollSearch.get("view") !== "own";
   const payroll = useQuery({
     queryKey: ["payroll-me", payrollHistory?.from.toISOString(), payrollHistory?.to.toISOString()],
     queryFn: () => api<PayrollOwnResponse>(`/api/payroll/me${payrollHistory ? `?from=${encodeURIComponent(payrollHistory.from.toISOString())}&to=${encodeURIComponent(payrollHistory.to.toISOString())}` : ""}`),
-    enabled: !isPayrollManager,
   });
   const [selectedPayrollId, setSelectedPayrollId] = useState("");
   const sourceRecord = sourceId ? payroll.data?.items.find((record) => record.item.id === sourceId || record.period.id === sourceId || record.components.some((c) => c.id === sourceId)) : undefined;
@@ -9019,7 +8891,6 @@ export function PayrollPage({ me }: { me: Me }) {
     setSelectedPayrollId(id);
     if (sourceId) {
       const next = new URLSearchParams(payrollSearch); next.delete("source");
-      if (canManagePayroll) next.set("view", "own");
       setPayrollSearch(next, { replace: true });
     }
   };
@@ -9438,17 +9309,11 @@ export function PayrollPage({ me }: { me: Me }) {
     : 0;
   return (
     <>
-      <PageHeader
-        title={isPayrollManager ? "薪资管理" : "我的薪资"}
-      />
-      {canManagePayroll ? <div className="mb-4"><Link to={isPayrollManager ? "/payroll?view=own" : "/payroll"}>{isPayrollManager ? "查看本人的薪资与来源" : "返回组织薪资管理"}</Link></div> : null}
-      {isPayrollManager ? <PayrollManagementPanel me={me} /> : null}
-      <ReimbursementPanel />
-      {livePreview && Number(livePreview.approvedReimbursementAmount ?? 0) > 0 && <Card className="mb-4"><CardContent>
+      {view === "current" && livePreview && Number(livePreview.approvedReimbursementAmount ?? 0) > 0 && <Card className="mb-4"><CardContent>
         <StatusLine label="已批准报销 · 已计入本月预估" value={money(livePreview.currency, livePreview.approvedReimbursementAmount!)} />
         <p className="mt-2 text-xs text-[var(--text-muted)]">按选定周期期末计入，不增加工时，也不作为未来工资增长的预测依据。</p>
       </CardContent></Card>}
-      {!isPayrollManager && livePreview ? (
+      {view === "current" && livePreview ? (
         <section className="mb-4 grid gap-2.5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4" aria-label="本月实时薪资">
           <Card><CardContent><StatusLine label={livePreview.planType === "hourly" || livePreview.planType === "hybrid" ? "基础时薪" : compensationTypeLabels[livePreview.planType]} value={`${money(livePreview.currency, livePreview.baseAmount)}${livePreview.planType === "hourly" || livePreview.planType === "hybrid" ? " / 小时" : ""}`} /></CardContent></Card>
           <Card><CardContent><StatusLine label={livePreview.currentWeek ? `本周已记录工时 · ${payrollWeekRangeLabel(livePreview.currentWeek)}` : "本周已记录工时"} value={formatDuration(livePreview.currentWeek?.totalSeconds ?? 0)} /><p className="mt-1 text-xs text-[var(--text-muted)]">已批准 {formatDuration(livePreview.currentWeek?.approvedSeconds ?? 0)}{livePreview.currentWeek?.pendingSeconds ? ` · 待审核 ${formatDuration(livePreview.currentWeek.pendingSeconds)}` : ""}</p></CardContent></Card>
@@ -9460,7 +9325,7 @@ export function PayrollPage({ me }: { me: Me }) {
           <Card><CardContent><StatusLine label="结算截止 / 计划导出" value={formatDateTime(livePreview.period.cutoffAt)} /></CardContent></Card>
         </section>
       ) : null}
-      {!isPayrollManager && livePreview ? (
+      {view === "current" && livePreview ? (
         <Card className="mb-4">
           <CardHeader>
             <div><p className="app-page-kicker">实时口径</p><h2 className="mt-1 font-bold">本月实时预估怎样计算</h2></div>
@@ -9492,7 +9357,7 @@ export function PayrollPage({ me }: { me: Me }) {
           </CardContent>
         </Card>
       ) : null}
-      {!isPayrollManager && livePreview && livePreview.salaryTimeline.length ? (
+      {view === "current" && livePreview && livePreview.salaryTimeline.length ? (
         <section className="mb-4" aria-label="实时薪资与预测图表">
           <Card className="analytics-chart-card salary-forecast-unified-card">
             <CardHeader><div><p className="app-page-kicker">本月趋势</p><h2 className="mt-1 font-bold">每日工时、薪资与月末预测</h2></div><Badge tone="warning">事实与预测分开展示</Badge></CardHeader>
@@ -9520,7 +9385,7 @@ export function PayrollPage({ me }: { me: Me }) {
           </Card>
         </section>
       ) : null}
-      {!isPayrollManager && livePreview && (activeSalaryWeeks.length || activeSalaryDays.length) ? (
+      {view === "current" && livePreview && (activeSalaryWeeks.length || activeSalaryDays.length) ? (
         <section className="mb-4 grid gap-4 xl:grid-cols-2" aria-label="每日与每周工时明细">
           <Card>
             <CardHeader><h2 className="font-bold">每周工时</h2><Badge>{activeSalaryWeeks.length} 个周段</Badge></CardHeader>
@@ -9546,13 +9411,13 @@ export function PayrollPage({ me }: { me: Me }) {
           </Card>
         </section>
       ) : null}
-      {!isPayrollManager ? <HistoricalRangePicker onChange={setPayrollHistory} /> : null}
-      {!isPayrollManager && sourceId && payroll.isSuccess && !sourceRecord ? <Card className="mb-4"><CardContent><p role="alert">该来源未出现在当前授权与日期范围内，可能已撤销、被新版批次替代或范围不匹配。请核对来源版本和日期；不会用另一张账单代替此来源。</p><Button variant="secondary" onClick={() => selectPayroll("")}>查看当前可用薪资批次</Button></CardContent></Card> : null}
-      {!isPayrollManager && payroll.isPending ? (
+      {view === "history" && <HistoricalRangePicker onChange={setPayrollHistory} />}
+      {view === "history" && sourceId && payroll.isSuccess && !sourceRecord ? <Card className="mb-4"><CardContent><p role="alert">该来源未出现在当前授权与日期范围内，可能已撤销、被新版批次替代或范围不匹配。请核对来源版本和日期；不会用另一张账单代替此来源。</p><Button variant="secondary" onClick={() => selectPayroll("")}>查看当前可用薪资批次</Button></CardContent></Card> : null}
+      {view === "history" && payroll.isPending ? (
         <Card>
           <LoadingBlock />
         </Card>
-      ) : !isPayrollManager && payroll.data?.items.length && selected ? (
+      ) : view === "history" && payroll.data?.items.length && selected ? (
         <div className="space-y-4">
           <section className="grid gap-3 md:grid-cols-3" aria-label="薪资总览">
             {(payroll.data.summary.length ? payroll.data.summary : [{
@@ -9635,15 +9500,17 @@ export function PayrollPage({ me }: { me: Me }) {
             </CardContent>
           </Card>
         </div>
-      ) : !isPayrollManager && !payroll.isError ? (
+      ) : view === "history" && !payroll.isError ? (
         <Card>
           <EmptyState
-            description={payroll.data?.currentPlan ? "本月实时预估已在上方显示；结算后会生成不可重复计数的工资单。" : "管理员尚未为你配置薪资方案。"}
+            description="所选范围内暂无工资单。结算后可在这里查看明细并确认收款。"
             icon={<CircleDollarSign />}
             title="暂无薪资批次"
           />
         </Card>
       ) : null}
+      {view === "current" && payroll.isPending && <Card><LoadingBlock /></Card>}
+      {view === "current" && payroll.isSuccess && !livePreview && <Card><EmptyState icon={<CircleDollarSign />} title="暂无本月薪资预估" description={payroll.data.currentPlan ? "本月尚无可用薪资预估，可到历史工资单查看已生成的账单。" : "管理员尚未为你配置生效的薪资方案。"} /></Card>}
       <div className="mt-4">
         <ErrorMessage error={payroll.error} onRetry={() => void payroll.refetch()} retrying={payroll.isFetching} />
         <ErrorMessage error={acknowledge.error} />
@@ -11674,7 +11541,7 @@ function Metric({
         <p className="text-sm font-semibold text-[var(--text-muted)]">
           {label}
         </p>
-        <p className="text-2xl font-extrabold tracking-[-0.04em] tabular-nums">
+        <p data-ui="metric" className="text-2xl font-extrabold tracking-[-0.04em] tabular-nums">
           {value}
         </p>
         <p className="text-xs text-[var(--text-subtle)]">{hint}</p>
@@ -12393,7 +12260,7 @@ export function AiPage({ me }: { me: Me }) {
   useEffect(() => {
     const container = chatScrollRef.current;
     if (!container) return;
-    container.scrollTo({ top: container.scrollHeight, behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "instant" : "smooth" });
+    container.scrollTo({ top: container.scrollHeight, behavior: reducedMotion() ? "instant" : "smooth" });
   }, [chatUpdateKey]);
   const selected =
     reportItems.find((item) => item.job.id === activeReportId || item.report?.id === activeReportId) ??

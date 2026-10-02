@@ -116,6 +116,8 @@ export async function registerPayrollRoutes(
   if (reimbursements) {
     app.get("/api/reimbursements", { preHandler: authenticate }, async (request) => {
       const query = z.object({ from: z.iso.date().optional(), to: z.iso.date().optional(), pendingOnly: z.enum(["true", "false"]).transform((value) => value === "true").optional(), id: z.uuid().optional(),
+        ownOnly: z.enum(["true", "false"]).transform((value) => value === "true").optional(),
+        reviewedOnly: z.enum(["true", "false"]).transform((value) => value === "true").optional(),
         limit: z.coerce.number().int().min(1).max(100).default(100),
         before: z.string().refine((value) => { const [at, id, extra] = value.split("|"); return extra === undefined && z.iso.datetime({ offset: true }).safeParse(at).success && z.uuid().safeParse(id).success; }, "分页游标无效。").optional(),
       }).refine((value) => (!value.from && !value.to) || Boolean(value.from && value.to && value.to > value.from && Date.parse(value.to) - Date.parse(value.from) <= 366 * 86_400_000), "日期须成对指定，结束不含，范围为正且最多 366 天。").parse(request.query);
@@ -281,7 +283,7 @@ export async function registerPayrollRoutes(
     async (request, reply) => {
       const { runId } = runParams.parse(request.params);
       try {
-        if (handoff) return reply.code(409).send({ error: "handoff_confirmation_required", message: "请先打开薪资交接预览，核对整批金额和外部人员编号后确认导出。", actionUrl: `/payroll?handoff=${runId}` });
+        if (handoff) return reply.code(409).send({ error: "handoff_confirmation_required", message: "请先打开薪资交接预览，核对整批金额和外部人员编号后确认导出。", actionUrl: `/payroll-management/runs/${runId}` });
         return { run: await service.settle(request.auth!, runId) };
       } catch (error) {
         if (error instanceof PayrollNotFoundError) {

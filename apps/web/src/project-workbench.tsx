@@ -44,15 +44,8 @@ import { Badge, Button, Card, CardContent, cn } from "@workbench/ui";
 import { api, type Me } from "./api.js";
 import { getOrganizationTimezone, toZonedInputValue, zonedInputToDate } from "./timezone.js";
 import { useVersionedDraft } from "./versioned-draft.js";
-import {
-  EmptyState,
-  ErrorMessage,
-  fieldClass,
-  Field,
-  LoadingBlock,
-  PageHeader,
-  textAreaClass,
-} from "./pages.js";
+import { EmptyState, ErrorMessage, Field, LoadingBlock, PageHeader } from "./workspace-primitives.js";
+import { fieldClass, textAreaClass } from "./pages.js";
 
 const ProjectCanvas = lazy(() => import("./project-canvas.js"));
 

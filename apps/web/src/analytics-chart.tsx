@@ -16,6 +16,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { chartDataRows, responsiveChartOption } from "./chart-options.js";
 import { useDialogFocus } from "./dialog-focus.js";
+import { MOTION_CHANGE, reducedMotion } from "./motion-preference.js";
 
 echarts.use([
   BarChart,
@@ -36,7 +37,7 @@ echarts.use([
 ]);
 
 function responsiveOption(option: EChartsCoreOption, width: number): EChartsCoreOption {
-  return responsiveChartOption(option, width, window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+  return responsiveChartOption(option, width, reducedMotion());
 }
 
 function reconcileChart(chart: echarts.EChartsType, option: EChartsCoreOption, width: number) {
@@ -176,7 +177,8 @@ export default function AnalyticsChart({
     const media = window.matchMedia("(prefers-reduced-motion: reduce)");
     const refresh = () => { if (chartRef.current) reconcileChart(chartRef.current, optionRef.current, container.current?.clientWidth ?? 640); };
     media.addEventListener("change", refresh);
-    return () => media.removeEventListener("change", refresh);
+    window.addEventListener(MOTION_CHANGE, refresh);
+    return () => { media.removeEventListener("change", refresh); window.removeEventListener(MOTION_CHANGE, refresh); };
   }, []);
 
   useEffect(() => {
