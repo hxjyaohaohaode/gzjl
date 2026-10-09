@@ -139,7 +139,11 @@ jobs:
       # Each matrix entry has its own process and database. Keep one browser
       # worker per runner to avoid CPU contention and preserve auth rate limits.
       - name: Run browser acceptance
-        run: ${{ matrix.command }}
+        run: |
+          # GitHub mounts this directory as pwuser-owned while the official
+          # image runs as root. Firefox requires its home to match its user.
+          chown "$(id -u):$(id -g)" "$HOME"
+          ${{ matrix.command }}
 
       - name: Retain acceptance evidence
         if: ${{ always() }}
