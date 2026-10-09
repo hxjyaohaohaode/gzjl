@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import { and, asc, desc, eq, gt, gte, inArray, isNull, lt, ne, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNull, lt, ne, sql } from "drizzle-orm";
 import type { Database } from "@workbench/db";
 import {
   auditLogs,
@@ -41,8 +41,10 @@ import {
   type PayrollRateRule,
 } from "@workbench/shared";
 import { lockPayrollInputs } from "./input-lock.js";
+import { effectivePlanRange, replacePlanRange } from "./plan-range.js";
+import { payrollLocalTime } from "./export-summary.js";
 
-export const PAYROLL_CALCULATION_VERSION = "payroll-engine-v10-fixed-member-subsidies";
+export const PAYROLL_CALCULATION_VERSION = "payroll-engine-v11-explicit-pay-period";
 
 export interface PayrollActor {
   organizationId: string;
@@ -64,6 +66,7 @@ export interface ConfigureCompensationPlanInput {
   currency: string;
   baseAmount: string;
   effectiveFrom: Date;
+  effectiveTo?: Date | undefined;
   pendingReviewCountsInEstimate: boolean;
   fixedAmount?: string | undefined;
   subsidies?: Array<{ name: string; amount: string; distribution?: "daily" | "period_end" | "prorated" }> | undefined;
@@ -448,7 +451,9 @@ function versionedSalary(
     multiplier?: string;
     trace: unknown;
   }> = [];
-  const orderedVersions = [...versions].sort(
+  const orderedVersions = versions.filter((version) =>
+    version.effectiveFrom < period.endsAt && (!version.effectiveTo ||
+      (version.effectiveTo > version.effectiveFrom && version.effectiveTo > period.startsAt))).sort(
     (left, right) => left.effectiveFrom.getTime() - right.effectiveFrom.getTime(),
   );
   const latestVersion = orderedVersions.at(-1)!;
@@ -468,13 +473,6 @@ function versionedSalary(
     }
   }
 
-  // A fixed benefit at period end replaces earlier prorated versions of
-  // the same benefit. Otherwise a switch daily -> period_end pays it twice.
-  const endingVersion = orderedVersions.findLast((version) =>
-    !version.effectiveTo || version.effectiveTo >= period.endsAt);
-  const fixedBenefits = new Set(planSubsidies(endingVersion?.config)
-    .filter((benefit) => benefit.distribution === "period_end")
-    .map((benefit) => benefitKey(benefit.name)));
   for (let index = 1; index < orderedVersions.length; index++) {
     const previous = orderedVersions[index - 1]!;
     if (!previous.effectiveTo || previous.effectiveTo > orderedVersions[index]!.effectiveFrom)
@@ -493,6 +491,12 @@ function versionedSalary(
         ? version.effectiveTo
         : period.endsAt;
     if (segmentEnd <= segmentStart) continue;
+    const configuredPeriod = (version.config as { fixedPeriod?: { startsAt: string; endsAt: string } }).fixedPeriod;
+    const fixedPeriodMillis = configuredPeriod
+      ? Date.parse(configuredPeriod.endsAt) - Date.parse(configuredPeriod.startsAt)
+      : periodMillis;
+    const contextStartsAt = configuredPeriod ? new Date(Math.max(period.startsAt.getTime(), Date.parse(configuredPeriod.startsAt))) : period.startsAt;
+    const contextEndsAt = configuredPeriod ? new Date(Math.min(period.endsAt.getTime(), Date.parse(configuredPeriod.endsAt))) : period.endsAt;
     const versionIntervals = (version.type === "hourly" || version.type === "hybrid"
       ? clipWholeSecondPayableIntervals : clipPayableIntervals)(
       intervals,
@@ -507,11 +511,11 @@ function versionedSalary(
         intervals: versionIntervals,
         // A rate version changes the price, not the amount already worked
         // on this civil day. The engine applies this version's pending policy.
-        dailyContextIntervals: intervals,
+        dailyContextIntervals: configuredPeriod ? clipPayableIntervals(intervals, contextStartsAt, contextEndsAt) : intervals,
         // Every version sees the final approved/pending state for the
         // whole natural week; the period boundary still clips a week that
         // straddles two payroll months into two independent reward spans.
-        weeklyContextIntervals,
+        weeklyContextIntervals: configuredPeriod ? clipPayableIntervals(weeklyContextIntervals, contextStartsAt, contextEndsAt) : weeklyContextIntervals,
         // Rule changes are versioned and auditable, but a newly enabled
         // weekly reward is allowed to recognise earlier work in the same
         // still-open payroll month. Limit eligibility to this version's
@@ -519,7 +523,7 @@ function versionedSalary(
         // later; the cross-version awarded set still prevents duplicates.
         weeklyBonusEligibilityIntervals: clipPayableIntervals(
           intervals,
-          period.startsAt,
+          contextStartsAt,
           segmentEnd,
         ),
         excludedWeeklyBonusWeekStarts: [...awardedWeeklyBonusWeeks],
@@ -559,12 +563,12 @@ function versionedSalary(
           const fixedAmount = prorateDecimalAmount(
             config.fixedAmount,
             segmentEnd.getTime() - segmentStart.getTime(),
-            periodMillis,
+            fixedPeriodMillis,
           );
           grossAmount = addDecimalAmounts(grossAmount, fixedAmount);
           components.push({
             type: "base",
-            label: "混合方案固定部分（按生效区间折算）",
+            label: configuredPeriod ? "混合方案固定部分" : "混合方案固定部分（按生效区间折算）",
             amount: fixedAmount,
             planVersionId: version.id,
             planVersion: version.version,
@@ -631,13 +635,13 @@ function versionedSalary(
       const amount = prorateDecimalAmount(
         version.baseAmount,
         segmentEnd.getTime() - segmentStart.getTime(),
-        periodMillis,
+        fixedPeriodMillis,
       );
       grossAmount = addDecimalAmounts(grossAmount, amount);
       components.push({
         type: "base",
         label:
-          version.type === "monthly"
+          configuredPeriod ? (version.type === "monthly" ? "月度固定薪资" : "周期固定薪资") : version.type === "monthly"
             ? "月度固定薪资（按生效区间折算）"
             : "周期固定薪资（按生效区间折算）",
         amount,
@@ -652,11 +656,18 @@ function versionedSalary(
     const segmentSeconds = Math.floor(
       (segmentEnd.getTime() - segmentStart.getTime()) / 1_000,
     );
+    // Anchor a scoped subsidy to its configured cycle, not the calendar month
+    // used to view it. The final applicable amount replaces earlier versions.
+    const subsidyEndsAt = configuredPeriod ? new Date(configuredPeriod.endsAt) : period.endsAt;
+    const endingVersion = orderedVersions.findLast((entry) => entry.effectiveFrom < subsidyEndsAt
+      && (!entry.effectiveTo || entry.effectiveTo >= subsidyEndsAt));
+    const fixedBenefits = new Set(planSubsidies(endingVersion?.config)
+      .filter((benefit) => benefit.distribution === "period_end").map((benefit) => benefitKey(benefit.name)));
     for (const subsidy of planSubsidies(version.config)) {
       if (fixedBenefits.has(benefitKey(subsidy.name)) && version.id !== endingVersion?.id) continue;
       const amount = subsidy.distribution === "period_end"
-        ? (segmentEnd.getTime() === period.endsAt.getTime() ? subsidy.amount : "0.000000")
-        : prorateDecimalAmount(subsidy.amount, segmentEnd.getTime() - segmentStart.getTime(), periodMillis);
+        ? (segmentEnd.getTime() === subsidyEndsAt.getTime() ? subsidy.amount : "0.000000")
+        : prorateDecimalAmount(subsidy.amount, segmentEnd.getTime() - segmentStart.getTime(), fixedPeriodMillis);
       grossAmount = addDecimalAmounts(grossAmount, amount);
       components.push({
         type: "allowance",
@@ -672,6 +683,8 @@ function versionedSalary(
           configuredAmount: subsidy.amount,
           distribution: subsidy.distribution,
           configuredDistribution: subsidy.configuredDistribution,
+          ...(subsidy.distribution === "period_end" && segmentEnd.getTime() === subsidyEndsAt.getTime()
+            ? { date: localDateKey(new Date(subsidyEndsAt.getTime() - 1), period.timezone) } : {}),
           subsidyPolicy: subsidy.distribution === "prorated" ? "explicit_effective_time_proration_v10" : "fixed_configured_amount_once_per_cycle_v10",
           effectiveFrom: segmentStart,
           effectiveTo: segmentEnd,
@@ -824,8 +837,7 @@ export class PayrollService {
     );
     const versions = await this.db.select().from(compensationPlanVersions).where(and(
       eq(compensationPlanVersions.compensationPlanId, currentPlan.plan.id),
-      lt(compensationPlanVersions.effectiveFrom, endsAt),
-      or(isNull(compensationPlanVersions.effectiveTo), gt(compensationPlanVersions.effectiveTo, startsAt)),
+      effectivePlanRange(startsAt, endsAt),
     )).orderBy(asc(compensationPlanVersions.effectiveFrom));
     const ruleRows = versions.length ? await this.db.select().from(rateRules)
       .where(inArray(rateRules.compensationPlanVersionId, versions.map((version) => version.id)))
@@ -964,7 +976,7 @@ export class PayrollService {
       .where(and(eq(payrollAdjustments.organizationId, actor.organizationId),
         eq(payrollAdjustments.membershipId, actor.membershipId), eq(payrollAdjustments.sourceEntityType, "reimbursement"),
         eq(payrollAdjustments.currency, currentPlan.plan.currency), sql`${payrollAdjustments.approvedAt} is not null`,
-        gte(payPeriods.startsAt, startsAt), lt(payPeriods.startsAt, endsAt)));
+        sql`to_char((${payPeriods.endsAt} - interval '1 millisecond') at time zone ${payPeriods.timezone}, 'YYYY-MM') = ${today.slice(0, 7)}`));
     const approvedReimbursementAmount = addDecimalAmounts(...approvedExpenses.map((expense) => roundMoney(expense.amount)));
     estimatedAmount = addDecimalAmounts(estimatedAmount, approvedReimbursementAmount);
     for (const expense of approvedExpenses) {
@@ -1481,6 +1493,8 @@ export class PayrollService {
     input: ConfigureCompensationPlanInput,
   ) {
     const benefitNames = (input.subsidies ?? []).map((subsidy) => benefitKey(subsidy.name));
+    if (input.effectiveTo && input.effectiveTo <= input.effectiveFrom)
+      throw new PayrollConflictError("计薪范围结束时间必须晚于开始时间。");
     if (new Set(benefitNames).size !== benefitNames.length)
       throw new PayrollConflictError("同一方案不能重复设置同名补贴，请合并金额或使用不同名称。");
     return this.db.transaction(async (tx) => {
@@ -1499,6 +1513,11 @@ export class PayrollService {
       if (!member || member.status === "invited") {
         throw new PayrollNotFoundError();
       }
+      const [closed] = await tx.select({ id: payPeriods.id }).from(payPeriods)
+        .where(and(eq(payPeriods.organizationId, actor.organizationId),
+          inArray(payPeriods.status, ["settled", "locked"]), gt(payPeriods.endsAt, input.effectiveFrom),
+          input.effectiveTo ? lt(payPeriods.startsAt, input.effectiveTo) : undefined)).limit(1);
+      if (closed) throw new PayrollConflictError("所选计薪范围包含已结算或锁定的周期，请先按更正流程处理，不能直接改写历史工资。");
 
       const existingPlans = await tx
         .select()
@@ -1526,6 +1545,7 @@ export class PayrollService {
         hybrid: "hour",
       };
       const versionConfig = {
+        ...(input.effectiveTo ? { fixedPeriod: { startsAt: input.effectiveFrom.toISOString(), endsAt: input.effectiveTo.toISOString() } } : {}),
         ...(input.type === "hybrid" && input.fixedAmount
           ? { fixedAmount: input.fixedAmount }
           : {}),
@@ -1536,6 +1556,7 @@ export class PayrollService {
       let plan: typeof compensationPlans.$inferSelect;
       let versionNumber = 1;
       let previousVersion: typeof compensationPlanVersions.$inferSelect | undefined;
+      let replacedVersions: Array<typeof compensationPlanVersions.$inferSelect> = [];
 
       if (existing) {
         [previousVersion] = await tx
@@ -1550,16 +1571,17 @@ export class PayrollService {
           .for("update")
           .limit(1);
         if (!previousVersion) throw new PayrollConflictError("当前薪资方案版本缺失。");
-        if (input.effectiveFrom <= previousVersion.effectiveFrom) {
+        if (!input.effectiveTo && input.effectiveFrom <= previousVersion.effectiveFrom) {
           throw new PayrollConflictError(
             "新版本生效时间必须晚于当前版本；历史错误请通过审计更正流程处理。",
           );
         }
-        versionNumber = existing.activeVersion + 1;
-        await tx
-          .update(compensationPlanVersions)
-          .set({ effectiveTo: input.effectiveFrom })
-          .where(eq(compensationPlanVersions.id, previousVersion.id));
+        if (input.currency !== existing.currency)
+          throw new PayrollConflictError("已有薪资方案不能更换币种，避免改变其他月份的工资。");
+        const replacement = await replacePlanRange(tx as unknown as Database, existing.id,
+          input.effectiveFrom, input.effectiveTo, actor.membershipId);
+        versionNumber = replacement.nextVersion;
+        replacedVersions = replacement.replaced;
         const [updated] = await tx
           .update(compensationPlans)
           .set({
@@ -1601,6 +1623,7 @@ export class PayrollService {
           config: versionConfig,
           pendingReviewCountsInEstimate: input.pendingReviewCountsInEstimate,
           effectiveFrom: input.effectiveFrom,
+          effectiveTo: input.effectiveTo ?? null,
           createdBy: actor.membershipId,
         })
         .returning();
@@ -1643,7 +1666,8 @@ export class PayrollService {
               type: previousVersion.type,
               baseAmount: previousVersion.baseAmount,
               effectiveFrom: previousVersion.effectiveFrom,
-              effectiveTo: input.effectiveFrom,
+              effectiveTo: previousVersion.effectiveTo,
+              replacedVersions,
             }
           : null,
         after: {
@@ -1651,6 +1675,8 @@ export class PayrollService {
           type: version.type,
           baseAmount: version.baseAmount,
           effectiveFrom: version.effectiveFrom,
+          effectiveTo: version.effectiveTo,
+          application: input.effectiveTo ? "entire_selected_period" : "from_effective_time",
           ruleCount: input.rules.length,
         },
       });
@@ -1805,11 +1831,7 @@ export class PayrollService {
         and(
           eq(compensationPlans.organizationId, actor.organizationId),
           isNull(compensationPlans.archivedAt),
-          lt(compensationPlanVersions.effectiveFrom, period.endsAt),
-          or(
-            isNull(compensationPlanVersions.effectiveTo),
-            gt(compensationPlanVersions.effectiveTo, period.startsAt),
-          ),
+          effectivePlanRange(period.startsAt, period.endsAt),
         ),
       )
       .orderBy(
@@ -2264,8 +2286,7 @@ export class PayrollService {
       const currentPlans = await tx.select({ plan: compensationPlans, version: compensationPlanVersions })
         .from(compensationPlans).innerJoin(compensationPlanVersions, eq(compensationPlanVersions.compensationPlanId, compensationPlans.id))
         .where(and(eq(compensationPlans.organizationId, actor.organizationId), isNull(compensationPlans.archivedAt),
-          lt(compensationPlanVersions.effectiveFrom, record.period.endsAt),
-          or(isNull(compensationPlanVersions.effectiveTo), gt(compensationPlanVersions.effectiveTo, record.period.startsAt))));
+          effectivePlanRange(record.period.startsAt, record.period.endsAt)));
       const currentRules = currentPlans.length ? await tx.select().from(rateRules)
         .where(inArray(rateRules.compensationPlanVersionId, currentPlans.map(({ version }) => version.id))) : [];
       const currentBreaks = currentSessions.length ? await tx.select().from(workBreaks)
@@ -2454,7 +2475,6 @@ export class PayrollService {
       "薪资周期",
       "周期开始",
       "周期结束",
-      "币种",
       "已批准工时",
       "待审核工时",
       "周奖励工时",
@@ -2463,24 +2483,21 @@ export class PayrollService {
       "最终金额",
       "是否预估",
       "是否需复核",
-      "批次号",
       "批次状态",
     ];
     const data = rows.map(({ item, displayName }) => [
       displayName,
       record.period.name,
-      record.period.startsAt.toISOString(),
-      record.period.endsAt.toISOString(),
-      item.currency,
-      (item.approvedSeconds / 3_600).toFixed(4),
-      (item.pendingSeconds / 3_600).toFixed(4),
-      ((bonusByItem.get(item.id) ?? 0) / 3_600).toFixed(4),
+      payrollLocalTime(record.period.startsAt, record.period.timezone),
+      payrollLocalTime(record.period.endsAt, record.period.timezone),
+      (item.approvedSeconds / 3_600).toFixed(2),
+      (item.pendingSeconds / 3_600).toFixed(2),
+      ((bonusByItem.get(item.id) ?? 0) / 3_600).toFixed(2),
       roundMoney(item.grossAmount),
       roundMoney(item.adjustmentAmount),
       roundMoney(item.finalAmount),
       item.estimate ? "是" : "否",
       item.needsReview ? "是" : "否",
-      record.run.runNumber,
       record.run.status === "settled" ? "已导出并锁定" : "待导出锁定",
     ]);
     const csv = `\uFEFF${[header, ...data]
@@ -2488,7 +2505,7 @@ export class PayrollService {
       .join("\r\n")}\r\n`;
     const safePeriod = record.period.name.replace(/[\\/:*?"<>|]+/g, "-");
     return {
-      fileName: `${safePeriod}-财务薪资账单-批次${record.run.runNumber}.csv`,
+      fileName: `${safePeriod}-财务薪资账单.csv`,
       csv,
     };
   }

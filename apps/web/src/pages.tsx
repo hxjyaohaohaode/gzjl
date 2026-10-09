@@ -8149,7 +8149,8 @@ function formatPayrollAxis(currency: string, value: number): string {
   }
 }
 
-function emptyPlanForm() {
+function emptyPlanForm(month = localInput(new Date()).slice(0, 7)) {
+  const period = salaryMonthForm(month);
   return {
     name: "主薪资方案",
     type: "hourly" as CompensationPlanType,
@@ -8157,7 +8158,10 @@ function emptyPlanForm() {
     baseAmount: "",
     fixedAmount: "",
     subsidies: [] as Array<{ id: string; name: string; amount: string; distribution?: "period_end" | "prorated" }>,
-    effectiveFrom: localInput(new Date(Date.now() + 60_000)),
+    applicationMode: "period" as "period" | "effective",
+    salaryMonth: month,
+    effectiveFrom: period.startsAt,
+    effectiveTo: period.endsAt,
     pendingReviewCountsInEstimate: true,
     weekdayEnabled: false,
     weekdayMultiplier: "1",
@@ -8179,7 +8183,7 @@ function emptyPlanForm() {
   };
 }
 
-function memberPlanForm(selected: PayrollManagementOverview["members"][number] | undefined) {
+function memberPlanForm(selected: PayrollManagementOverview["members"][number] | undefined, month?: string) {
     const selectedRules = selected?.plan?.rules ?? [];
     const weekdayRule = selectedRules.find((item) => item.type === "weekday");
     const weekendRule = selectedRules.find((item) => item.type === "weekend");
@@ -8188,7 +8192,7 @@ function memberPlanForm(selected: PayrollManagementOverview["members"][number] |
     const overtimeRule = selectedRules.find((item) => item.type === "overtime");
     const weeklyBonusRule = selectedRules.find((item) => item.type === "weekly_bonus");
     return {
-      ...emptyPlanForm(),
+      ...emptyPlanForm(month),
       name: selected?.plan?.plan.name ?? "主薪资方案",
       type: selected?.plan?.version.type ?? "hourly",
       currency: selected?.plan?.plan.currency ?? "CNY",
@@ -8221,7 +8225,6 @@ function memberPlanForm(selected: PayrollManagementOverview["members"][number] |
       weeklyBonusEnabled: Boolean(weeklyBonusRule),
       weeklyBonusThresholdHours: (weeklyBonusRule?.thresholdSeconds ?? 108_000) / 3_600,
       weeklyBonusRewardHours: (weeklyBonusRule?.rewardSeconds ?? 18_000) / 3_600,
-      effectiveFrom: localInput(new Date(Math.max(Date.now(), Date.parse(selected?.plan?.version.effectiveFrom ?? "") || 0) + 60_000)),
     };
 }
 
@@ -8251,9 +8254,11 @@ export function PayrollManagementPanel({ me, section }: { me: Me; section: "over
   );
   const selectedMemberId = periodSearch.get("member") ?? "";
   const selectedMember = activeMembers.find((member) => member.membershipId === selectedMemberId);
-  const defaultPlan = useMemo(() => memberPlanForm(selectedMember), [selectedMember]);
+  const defaultPlan = useMemo(() => memberPlanForm(selectedMember, isSalaryMonth(periodMonth) ? periodMonth : undefined), [selectedMember, periodMonth]);
   const planDraft = useWorkspaceDraft({ identity: `${me.user.organizationId}:${me.user.membershipId}`, entity: `payroll-plan:${selectedMemberId}`, version: selectedMember?.plan?.version.version ?? 0, initial: defaultPlan });
-  const planForm = planDraft.value;
+  const planForm = planDraft.value.applicationMode ? planDraft.value : { ...planDraft.value,
+    applicationMode: defaultPlan.applicationMode, salaryMonth: defaultPlan.salaryMonth,
+    effectiveFrom: defaultPlan.effectiveFrom, effectiveTo: defaultPlan.effectiveTo };
   const setPlanForm = planDraft.setValue;
   const memberSearch = periodSearch.get("q") ?? "";
   const missingOnly = periodSearch.get("plans") === "missing";
@@ -8409,6 +8414,7 @@ export function PayrollManagementPanel({ me, section }: { me: Me; section: "over
             distribution: distribution === "prorated" ? "prorated" : "period_end",
           })),
           effectiveFrom: zonedInputToDate(planForm.effectiveFrom).toISOString(),
+          ...(planForm.applicationMode !== "effective" ? { effectiveTo: zonedInputToDate(planForm.effectiveTo).toISOString() } : {}),
           pendingReviewCountsInEstimate: planForm.pendingReviewCountsInEstimate,
           rules,
         },
@@ -8681,9 +8687,28 @@ export function PayrollManagementPanel({ me, section }: { me: Me; section: "over
             <Field label="方案名称">
               <input className={fieldClass} onChange={(event) => setPlanForm({ ...planForm, name: event.target.value })} required value={planForm.name} />
             </Field>
-            <Field hint="新版本不得倒改已生效历史。" label="新版本生效时间">
-              <input className={fieldClass} onChange={(event) => setPlanForm({ ...planForm, effectiveFrom: event.target.value })} required type="datetime-local" value={planForm.effectiveFrom} />
-            </Field>
+            <section className="grid gap-4 md:grid-cols-2 xl:col-span-4" aria-label="方案计薪范围">
+              <Field label="应用范围">
+                <select className={fieldClass} value={planForm.applicationMode ?? "period"} onChange={(event) => {
+                  const applicationMode = event.target.value as "period" | "effective";
+                  const period = salaryMonthForm(planForm.salaryMonth || localInput(new Date()).slice(0, 7));
+                  setPlanForm({ ...planForm, applicationMode, effectiveFrom: applicationMode === "period" ? period.startsAt : localInput(new Date(Date.now() + 60_000)), effectiveTo: period.endsAt });
+                }}><option value="period">所选整月或完整结算周期</option><option value="effective">仅从指定时间起</option></select>
+              </Field>
+              {planForm.applicationMode !== "effective" ? <>
+                <Field label="计薪月份"><input className={fieldClass} type="month" required value={planForm.salaryMonth} onChange={(event) => {
+                  const month = event.target.value;
+                  setPlanForm({ ...planForm, salaryMonth: month, ...(isSalaryMonth(month) ? { effectiveFrom: salaryMonthForm(month).startsAt, effectiveTo: salaryMonthForm(month).endsAt } : {}) });
+                }} /></Field>
+                <Field label="使用已有结算周期"><select className={fieldClass} value="" onChange={(event) => {
+                  const period = management.data?.periods.find((entry) => entry.id === event.target.value);
+                  if (period) setPlanForm({ ...planForm, effectiveFrom: localInput(new Date(period.startsAt)), effectiveTo: localInput(new Date(period.endsAt)) });
+                }}><option value="">选择已有周期，或填写下方起止时间</option>{management.data?.periods.filter((period) => !["settled", "locked"].includes(period.status)).map((period) => <option key={period.id} value={period.id}>{period.name}</option>)}</select></Field>
+                <Field label="计薪开始（含）"><input className={fieldClass} type="datetime-local" required value={planForm.effectiveFrom} onChange={(event) => setPlanForm({ ...planForm, effectiveFrom: event.target.value })} /></Field>
+                <Field label="计薪结束（不含）"><input className={fieldClass} type="datetime-local" required min={planForm.effectiveFrom} value={planForm.effectiveTo} onChange={(event) => setPlanForm({ ...planForm, effectiveTo: event.target.value })} /></Field>
+                <p className="text-sm leading-6 md:col-span-2">本次设置覆盖所选完整范围，包括本期已经录入的工时。时薪按填写单价计算；月薪、周期固定金额和混合方案固定部分在完整范围内按填写金额计入。保存后请更新该周期的计算。</p>
+              </> : <Field hint="只影响该时间之后的工时，之前继续使用原方案。" label="新版本生效时间"><input className={fieldClass} onChange={(event) => setPlanForm({ ...planForm, effectiveFrom: event.target.value })} required type="datetime-local" value={planForm.effectiveFrom} /></Field>}
+            </section>
             {planForm.type === "hybrid" ? (
               <Field label="固定部分金额">
                 <input className={fieldClass} min="0" onChange={(event) => setPlanForm({ ...planForm, fixedAmount: event.target.value })} required step="0.01" type="number" value={planForm.fixedAmount} />
@@ -9346,7 +9371,7 @@ export function PayrollPage({ view }: { view: "current" | "history" }) {
             ) : null}
             {(livePreview.planType === "hourly" || livePreview.planType === "hybrid") ? (
               <p className="mt-2 text-xs leading-5 text-[var(--text-muted)]">
-                工作工资按工时发生时生效的方案版本逐段计算，不用当前单价覆盖历史工时；周末、节假日、夜间、超时倍率及奖励均保留计算依据。
+                本月工资只计本月范围内的工时，跨月记录按月拆分。管理员按完整周期设置的时薪覆盖该周期已录入工时；另行启用的倍率和周奖励分别计算。
               </p>
             ) : null}
             {livePreview.weeklyBonusRule ? (

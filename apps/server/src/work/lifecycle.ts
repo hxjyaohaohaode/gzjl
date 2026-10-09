@@ -5,6 +5,7 @@ import type { FastifyInstance, preHandlerHookHandler } from "fastify";
 import { z } from "zod";
 import type { AnalyticsActor, AnalyticsService } from "../analytics/service.js";
 import { workContentScope, visibleWorkText, workReviewScope } from "./review-scope.js";
+import { nonEmptyPlanVersion } from "../payroll/plan-range.js";
 
 // A calendar month is an explicitly labelled fallback, never a fabricated pay period.
 function monthRange(timezone: string, at: Date) {
@@ -49,7 +50,7 @@ export class WorkLifecycleService {
     const ownFacts = and(eq(workSessions.organizationId, actor.organizationId), eq(workSessions.membershipId, actor.membershipId), eq(workSessions.recordKind, "fact"), isNull(workSessions.deletedAt), lt(workSessions.startAt, range.endsAt), gt(workSessions.endAt, range.startsAt));
     const [counts, plans, attention] = await Promise.all([
       this.db.select({ status: workSessions.approvalStatus, count: sql<number>`count(*)::integer` }).from(workSessions).where(ownFacts).groupBy(workSessions.approvalStatus),
-      this.db.select({ name: compensationPlans.name, version: compensationPlanVersions.version, effectiveFrom: compensationPlanVersions.effectiveFrom, effectiveTo: compensationPlanVersions.effectiveTo }).from(compensationPlans).innerJoin(compensationPlanVersions, eq(compensationPlanVersions.compensationPlanId, compensationPlans.id)).where(and(eq(compensationPlans.organizationId, actor.organizationId), eq(compensationPlans.membershipId, actor.membershipId), isNull(compensationPlans.archivedAt))).orderBy(desc(compensationPlanVersions.effectiveFrom)).limit(100),
+      this.db.select({ name: compensationPlans.name, version: compensationPlanVersions.version, effectiveFrom: compensationPlanVersions.effectiveFrom, effectiveTo: compensationPlanVersions.effectiveTo }).from(compensationPlans).innerJoin(compensationPlanVersions, eq(compensationPlanVersions.compensationPlanId, compensationPlans.id)).where(and(eq(compensationPlans.organizationId, actor.organizationId), eq(compensationPlans.membershipId, actor.membershipId), isNull(compensationPlans.archivedAt), nonEmptyPlanVersion())).orderBy(desc(compensationPlanVersions.effectiveFrom)).limit(100),
       this.db.select({ id: workSessions.id, content: workSessions.content, approvalStatus: workSessions.approvalStatus, version: workSessions.version }).from(workSessions).where(and(ownFacts, inArray(workSessions.approvalStatus, ["not_requested", "returned", "pending_review"]))).orderBy(asc(workSessions.startAt)).limit(100),
     ]);
     return { period: { id: period?.id ?? null, name: period?.name ?? "本月（尚未配置结算周期）", startsAt: range.startsAt, endsAt: range.endsAt, cutoffAt: period?.cutoffAt ?? null, timezone: organization?.timezone ?? "Asia/Shanghai" }, counts: Object.fromEntries(counts.map((c) => [c.status, c.count])), plans, activePlan: plans.find((p) => p.effectiveFrom <= now && (!p.effectiveTo || p.effectiveTo > now)) ?? null, attention, attentionTruncated: counts.filter((c) => ["not_requested", "returned", "pending_review"].includes(c.status)).reduce((sum, c) => sum + c.count, 0) > attention.length };

@@ -384,7 +384,7 @@ describe("employee payroll view and receipt acknowledgement", () => {
       })
       .returning();
     const run = await service.calculate(ownerActor, period!.id);
-    expect(run.calculationVersion).toBe("payroll-engine-v10-fixed-member-subsidies");
+    expect(run.calculationVersion).toBe("payroll-engine-v11-explicit-pay-period");
     const [item] = await db
       .select()
       .from(payrollItems)
