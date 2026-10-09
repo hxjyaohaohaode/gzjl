@@ -1,20 +1,16 @@
 import { payrollExportName } from "./export-name.js";
+import { payrollSummaryCsv } from "./export-summary.js";
+import { effectivePlanRange } from "./plan-range.js";
 import { capturePayrollWorkbook } from "./bundle.js";
 import { createHash } from "node:crypto";
-import { and, asc, desc, eq, gt, isNull, lt, ne, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, isNull, lt, ne, sql } from "drizzle-orm";
 import type { Database } from "@workbench/db";
 import { auditLogs, compensationPlans, compensationPlanVersions, organizationOwners, orgMemberships, payrollAdjustments, payrollItemComponents, payrollExportBatches, payrollExportProfiles, payrollItems, payrollRuns, payPeriods, users, workSessions, workSessionCorrections } from "@workbench/db/schema";
-import { roundMoney, addDecimalAmounts } from "@workbench/shared";
+import { addDecimalAmounts } from "@workbench/shared";
 import { lockPayrollInputs } from "./input-lock.js";
 import { PAYROLL_CALCULATION_VERSION, PayrollConflictError, PayrollNotFoundError, PayrollService, type PayrollActor } from "./service.js";
 
 const hash = (value: string) => createHash("sha256").update(value, "utf8").digest("hex");
-function escapeCsvCell(value: string, column: number) {
-  // Only engine-produced decimal columns may start with a numeric minus sign.
-  const numeric = [8, 9, 10, 11, 12, 15].includes(column) && /^-?\d+(?:\.\d+)?$/.test(value);
-  const safe = !numeric && /^[\s\uFEFF]*[=+@\-\t\r]/.test(value) ? `'${value}` : value;
-  return `"${safe.replaceAll('"', '""')}"`;
-}
 export class PayrollHandoffService {
   constructor(private readonly db: Database) {}
 
@@ -29,7 +25,7 @@ export class PayrollHandoffService {
       // silently replaces the selected calculation or locks source records.
       const current = await new PayrollService(tx as unknown as Database).calculate(actor, preview.period.id);
       if (current.id !== runId) throw new PayrollConflictError("计算后记录、方案或报销已变化，请点击“更新计算并查看”后重新下载。");
-      const name = `${payrollExportName(preview.period.name)}-薪资总览及工作明细-未确认-${runId.slice(0, 8)}.csv`;
+      const name = `${payrollExportName(preview.period.name)}-薪资总览及工作明细-未确认.csv`;
       const captured = await capturePayrollWorkbook(tx as unknown as Database, actor, preview, name, { report: true, blockers: preview.blockers });
       return { body: Buffer.from(captured.workbookBase64, "base64"), sha256: captured.workbookSha256, fileName: captured.workbookFileName };
     });
@@ -72,7 +68,7 @@ export class PayrollHandoffService {
       this.db.select({ item: payrollItems, displayName: users.displayName, externalId: payrollExportProfiles.externalId }).from(payrollItems).innerJoin(orgMemberships, eq(orgMemberships.id, payrollItems.membershipId)).innerJoin(users, eq(users.id, orgMemberships.userId)).leftJoin(payrollExportProfiles, eq(payrollExportProfiles.membershipId, payrollItems.membershipId)).where(eq(payrollItems.payrollRunId, runId)).orderBy(asc(payrollItems.membershipId)),
       this.db.select({ id: workSessions.id, membershipId: workSessions.membershipId, version: workSessions.version, approvalStatus: workSessions.approvalStatus, anomalyFlags: workSessions.anomalyFlags }).from(workSessions).where(and(eq(workSessions.organizationId, actor.organizationId), eq(workSessions.recordKind, "fact"), isNull(workSessions.deletedAt), lt(workSessions.startAt, record.period.endsAt), gt(workSessions.endAt, record.period.startsAt))).orderBy(asc(workSessions.id)),
       this.db.select({ id: orgMemberships.id, displayName: users.displayName, joinedAt: orgMemberships.joinedAt, createdAt: orgMemberships.createdAt }).from(orgMemberships).innerJoin(users, eq(users.id, orgMemberships.userId)).where(and(eq(orgMemberships.organizationId, actor.organizationId), eq(orgMemberships.status, "active"))).orderBy(asc(orgMemberships.id)),
-      this.db.select({ membershipId: compensationPlans.membershipId, startsAt: compensationPlanVersions.effectiveFrom, endsAt: compensationPlanVersions.effectiveTo }).from(compensationPlans).innerJoin(compensationPlanVersions, eq(compensationPlanVersions.compensationPlanId, compensationPlans.id)).where(and(eq(compensationPlans.organizationId, actor.organizationId), isNull(compensationPlans.archivedAt), lt(compensationPlanVersions.effectiveFrom, record.period.endsAt), or(isNull(compensationPlanVersions.effectiveTo), gt(compensationPlanVersions.effectiveTo, record.period.startsAt)))),
+      this.db.select({ membershipId: compensationPlans.membershipId, startsAt: compensationPlanVersions.effectiveFrom, endsAt: compensationPlanVersions.effectiveTo }).from(compensationPlans).innerJoin(compensationPlanVersions, eq(compensationPlanVersions.compensationPlanId, compensationPlans.id)).where(and(eq(compensationPlans.organizationId, actor.organizationId), isNull(compensationPlans.archivedAt), effectivePlanRange(record.period.startsAt, record.period.endsAt))),
       this.db.select().from(organizationOwners).where(eq(organizationOwners.organizationId, actor.organizationId)),
       this.db.select({ item: payrollItems, run: payrollRuns }).from(payrollItems).innerJoin(payrollRuns, eq(payrollRuns.id, payrollItems.payrollRunId)).where(and(eq(payrollRuns.payPeriodId, record.period.id), lt(payrollRuns.runNumber, record.run.runNumber))).orderBy(desc(payrollRuns.runNumber)),
       this.db.select({ id: workSessions.id, correctionId: workSessionCorrections.id }).from(workSessionCorrections).innerJoin(workSessions, eq(workSessions.id, workSessionCorrections.workSessionId)).where(and(eq(workSessions.organizationId, actor.organizationId), eq(workSessionCorrections.status, "pending"), isNull(workSessions.deletedAt), lt(workSessions.startAt, record.period.endsAt), gt(workSessions.endAt, record.period.startsAt))),
@@ -116,9 +112,8 @@ export class PayrollHandoffService {
       if (preview.batch) return preview.batch;
       if (preview.previewHash !== previewHash) throw new PayrollConflictError("预览后记录、金额或成员匹配信息已变化，请刷新预览并重新核对。");
       if (preview.blockers.length) throw new PayrollConflictError(preview.blockers.join(" "));
-      const header = ["成员唯一编号", "外部人员编号", "员工", "薪资周期", "周期开始（含）", "周期结束（不含）", "周期时区", "币种", "已批准工时（小时）", "待审核工时（小时）", "应计金额", "调整金额", "最终金额", "计薪方案版本", "批次唯一编号", "批次号", "计算规则版本", "发薪状态"];
-      const csv = `${[header, ...preview.rows.map((r) => [r.membershipId, r.externalId, r.displayName, preview.period.name, preview.period.startsAt.toISOString(), preview.period.endsAt.toISOString(), preview.period.timezone, r.currency, (r.approvedSeconds / 3600).toFixed(2), (r.pendingSeconds / 3600).toFixed(2), roundMoney(r.grossAmount), roundMoney(r.adjustmentAmount), roundMoney(r.finalAmount), r.planVersionId, runId, String(preview.run.runNumber), preview.run.calculationVersion, "本平台仅导出依据，发薪由外部平台办理"])].map((r) => r.map(escapeCsvCell).join(",")).join("\r\n")}\r\n`;
-      const fileName = `${payrollExportName(preview.period.name)}-薪资交接-批次${preview.run.runNumber}-${runId.slice(0, 8)}.csv`;
+      const csv = payrollSummaryCsv(preview);
+      const fileName = `${payrollExportName(preview.period.name)}-薪资单.csv`;
       const workbook = await capturePayrollWorkbook(tx as unknown as Database, actor, preview, fileName);
       await new PayrollService(tx as unknown as Database).settle(actor, runId);
       const [batch] = await tx.insert(payrollExportBatches).values({ organizationId: actor.organizationId, payrollRunId: runId, fileName, csv, sha256: hash(`\uFEFF${csv}`), ruleVersion: preview.run.calculationVersion, inputHash: preview.run.inputHash, previewHash, manifest: { ...workbook, rows: preview.rows, rowCount: preview.rows.length, byteLength: Buffer.byteLength(`\uFEFF${csv}`, "utf8"), draftsAcknowledged: preview.drafts.map((f) => f.id), anomaliesAcknowledged: preview.anomalies.map((f) => f.id), encoding: "utf-8-bom", dateSemantics: "[startsAt, endsAt)", externalPayment: true }, createdBy: actor.membershipId }).returning();

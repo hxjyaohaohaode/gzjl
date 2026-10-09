@@ -126,7 +126,7 @@ describe("full cycle facts, repair and immutable handoff", () => {
     const workbook = await f.handoff.workbook(f.owner, f.run.id);
     expect(createHash("sha256").update(workbook.body).digest("hex")).toBe(workbook.sha256);
     const book = new ExcelJS.Workbook(); await book.xlsx.load(workbook.body as unknown as Parameters<typeof book.xlsx.load>[0]);
-    expect(book.worksheets.map((sheet) => sheet.name)).toEqual(["薪资总览", "周期工作记录", "工资组成", "报销明细", "工作证据目录", "规则与来源"]);
+    expect(book.worksheets.map((sheet) => sheet.name)).toEqual(["薪资总览", "周期工作记录", "工资组成", "报销明细"]);
     expect(book.getWorksheet("周期工作记录")!.rowCount).toBe(3);
     expect(book.getWorksheet("工资组成")!.rowCount).toBeGreaterThan(2);
     expect(JSON.stringify(book.getWorksheet("工资组成")!.getSheetValues())).toContain("-1.00");
@@ -135,7 +135,9 @@ describe("full cycle facts, repair and immutable handoff", () => {
     const file = await f.payroll.financeExport(f.owner, f.run.id);
     expect(file.sha256).toBe(createHash("sha256").update(file.csv).digest("hex"));
     expect(file.csv).toContain('"-1.00"'); expect(file.csv).not.toContain("'-1.00");
-    for (const actor of f.actors.slice(1)) expect(file.csv).toContain(actor.membershipId);
+    for (const actor of f.actors.slice(1)) expect(file.csv).not.toContain(actor.membershipId);
+    expect(preview.rows.map((row) => row.membershipId).sort()).toEqual(f.actors.slice(1).map((actor) => actor.membershipId).sort());
+    expect(file.csv.split("\r\n").filter(Boolean)).toHaveLength(3);
     await f.db.update(users).set({ displayName: "重命名后不改变旧文件" }).where(eq(users.id, f.people[1]!.id));
     await f.handoff.profile(f.owner, f.actors[1]!.membershipId, "new-external-id");
     expect((await f.payroll.financeExport(f.owner, f.run.id)).csv).toBe(file.csv);
@@ -197,9 +199,10 @@ describe("full cycle facts, repair and immutable handoff", () => {
     const book = new ExcelJS.Workbook(); await book.xlsx.load(exported.body as unknown as Parameters<typeof book.xlsx.load>[0]);
     expect(JSON.stringify(book.getWorksheet("薪资总览")!.getSheetValues())).toContain("缺方案不能写零元");
     const last = book.getWorksheet("薪资总览")!.lastRow!;
-    expect(last.getCell(18).value).toBeNull(); expect(last.getCell(22).value).toBe("缺计薪方案 · 无法计算");
+    expect(last.getCell(12).value).toBe(""); expect(last.getCell(13).value).toBe("缺计薪方案");
     expect(JSON.stringify(book.getWorksheet("周期工作记录")!.getSheetValues())).toContain("待审核");
-    expect(JSON.stringify(book.getWorksheet("规则与来源")!.getSheetValues())).toContain("未确认统计表");
+    expect(book.getWorksheet("规则与来源")).toBeUndefined();
+    expect(JSON.stringify(book.getWorksheet("薪资总览")!.getSheetValues())).toContain("未确认");
     expect(await f.db.select().from(payrollExportBatches)).toHaveLength(0);
     expect((await f.db.select().from(workSessions)).some((r) => r.approvalStatus === "locked")).toBe(false);
     const count = (await f.db.select().from(payrollRuns)).length;

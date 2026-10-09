@@ -6,7 +6,7 @@ export default defineConfig({
   testDir: "./tests/live", workers: 1, retries: 0, timeout: 120_000,
   expect: { timeout: 10_000 },
   reporter: "list", outputDir: "test-results/live",
-  use: { ...chromium, baseURL: "http://127.0.0.1:3100", timezoneId: "Asia/Shanghai", trace: "retain-on-failure", screenshot: "only-on-failure" },
+  use: { ...chromium, baseURL: "http://127.0.0.1:3100", timezoneId: "Asia/Shanghai", actionTimeout: 15_000, navigationTimeout: 30_000, trace: "retain-on-failure", screenshot: "only-on-failure" },
   projects: [
     { name: "desktop-1440", use: { viewport: { width: 1440, height: 900 } } },
     { name: "desktop-1920", use: { viewport: { width: 1920, height: 1080 } } },

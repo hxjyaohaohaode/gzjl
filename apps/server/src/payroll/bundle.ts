@@ -1,10 +1,12 @@
 import ExcelJS from "exceljs";
-import { and, asc, eq, gt, isNull, lt, ne } from "drizzle-orm";
+import { and, asc, eq, gt, inArray, isNull, lt } from "drizzle-orm";
 import type { Database } from "@workbench/db";
-import { attachments, attachmentLinks, orgMemberships, payrollItems, payrollItemComponents, projectNodes, projects, reimbursementRequests, users, workSessions } from "@workbench/db/schema";
+import { workBreaks, orgMemberships, payrollItems, payrollItemComponents, projectNodes, projects, reimbursementRequests, users, workSessions } from "@workbench/db/schema";
 import { PayrollConflictError, type PayrollActor } from "./service.js";
 import { createHash } from "node:crypto";
-import { roundMoney, addDecimalAmounts } from "@workbench/shared";
+import { roundMoney, addDecimalAmounts, calculateWorkDuration } from "@workbench/shared";
+
+import { payrollLocalTime, payrollSummarySheet } from "./export-summary.js";
 
 type BundleRow = Array<string | number | null>;
 interface BundleSheet { name: string; headers: string[]; rows: BundleRow[] }
@@ -57,11 +59,10 @@ export async function renderPayrollWorkbook(sheets: BundleSheet[], createdAt = n
 }
 
 export async function capturePayrollWorkbook(db: Database, actor: PayrollActor, preview: { period: { id: string; name: string; startsAt: Date; endsAt: Date; timezone: string }; run: { id: string; runNumber: number; calculationVersion: string; inputHash: string }; rows: Array<{ membershipId: string; displayName: string; externalId: string; currency: string; approvedSeconds: number; pendingSeconds: number; grossAmount: string; adjustmentAmount: string; finalAmount: string; planVersionId: string; estimate?: boolean; needsReview?: boolean; amounts?: { wages: string; bonus: string; subsidies: string; reimbursements: string; other: string } }>; missingPlans?: Array<{ id: string; displayName: string }> }, csvName: string, options?: { report: boolean; blockers: string[] }) {
-  const [components, reimbursements, records, evidence] = await Promise.all([
+  const [components, reimbursements, records] = await Promise.all([
     db.select({ memberId: payrollItems.membershipId, currency: payrollItems.currency, component: payrollItemComponents }).from(payrollItems).innerJoin(payrollItemComponents, eq(payrollItemComponents.payrollItemId, payrollItems.id)).where(eq(payrollItems.payrollRunId, preview.run.id)).orderBy(asc(payrollItems.membershipId), asc(payrollItemComponents.id)),
     db.select().from(reimbursementRequests).where(and(eq(reimbursementRequests.organizationId, actor.organizationId), eq(reimbursementRequests.payPeriodId, preview.period.id))).orderBy(asc(reimbursementRequests.membershipId), asc(reimbursementRequests.id)),
     db.select({ session: workSessions, name: users.displayName, project: projects.name, node: projectNodes.title }).from(workSessions).innerJoin(orgMemberships, eq(orgMemberships.id, workSessions.membershipId)).innerJoin(users, eq(users.id, orgMemberships.userId)).leftJoin(projectNodes, eq(projectNodes.id, workSessions.primaryProjectNodeId)).leftJoin(projects, eq(projects.id, projectNodes.projectId)).where(and(eq(workSessions.organizationId, actor.organizationId), eq(workSessions.recordKind, "fact"), isNull(workSessions.deletedAt), lt(workSessions.startAt, preview.period.endsAt), gt(workSessions.endAt, preview.period.startsAt))).orderBy(asc(workSessions.membershipId), asc(workSessions.startAt), asc(workSessions.id)),
-    db.select({ memberId: workSessions.membershipId, workId: workSessions.id, evidence: attachments }).from(workSessions).innerJoin(attachmentLinks, and(eq(attachmentLinks.entityId, workSessions.id), eq(attachmentLinks.entityType, "work_session"))).innerJoin(attachments, eq(attachments.id, attachmentLinks.attachmentId)).where(and(eq(workSessions.organizationId, actor.organizationId), eq(attachments.organizationId, actor.organizationId), isNull(workSessions.deletedAt), isNull(attachments.deletedAt), ne(attachments.visibility, "private"), lt(workSessions.startAt, preview.period.endsAt), gt(workSessions.endAt, preview.period.startsAt))).orderBy(asc(workSessions.id), asc(attachments.id)),
   ]);
   const names = new Map(preview.rows.map((r) => [r.membershipId, r.displayName]));
   const totals = new Map<string, { wages: string; bonus: string; subsidies: string; reimbursements: string }>();
@@ -75,16 +76,32 @@ export async function capturePayrollWorkbook(db: Database, actor: PayrollActor, 
     const total = totals.get(request.membershipId);
     if (total && request.status === "approved") total.reimbursements = addDecimalAmounts(total.reimbursements, roundMoney(request.amount));
   }
-  const localDateTime = (at: Date) => new Intl.DateTimeFormat("zh-CN", { timeZone: preview.period.timezone, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" }).format(at);
-  const sheets: BundleSheet[] = [
-    { name: "薪资总览", headers: ["成员唯一编号", "外部人员编号", "员工", "薪资周期", "周期开始（含，组织时区）", "周期结束（不含，组织时区）", "周期时区", "币种", "已批准工时（小时）", "待审工时（小时）", "工作工资", "奖励工资", "补贴", "应计工资及补贴小计", "已批准报销", "其他调整（含扣减及更正）", "报销及其他调整小计", "最终金额", "方案版本", "批次唯一编号", "规则版本", "金额状态"], rows: [...preview.rows.map((r) => { const t = r.amounts ?? totals.get(r.membershipId)!; return [r.membershipId, r.externalId, r.displayName, preview.period.name, localDateTime(preview.period.startsAt), localDateTime(preview.period.endsAt), preview.period.timezone, r.currency, r.approvedSeconds / 3600, r.pendingSeconds / 3600, roundMoney(t.wages), roundMoney(t.bonus), roundMoney(t.subsidies), roundMoney(r.grossAmount), roundMoney(t.reimbursements), roundMoney(addDecimalAmounts(r.adjustmentAmount, `-${t.reimbursements}`)), roundMoney(r.adjustmentAmount), roundMoney(r.finalAmount), r.planVersionId, preview.run.id, preview.run.calculationVersion, options?.report ? r.needsReview ? "待复核 · 未确认" : r.estimate ? "含待审预估 · 未确认" : "计算值 · 未确认" : "已确认交接依据"]; }), ...(preview.missingPlans ?? []).map((m) => [m.id, null, m.displayName, preview.period.name, localDateTime(preview.period.startsAt), localDateTime(preview.period.endsAt), preview.period.timezone, ...Array<string | null>(11).fill(null), null, preview.run.id, preview.run.calculationVersion, "缺计薪方案 · 无法计算"])] },
-    { name: "周期工作记录", headers: ["成员唯一编号", "员工", "记录编号", "版本", "开始时间（UTC）", "结束时间（UTC）", "记录时区", "整条净工时（秒）", "审批状态", "提交状态", "项目", "节点", "工作内容", "工作结果", "阻塞", "下一步", "异常说明", "来源入口"], rows: records.map(({ session: r, name, project, node }) => [r.membershipId, name, r.id, r.version, r.startAt.toISOString(), r.endAt.toISOString(), r.timezone, r.netSeconds, states[r.approvalStatus] ?? r.approvalStatus, r.submissionStatus, project, node, r.content, r.result, r.blockers, r.nextStep, JSON.stringify(r.anomalyFlags), `/work?record=${r.id}&version=${r.version}`]) },
-    { name: "工资组成", headers: ["成员唯一编号", "员工", "币种", "组成类型", "明细名称", "数量", "单位", "单价", "倍率", "金额（元，两位小数）", "来源类型", "来源编号", "来源版本", "完整计算追踪"], rows: components.map(({ memberId, currency, component: c }) => [memberId, names.get(memberId) ?? memberId, currency, c.type, c.label, c.quantity, c.unit, c.rate ? roundMoney(c.rate) : null, c.multiplier, roundMoney(c.amount), c.sourceEntityType, c.sourceEntityId, c.sourceVersion, JSON.stringify(c.calculationTrace)]) },
-    { name: "报销明细", headers: ["成员唯一编号", "员工", "报销单编号", "版本", "费用日期", "标题", "费用说明", "币种", "金额", "审批状态", "审批说明", "提交时间", "审批时间"], rows: reimbursements.map((r) => [r.membershipId, names.get(r.membershipId) ?? r.membershipId, r.id, r.version, r.expenseDate, r.title, r.description, r.currency, roundMoney(r.amount), states[r.status] ?? r.status, r.reviewNote, r.submittedAt?.toISOString() ?? null, r.reviewedAt?.toISOString() ?? null]) },
-    { name: "工作证据目录", headers: ["成员唯一编号", "员工", "工作记录编号", "证据编号", "证据版本", "类型", "名称", "核验状态", "字节数", "文件 SHA-256", "文字证据", "外部链接", "备注"], rows: evidence.map(({ memberId, workId, evidence: e }) => [memberId, names.get(memberId) ?? memberId, workId, e.id, e.version, e.kind, e.originalName, e.status, e.sizeBytes, e.sha256, e.textContent, e.externalUrl, e.note]) },
-    { name: "规则与来源", headers: ["事项", "内容"], rows: [["文件性质", options?.report ? "未确认统计表：用于老板核对，未锁定周期，含预估的金额不代表最终应付；正式交接另行确认。" : "已确认的正式薪资交接依据"], ["生成时间（UTC）", new Date().toISOString()], ...(options?.blockers ?? []).map((b) => ["正式交接待处理事项", b]), ["周期", preview.period.name], ["周期开始（含）", preview.period.startsAt.toISOString()], ["周期结束（不含）", preview.period.endsAt.toISOString()], ["周期时区", preview.period.timezone], ["批次唯一编号", preview.run.id], ["批次号", preview.run.runNumber], ["计算规则版本", preview.run.calculationVersion], ["计算输入 SHA-256", preview.run.inputHash], ["工时解释", "周期工作记录保留与周期相交的完整事实及全部审批状态。整条净工时不能直接跨周期相加；已批准计薪量和金额以薪资总览及工资组成中的计算来源为准。"], ["金额解释", "金额采用十进制四舍五入保留两位小数，并以文字保存，避免 Excel 浮点改变大额金额。工作工资、奖励与补贴分别汇总后舍入，分配尾差回明细；报销及调整按单据舍入。组成、分类及成员总额可相加核对。工资组成包含工资、补贴、奖励、扣减、更正及报销调整；汇总的调整栏包含报销，不重复相加。"], ["付款责任", "本平台提供薪资依据并保留工作记录，实际付款在外部平台办理。"], ["人员匹配", "同名员工使用成员唯一编号与确认时的外部人员编号匹配。"], ["长文本", "超过 Excel 单元格上限的文字分段保存在长文本续页，按原表、行号、字段和序号完整拼接。"]] },
+  const localDateTime = (at: Date) => payrollLocalTime(at, preview.period.timezone);
+  const breaks = records.length ? await db.select().from(workBreaks)
+    .where(inArray(workBreaks.workSessionId, records.map(({ session }) => session.id))) : [];
+  const units: Record<string, string> = { second: "小时", hour: "小时", day: "天", month: "月", period: "周期", period_second: "周期", project: "项" };
+  const summary = payrollSummarySheet({ ...preview, rows: preview.rows.map((row) => {
+    const amount = row.amounts ?? totals.get(row.membershipId)!;
+    return { ...row, amounts: { ...amount, other: roundMoney(addDecimalAmounts(row.adjustmentAmount, `-${amount.reimbursements}`)) } };
+  }) }, options?.report);
+  const sheets: BundleSheet[] = [summary,
+    { name: "周期工作记录", headers: ["员工", "开始时间", "结束时间", "本期净工时（小时）", "审批状态", "项目", "工作内容", "工作结果", "阻塞", "下一步"],
+      rows: records.map(({ session, name, project }) => {
+        const startAt = new Date(Math.max(session.startAt.getTime(), preview.period.startsAt.getTime()));
+        const endAt = new Date(Math.min(session.endAt.getTime(), preview.period.endsAt.getTime()));
+        const clippedBreaks = breaks.filter((entry) => entry.workSessionId === session.id && entry.startAt < endAt && entry.endAt > startAt)
+          .map((entry) => ({ startAt: new Date(Math.max(entry.startAt.getTime(), startAt.getTime())), endAt: new Date(Math.min(entry.endAt.getTime(), endAt.getTime())) }));
+        const duration = calculateWorkDuration({ startAt, endAt }, clippedBreaks);
+        return [name, localDateTime(startAt), localDateTime(endAt), duration.netSeconds / 3600, states[session.approvalStatus] ?? session.approvalStatus,
+          project, session.content, session.result, session.blockers, session.nextStep];
+      }) },
+    { name: "工资组成", headers: ["员工", "明细名称", "数量", "单位", "单价", "倍率", "金额"], rows: components.map(({ memberId, component: c }) =>
+      [names.get(memberId) ?? "未命名成员", c.label, c.unit === "second" ? Number(c.quantity ?? 0) / 3600 : c.unit === "period_second" ? null : c.quantity,
+        units[c.unit ?? ""] ?? "", c.rate ? roundMoney(c.rate) : null, c.multiplier, roundMoney(c.amount)]) },
+    { name: "报销明细", headers: ["员工", "费用日期", "报销项目", "费用说明", "金额", "审批状态", "审批说明"], rows: reimbursements.map((r) =>
+      [names.get(r.membershipId) ?? "未命名成员", r.expenseDate, r.title, r.description, roundMoney(r.amount), states[r.status] ?? r.status, r.reviewNote]) },
   ];
   const body = await renderPayrollWorkbook(sheets, new Date(), options?.report);
   if (body.byteLength > 32 * 1024 * 1024) throw new PayrollConflictError("完整薪资工作簿超过 32 MiB，请缩短结算周期后重新计算；未保存不完整文件，也未锁定本批次。");
-  return { workbookBase64: body.toString("base64"), workbookSha256: createHash("sha256").update(body).digest("hex"), workbookFileName: csvName.replace(/\.csv$/, "-完整工作单.xlsx"), workbookBytes: body.byteLength, worksheetOrder: sheets.map((sheet) => sheet.name), workRowCount: records.length, componentRowCount: components.length, reimbursementRowCount: reimbursements.length, evidenceRowCount: evidence.length };
+  return { workbookBase64: body.toString("base64"), workbookSha256: createHash("sha256").update(body).digest("hex"), workbookFileName: csvName.replace(/\.csv$/, ".xlsx"), workbookBytes: body.byteLength, worksheetOrder: sheets.map((sheet) => sheet.name), workRowCount: records.length, componentRowCount: components.length, reimbursementRowCount: reimbursements.length, evidenceRowCount: 0 };
 }

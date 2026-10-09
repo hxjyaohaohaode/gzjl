@@ -45,9 +45,13 @@ const planSchema = z.object({
     distribution: z.enum(["daily", "period_end", "prorated"]).default("period_end"),
   })).max(20, "每份薪资方案最多配置 20 项补贴。").default([]),
   effectiveFrom: z.iso.datetime({ offset: true }).transform((value) => new Date(value)),
+  effectiveTo: z.iso.datetime({ offset: true }).transform((value) => new Date(value)).optional(),
   pendingReviewCountsInEstimate: z.boolean().default(true),
   rules: z.array(rateRuleSchema).max(32).default([]),
 }).superRefine((input, context) => {
+  if (input.effectiveTo && input.effectiveTo <= input.effectiveFrom) {
+    context.addIssue({ code: "custom", path: ["effectiveTo"], message: "计薪范围结束时间必须晚于开始时间。" });
+  }
   if (input.type === "hybrid" && input.fixedAmount === undefined) {
     context.addIssue({ code: "custom", path: ["fixedAmount"], message: "混合计薪必须填写固定部分金额。" });
   }

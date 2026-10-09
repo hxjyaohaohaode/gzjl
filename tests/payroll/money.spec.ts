@@ -73,9 +73,9 @@ test("uniform 168.19 subsidies survive different version dates and reconcile two
   const bytes = await csv.body(); expect(createHash("sha256").update(bytes).digest("hex")).toBe(batch.batch.sha256);
   const csvRows = (await csv.text()).trim().split("\r\n").slice(1).map((line) => line.match(/"(?:[^"]|"")*"/g)!);
   expect(csvRows).toHaveLength(2);
-  expect(csvRows.map((row) => row[0]!.slice(1, -1)).sort()).toEqual([...memberIds].sort());
+  expect(csvRows.map((row) => row[0]!.slice(1, -1)).sort()).toEqual(["统一补贴核对成员 1", "统一补贴核对成员 2"]);
   for (const row of csvRows) {
-    expect(row[10]).toBe('"3035.11"'); expect(row[11]).toBe('"0.00"'); expect(row[12]).toBe('"3035.11"');
+    expect(row[6]).toBe('"2866.92"'); expect(row[8]).toBe('"168.19"'); expect(row[11]).toBe('"3035.11"');
   }
   expect(await (await page.request.get(`/api/payroll-runs/${run.id}/finance-export.csv`)).body()).toEqual(bytes);
   expect(errors).toEqual([]);
@@ -131,8 +131,8 @@ test("independent identical subsidies stay 168.19 in a boss-defined cycle and on
   const book = new ExcelJS.Workbook(); await book.xlsx.readFile((await file.path())!);
   expect(book.worksheets.slice(0, 2).map((sheet) => sheet.name)).toEqual(["薪资总览", "周期工作记录"]);
   const summary = book.worksheets[0]!; let verified = 0;
-  summary.eachRow((row, index) => { if (index > 1 && ids.includes(String(row.getCell(1).value))) {
-    verified++; expect(row.getCell(13).value).toBe("168.19"); expect(row.getCell(18).value).toBe("168.19");
+  summary.eachRow((row, index) => { if (index > 1 && String(row.getCell(1).value).startsWith("独立补贴 ")) {
+    verified++; expect(row.getCell(9).value).toBe("168.19"); expect(row.getCell(12).value).toBe("168.19");
   } }); expect(verified).toBe(4);
   await call(page.request, "POST", `/api/payroll-runs/${run.id}/handoff`, { previewHash: preview.previewHash, identityMatchingConfirmed: true, exceptionsAcknowledged: true });
   const confirmed = await call(page.request, "GET", `/api/payroll-runs/${run.id}/handoff`);

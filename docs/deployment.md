@@ -2,6 +2,14 @@
 
 仓库根目录的 `render.yaml` 会一次创建 PostgreSQL、Web API/PWA 和 Worker。Web 在启动前自动执行 `pnpm db:migrate`，并以 `../web/dist`（相对 `apps/server`）托管已构建的 PWA；健康检查为 `/healthz`。配置遵循 [Render Blueprint specification](https://render.com/docs/blueprint-spec)。
 
+## 自动合并与持续部署
+
+`main` 是唯一长期保留的远端分支。仓库开启自动合并和合并后删除来源分支，并将 GitHub Actions 的 `verify` 设置为 main 必须通过的检查。仓库所有者在本仓库提交、目标为 main 的非草稿 PR，通过完整 CI 后由 `auto-merge.yml` 合并；它只使用通过检查的确切提交，不执行 PR 中的代码，也不绕过分支保护。外部来源、草稿和检查后又被更新的提交不会自动合并。
+
+CI 先完成规范、类型、单元与集成测试并构建一次，再由独立任务执行三组浏览器分片及五组真实 API/数据库验收。浏览器任务使用与依赖版本一致的官方 Playwright 镜像，省去每次运行时安装系统依赖；每台机器仍保留单个浏览器工作进程。最终 `verify` 只有在所有任务成功时才通过。
+
+GitHub Actions 使用内置令牌合并时不会触发 push 工作流，因此自动合并流程显式触发 main 的 CI。main 检查全部通过后，Render 的 Web 与 Worker 按 `autoDeployTrigger: checksPass` 自动部署；Web 先执行迁移，并通过健康检查后上线。新版本 Playwright 必须同步修改 `package.json`、锁文件及 CI 镜像版本。
+
 ## 第一次创建只需四步
 
 1. 将仓库的 `main` 分支连接到 Render，选择 **New + → Blueprint**，确认根目录的 `render.yaml`。

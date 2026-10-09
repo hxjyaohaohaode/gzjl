@@ -47,6 +47,27 @@ test("owner personal payroll never mounts management, reimbursement or work poli
   await expect(page.getByRole("navigation", { name: "个人薪资导航" }).getByRole("link", { name: "本月薪资" })).toHaveAttribute("aria-current", "page");
 });
 
+test("salary settings apply to a complete selected month or the exact existing period", async ({ page }, testInfo) => {
+  await workspace(page);
+  let saved: Record<string, unknown> | undefined;
+  await page.route(`**/api/payroll/members/${colleagueId}/plan`, (route) => {
+    saved = route.request().postDataJSON();
+    return route.fulfill({ json: { result: { version: { effectiveFrom: saved!.effectiveFrom } } } });
+  });
+  await page.goto(`/payroll-management/plans?member=${colleagueId}&month=2026-09`);
+  await expect(page.getByLabel("应用范围", { exact: true })).toHaveValue("period");
+  await expect(page.getByLabel("计薪开始（含）", { exact: true })).toHaveValue("2026-09-01T00:00");
+  await expect(page.getByLabel("计薪结束（不含）", { exact: true })).toHaveValue("2026-10-01T00:00");
+  await page.getByLabel("计薪月份", { exact: true }).fill("2028-02");
+  await expect(page.getByLabel("计薪结束（不含）", { exact: true })).toHaveValue("2028-03-01T00:00");
+  await page.getByLabel("使用已有结算周期", { exact: true }).selectOption(period.id);
+  await page.getByLabel("基础时薪", { exact: true }).fill("80.00");
+  await page.getByRole("button", { name: "保存薪资方案新版本", exact: true }).click();
+  await expect.poll(() => saved).toMatchObject({ baseAmount: "80.00", effectiveFrom: "2026-08-31T16:00:00.000Z", effectiveTo: "2026-09-30T16:00:00.000Z", rules: [] });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath("complete-pay-period.png"), fullPage: true });
+});
+
 test("management navigation separates overview, plans, periods and settings on reload and back", async ({ page }, testInfo) => {
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));

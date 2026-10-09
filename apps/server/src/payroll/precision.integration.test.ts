@@ -22,9 +22,12 @@ import {
   workBreaks,
   workSessions,
 } from "@workbench/db/schema";
-import { PayrollService } from "./service.js";
+import { PAYROLL_CALCULATION_VERSION, PayrollService } from "./service.js";
 import { WorkSessionService } from "../work/service.js";
 import { TimerService } from "../timer/service.js";
+import { PayrollHandoffService } from "./handoff.js";
+import { capturePayrollWorkbook } from "./bundle.js";
+import ExcelJS from "exceljs";
 
 const clients: PGlite[] = [];
 afterEach(async () => {
@@ -225,7 +228,7 @@ it.each(["current", "legacy"] as const)("counts real elapsed work around fractio
   expect(unfiltered[0]).toMatchObject({ id: session.id, netSeconds: stored.netSeconds, periodNetSeconds: 9 });
   expect(ranged[0]).toMatchObject({ id: session.id, netSeconds: stored.netSeconds, periodNetSeconds: 9 });
   const { run, item, components } = await calculate();
-  expect(run.calculationVersion).toBe("payroll-engine-v10-fixed-member-subsidies");
+  expect(run.calculationVersion).toBe(PAYROLL_CALCULATION_VERSION);
   expect(item).toMatchObject({ approvedSeconds: 9, pendingSeconds: 0, grossAmount: "9.000000", estimate: false });
   expect(components.reduce((sum, component) => sum + Number(component.quantity), 0)).toBe(9);
   const [unchanged] = await db.select().from(workSessions).where(eq(workSessions.id, session.id));
@@ -394,4 +397,126 @@ it("locks the paid source after member-wide fractional work adds up to one whole
     expect(settledFacts.find((session) => session.id === sourceId)).toMatchObject({ approvalStatus: "locked", version: 2 });
     expect(settledFacts.find((session) => session.id === sourceId)?.lockedAt).toBeInstanceOf(Date);
   }
+});
+
+
+it("replaces the whole chosen month at the configured hourly price and preserves prices outside it", async () => {
+  vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(new Date("2026-09-23T12:00:00Z"));
+  const { db, versions, employee, service, actor, period, work, calculate } = await fixture({ versioned: true });
+  await db.update(compensationPlanVersions).set({ effectiveFrom: new Date("2026-08-01Z") }).where(eq(compensationPlanVersions.id, versions[0]!.id));
+  await work("08:00:00", "09:00:00"); await work("16:00:00", "17:00:00");
+  for (const startAt of [new Date("2026-08-31T12:00Z"), new Date("2026-10-01T12:00Z")]) {
+    await db.insert(workSessions).values({ organizationId: actor.organizationId, membershipId: employee.membershipId,
+      startAt, endAt: new Date(startAt.getTime() + 3600000), timezone: "UTC", source: "manual", grossSeconds: 3600, netSeconds: 3600,
+      content: "其他月份", submissionStatus: "submitted", approvalStatus: "approved" });
+  }
+  const oldRun = await calculate();
+  const input = { membershipId: employee.membershipId, name: "本月统一时薪", type: "hourly" as const, currency: "CNY", baseAmount: "80.00",
+    effectiveFrom: period.startsAt, effectiveTo: period.endsAt, pendingReviewCountsInEstimate: true, rules: [] };
+  await service.configurePlan(actor, input);
+  await expect(service.settle(actor, oldRun.run.id)).rejects.toThrow();
+  const updated = await calculate();
+  expect(updated.item).toMatchObject({ approvedSeconds: 7200, grossAmount: "160.000000" });
+  expect(updated.components.every((component) => component.rate === "80.000000")).toBe(true);
+  expect((await service.listOwn(employee)).livePreview).toMatchObject({ approvedSeconds: 7200, estimatedAmount: "160.000000", baseAmount: "80.000000" });
+  // Editing the same period a second time must replace, rather than add, wages.
+  await service.configurePlan(actor, { ...input, baseAmount: "85.00" });
+  expect((await calculate()).item.grossAmount).toBe("170.000000");
+  for (const [start, end, amount] of [["2026-08-01Z", "2026-09-01Z", "100.000000"], ["2026-10-01Z", "2026-11-01Z", "200.000000"]]) {
+    const [outside] = await db.insert(payPeriods).values({ organizationId: actor.organizationId, name: "其他月份", timezone: "UTC",
+      startsAt: new Date(start!), endsAt: new Date(end!), cutoffAt: new Date(end!) }).returning();
+    const run = await service.calculate(actor, outside!.id);
+    const [item] = await db.select().from(payrollItems).where(eq(payrollItems.payrollRunId, run.id));
+    expect(item?.grossAmount).toBe(amount);
+  }
+  await service.settle(actor, (await calculate()).run.id);
+  await expect(service.configurePlan(actor, { ...input, baseAmount: "90" })).rejects.toThrow("已结算或锁定");
+});
+
+it.each(["monthly", "fixed_period", "hybrid"] as const)("pays the complete configured %s amount even when saved late in the month", async (type) => {
+  vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(new Date("2026-09-23T12:00:00Z"));
+  const { employee, service, actor, period, work, calculate } = await fixture();
+  await work("08:00:00", "10:00:00");
+  await service.configurePlan(actor, { membershipId: employee.membershipId, name: "完整范围固定工资", type, currency: "CNY",
+    baseAmount: type === "hybrid" ? "80.00" : "3000.00", fixedAmount: "3000.00", effectiveFrom: period.startsAt, effectiveTo: period.endsAt,
+    pendingReviewCountsInEstimate: true, rules: [] });
+  const amount = type === "hybrid" ? "3160.000000" : "3000.000000";
+  expect((await calculate()).item.grossAmount).toBe(amount);
+  expect((await service.listOwn(employee)).livePreview?.estimatedAmount).toBe(amount);
+});
+
+it("splits a configured cross-month fixed period across calendar months without paying the full amount twice", async () => {
+  vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(new Date("2026-09-23T12:00:00Z"));
+  const { db, versions, employee, service, actor, period, calculate } = await fixture();
+  await db.update(compensationPlanVersions).set({ baseAmount: "0" }).where(eq(compensationPlanVersions.id, versions[0]!.id));
+  await service.configurePlan(actor, { membershipId: employee.membershipId, name: "跨月完整三十天", type: "fixed_period", currency: "CNY",
+    baseAmount: "3000.00", effectiveFrom: new Date("2026-09-10Z"), effectiveTo: new Date("2026-10-10Z"), pendingReviewCountsInEstimate: true, rules: [] });
+  expect((await calculate()).item.grossAmount).toBe("2100.000000");
+  expect((await service.listOwn(employee)).livePreview?.estimatedAmount).toBe("2100.000000");
+  vi.setSystemTime(new Date("2026-10-10T12:00:00Z"));
+  expect((await service.listOwn(employee)).livePreview?.estimatedAmount).toBe("900.000000");
+  await db.update(payPeriods).set({ startsAt: new Date("2026-09-10Z"), endsAt: new Date("2026-10-10Z") }).where(eq(payPeriods.id, period.id));
+  expect((await calculate()).item.grossAmount).toBe("3000.000000");
+});
+
+it("keeps a month's work and breaks strictly inside organization-local boundaries", async () => {
+  vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(new Date("2026-09-23T12:00:00Z"));
+  const { db, employee, service, actor, period, calculate } = await fixture();
+  const startsAt = new Date("2026-08-31T16:00Z"), endsAt = new Date("2026-09-30T16:00Z");
+  await db.update(organizations).set({ timezone: "Asia/Shanghai" }).where(eq(organizations.id, actor.organizationId));
+  await db.update(payPeriods).set({ startsAt, endsAt, timezone: "Asia/Shanghai" }).where(eq(payPeriods.id, period.id));
+  await service.configurePlan(actor, { membershipId: employee.membershipId, name: "当月时薪", type: "hourly", currency: "CNY", baseAmount: "80",
+    effectiveFrom: startsAt, effectiveTo: endsAt, pendingReviewCountsInEstimate: true, rules: [] });
+  const [crossing] = await db.insert(workSessions).values({ organizationId: actor.organizationId, membershipId: employee.membershipId,
+    startAt: new Date("2026-08-31T15:00Z"), endAt: new Date("2026-08-31T17:00Z"), timezone: "Asia/Shanghai", source: "manual", grossSeconds: 7200, breakSeconds: 3600, netSeconds: 3600,
+    content: "跨月含休息", submissionStatus: "submitted", approvalStatus: "approved" }).returning();
+  await db.insert(workBreaks).values({ workSessionId: crossing!.id, startAt: new Date("2026-08-31T15:30Z"), endAt: new Date("2026-08-31T16:30Z") });
+  await db.insert(workSessions).values({ organizationId: actor.organizationId, membershipId: employee.membershipId,
+    startAt: new Date("2026-09-30T15:30Z"), endAt: new Date("2026-09-30T16:30Z"), timezone: "Asia/Shanghai", source: "manual", grossSeconds: 3600, netSeconds: 3600,
+    content: "跨至下月", submissionStatus: "submitted", approvalStatus: "approved" });
+  const { run, item } = await calculate();
+  expect(item).toMatchObject({ approvedSeconds: 3600, grossAmount: "80.000000" });
+  expect((await service.listOwn(employee)).livePreview).toMatchObject({ approvedSeconds: 3600, estimatedAmount: "80.000000" });
+  const preview = await new PayrollHandoffService(db).preview(actor, run.id);
+  const workbook = await capturePayrollWorkbook(db, actor, preview, "九月.csv", { report: true, blockers: preview.blockers });
+  const book = new ExcelJS.Workbook(); await book.xlsx.load(Buffer.from(workbook.workbookBase64, "base64") as unknown as Parameters<typeof book.xlsx.load>[0]);
+  for (const sheet of book.worksheets) expect(JSON.stringify(sheet.getRow(1).values)).not.toMatch(/编号|时区|币种|版本|追踪|SHA/);
+  const records = book.getWorksheet("周期工作记录")!;
+  expect(records.rowCount).toBe(3);
+  expect(records.getCell("B2").value).toBe("2026/09/01 00:00:00");
+  expect(records.getCell("C3").value).toBe("2026/10/01 00:00:00");
+  expect(records.getCell("D2").value).toBe(0.5); expect(records.getCell("D3").value).toBe(0.5);
+});
+
+it("keeps fixed and prorated subsidies attached to the configured cycle in monthly previews", async () => {
+  vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(new Date("2026-09-23T12:00:00Z"));
+  const { employee, service, actor } = await fixture();
+  const input = { membershipId: employee.membershipId, name: "月中结束的完整周期", type: "hourly" as const, currency: "CNY", baseAmount: "80",
+    effectiveFrom: new Date("2026-09-10Z"), effectiveTo: new Date("2026-09-25Z"), pendingReviewCountsInEstimate: true, rules: [],
+    subsidies: [{ name: "固定交通补贴", amount: "168.19", distribution: "period_end" as const }] };
+  await service.configurePlan(actor, input);
+  const september = (await service.listOwn(employee)).livePreview!;
+  expect(september.subsidyTotal).toBe("168.190000");
+  expect(september.salaryTimeline.find((day) => day.date === "2026-09-24")?.approvedAmount).toBe("168.190000");
+  await service.configurePlan(actor, { ...input, effectiveTo: new Date("2026-10-10Z"),
+    subsidies: [{ name: "跨月交通补贴", amount: "300", distribution: "prorated" }] });
+  expect((await service.listOwn(employee)).livePreview!.subsidyTotal).toBe("210.000000");
+  vi.setSystemTime(new Date("2026-10-10T12:00:00Z"));
+  expect((await service.listOwn(employee)).livePreview!.subsidyTotal).toBe("90.000000");
+});
+
+it("does not use work before an explicitly configured period to trigger its weekly reward", async () => {
+  vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(new Date("2026-09-23T12:00:00Z"));
+  const { db, employee, service, actor, period, calculate } = await fixture();
+  await service.configurePlan(actor, { membershipId: employee.membershipId, name: "本期独立奖励", type: "hourly", currency: "CNY", baseAmount: "80",
+    effectiveFrom: new Date("2026-09-10Z"), effectiveTo: new Date("2026-09-25Z"), pendingReviewCountsInEstimate: true,
+    rules: [{ type: "weekly_bonus", priority: 400, thresholdSeconds: 5 * 3600, rewardSeconds: 3600 }] });
+  for (const [start, hours] of [["2026-09-07T08:00Z", 5], ["2026-09-10T08:00Z", 1]] as const) {
+    await db.insert(workSessions).values({ organizationId: actor.organizationId, membershipId: employee.membershipId,
+      startAt: new Date(start), endAt: new Date(Date.parse(start) + hours * 3600000), timezone: "UTC", source: "manual",
+      grossSeconds: hours * 3600, netSeconds: hours * 3600, content: "本期奖励边界", submissionStatus: "submitted", approvalStatus: "approved" });
+  }
+  expect((await service.listOwn(employee)).livePreview!.weeklyBonusSeconds).toBe(0);
+  await db.update(payPeriods).set({ startsAt: new Date("2026-09-10Z"), endsAt: new Date("2026-09-25Z") }).where(eq(payPeriods.id, period.id));
+  expect((await calculate()).item.grossAmount).toBe("80.000000");
 });

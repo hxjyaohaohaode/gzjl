@@ -109,9 +109,9 @@ it("rounds the reported base salary to cents and reconciles preview, components 
   const bundle = await capturePayrollWorkbook(db, reviewer, handoff, "九月.csv");
   const book = new ExcelJS.Workbook();
   await book.xlsx.load(Buffer.from(bundle.workbookBase64, "base64") as unknown as Parameters<typeof book.xlsx.load>[0]);
-  expect(book.getWorksheet("薪资总览")!.getCell("K2").value).toBe("2866.92");
-  expect(book.getWorksheet("薪资总览")!.getCell("M2").value).toBe("168.19");
-  expect(book.getWorksheet("薪资总览")!.getCell("R2").value).toBe("3035.11");
+  expect(book.getWorksheet("薪资总览")!.getCell("G2").value).toBe("2866.92");
+  expect(book.getWorksheet("薪资总览")!.getCell("I2").value).toBe("168.19");
+  expect(book.getWorksheet("薪资总览")!.getCell("L2").value).toBe("3035.11");
 });
 
 it.each(["full_month", "boss_custom_range"] as const)("keeps individually configured legacy 168.19 benefits identical across all plan types in %s", async (range) => {
@@ -156,9 +156,11 @@ it.each(["full_month", "boss_custom_range"] as const)("keeps individually config
   const book = new ExcelJS.Workbook(); await book.xlsx.load(Buffer.from(capture.workbookBase64, "base64") as unknown as Parameters<typeof book.xlsx.load>[0]);
   const sheet = book.worksheets[0]!;
   expect(sheet.name).toBe("薪资总览"); expect(book.worksheets[1]!.name).toBe("周期工作记录");
-  for (let index = 2; index <= sheet.rowCount; index++) if (ids.includes(String(sheet.getCell(index, 1).value))) {
-    expect(sheet.getCell(index, 13).value).toBe("168.19"); expect(sheet.getCell(index, 18).value).toBe("168.19");
+  let verified = 0;
+  for (let index = 2; index <= sheet.rowCount; index++) if (String(sheet.getCell(index, 1).value).startsWith("单独设置补贴")) {
+    verified++; expect(sheet.getCell(index, 9).value).toBe("168.19"); expect(sheet.getCell(index, 12).value).toBe("168.19");
   }
+  expect(verified).toBe(scenarios.length);
 });
 
 it("uses the last configured amount once when legacy daily settings change and only prorates explicit opt-ins", async () => {
@@ -354,13 +356,13 @@ it("exports one workbook with the full salary overview first and only cycle work
   const captured = await capturePayrollWorkbook(db, reviewer, preview, "九月.csv");
   const book = new ExcelJS.Workbook(); await book.xlsx.load(Buffer.from(captured.workbookBase64, "base64") as unknown as Parameters<typeof book.xlsx.load>[0]);
   expect(book.worksheets.map((sheet) => sheet.name)).toEqual([
-    "薪资总览", "周期工作记录", "工资组成", "报销明细", "工作证据目录", "规则与来源",
+    "薪资总览", "周期工作记录", "工资组成", "报销明细",
   ]);
   const sheet = book.getWorksheet("薪资总览")!;
   const column = (name: string) => { let found = 0; sheet.getRow(1).eachCell((cell, index) => { if (cell.value === name) found = index; }); expect(found).toBeGreaterThan(0); return found; };
   const value = (name: string) => sheet.getCell(2, column(name)).value;
   expect(value("工作工资")).toBe("100.00"); expect(value("补贴")).toBe("30.00");
-  expect(value("已批准报销")).toBe("128.35"); expect(value("其他调整（含扣减及更正）")).toBe("-5.00");
+  expect(value("已批准报销")).toBe("128.35"); expect(value("其他调整")).toBe("-5.00");
   expect(value("最终金额")).toBe("253.35"); expect(value("薪资周期")).toBe("九月");
   expect(JSON.stringify(book.getWorksheet("周期工作记录")!.getSheetValues())).toContain("九月完整工作提交单");
   expect(JSON.stringify(sheet.getSheetValues())).not.toContain("九月完整工作提交单");

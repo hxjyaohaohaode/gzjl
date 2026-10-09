@@ -1,5 +1,6 @@
-import { and, asc, desc, eq, gte, gt, inArray, isNull, lt, ne, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, gt, inArray, isNull, lt, ne, sql } from "drizzle-orm";
 import type { Database } from "@workbench/db";
+import { effectivePlanRange } from "../payroll/plan-range.js";
 import {
   auditLogs,
   compensationPlans,
@@ -478,11 +479,7 @@ export class WorkCorrectionService {
               eq(compensationPlans.organizationId, actor.organizationId),
               eq(compensationPlans.membershipId, record.session.membershipId),
               isNull(compensationPlans.archivedAt),
-              lt(compensationPlanVersions.effectiveFrom, targetPeriod.endsAt),
-              or(
-                isNull(compensationPlanVersions.effectiveTo),
-                gt(compensationPlanVersions.effectiveTo, targetPeriod.startsAt),
-              ),
+              effectivePlanRange(targetPeriod.startsAt, targetPeriod.endsAt),
             ),
           )
           .limit(2);

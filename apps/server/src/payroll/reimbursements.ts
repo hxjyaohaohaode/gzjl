@@ -1,10 +1,11 @@
-import { and, desc, eq, gt, gte, inArray, isNull, lt, ne, or, sql } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, isNull, lt, ne, or, sql } from "drizzle-orm";
 import type { Database } from "@workbench/db";
 import { attachmentLinks, attachments, auditLogs, compensationPlans, compensationPlanVersions, notifications, organizations, outboxEvents, payPeriods, payrollAdjustments, payrollRuns, reimbursementRequests, users, orgMemberships } from "@workbench/db/schema";
 import { hasPermission, zonedCalendarTime } from "@workbench/shared";
 import type { AuthContext } from "../auth/service.js";
 import { PayrollConflictError, PayrollNotFoundError } from "./service.js";
 import { lockPayrollInputs } from "./input-lock.js";
+import { effectivePlanRange } from "./plan-range.js";
 
 export const canReviewReimbursements = (actor: AuthContext) =>
   hasPermission(actor.grants, "payroll.settle", { scopeKind: "organization" });
@@ -101,8 +102,7 @@ export class ReimbursementService {
           .innerJoin(compensationPlanVersions, eq(compensationPlanVersions.compensationPlanId, compensationPlans.id))
           .where(and(eq(compensationPlans.organizationId, actor.organizationId),
             eq(compensationPlans.membershipId, request.membershipId), isNull(compensationPlans.archivedAt),
-            lt(compensationPlanVersions.effectiveFrom, period.endsAt),
-            or(isNull(compensationPlanVersions.effectiveTo), gt(compensationPlanVersions.effectiveTo, period.startsAt))));
+            effectivePlanRange(period.startsAt, period.endsAt)));
         if (!plan || plan.currency !== request.currency) throw new PayrollConflictError("请先为申请人配置周期内生效且币种一致的薪资方案；系统不会自动换汇。");
         await tx.insert(payrollAdjustments).values({ organizationId: actor.organizationId, membershipId: request.membershipId,
           payPeriodId: period.id, amount: request.amount, currency: request.currency,

@@ -46,6 +46,8 @@ export default defineConfig({
   use: {
     baseURL: `http://127.0.0.1:${e2ePort}`,
     timezoneId: e2eTimezone,
+    actionTimeout: 15_000,
+    navigationTimeout: 30_000,
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
   },
