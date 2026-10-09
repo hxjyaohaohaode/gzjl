@@ -6,7 +6,7 @@ import live from "./playwright.live.config.js";
 export default defineConfig({
   ...live,
   outputDir: "test-results/engines",
-  use: { baseURL: "http://127.0.0.1:3100", timezoneId: "Asia/Shanghai", trace: "retain-on-failure", screenshot: "only-on-failure" },
+  use: { baseURL: "http://127.0.0.1:3100", timezoneId: "Asia/Shanghai", actionTimeout: 15_000, navigationTimeout: 30_000, trace: "retain-on-failure", screenshot: "only-on-failure" },
   projects: [
     { name: "firefox-desktop", use: { ...devices["Desktop Firefox"], browserName: "firefox", viewport: { width: 1440, height: 900 } } },
     { name: "webkit-mobile", use: { ...devices["iPhone 13"], browserName: "webkit" } },

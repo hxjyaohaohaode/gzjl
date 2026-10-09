@@ -1,6 +1,11 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
+import type ExcelJSModule from "../../apps/server/node_modules/exceljs";
+
+const requireServer = createRequire(new URL("../../apps/server/package.json", import.meta.url));
+const ExcelJS = requireServer("exceljs") as typeof ExcelJSModule;
 
 async function call(client: APIRequestContext, method: string, path: string, data?: unknown) {
   const headers: Record<string, string> = method === "GET" ? {} : { "x-csrf-token": (await (await client.get("/api/auth/csrf")).json()).csrfToken };
@@ -79,6 +84,9 @@ test("long content, evidence queue, restoration, contextual approval and exact h
     expect(statistics.suggestedFilename()).toContain("未确认");
     const response = await statisticsResponse; expect(response.ok()).toBeTruthy();
     expect(createHash("sha256").update(await readFile(statisticsFile!)).digest("hex")).toBe(response.headers()["x-content-sha256"]);
+    const statisticsBook = new ExcelJS.Workbook(); await statisticsBook.xlsx.readFile(statisticsFile!);
+    expect(statisticsBook.worksheets.map((sheet) => sheet.name)).toEqual(["薪资总览", "周期工作记录", "工资组成", "报销明细"]);
+    for (const sheet of statisticsBook.worksheets) expect(JSON.stringify(sheet.getRow(1).values)).not.toMatch(/编号|时区|币种|版本|追踪|SHA/);
     const pendingRunId = new URL(owner.url()).pathname.split("/").at(-1);
     expect((await call(owner.request, "GET", `/api/payroll-runs/${pendingRunId}/handoff`)).batch).toBeNull();
     expect((await member.request.get(`/api/payroll-runs/${pendingRunId}/report.xlsx`)).status()).toBe(403);
@@ -135,7 +143,7 @@ test("long content, evidence queue, restoration, contextual approval and exact h
     const identity = owner.getByLabel("同名成员与多附件长文本验收 外部人员编号"); await identity.fill("external-platform-member-001");
     await owner.getByRole("button", { name: "保存映射", exact: true }).click();
     await expect.poll(async () => (await call(owner.request, "GET", `/api/payroll-runs/${run.id}/handoff`)).previewHash).not.toBe(preview.previewHash);
-    await owner.getByRole("checkbox", { name: /我已逐行核对金额和人员编号/ }).check();
+    await owner.getByRole("checkbox", { name: /我已逐行核对员工、计薪范围和金额/ }).check();
     await expect(owner.getByRole("button", { name: "确认导出并锁定", exact: true })).toBeEnabled();
     await owner.getByRole("button", { name: "确认导出并锁定", exact: true }).click();
     await expect(owner.getByText("已确认交接批次：", { exact: false })).toBeVisible();
@@ -148,6 +156,8 @@ test("long content, evidence queue, restoration, contextual approval and exact h
     const completeFile = await xlsxDownload; expect(completeFile.suggestedFilename()).toBe(saved.batch.manifest.workbookFileName);
     await completeFile.saveAs(testInfo.outputPath("周期工作记录-薪资账单示例.xlsx"));
     expect(createHash("sha256").update(await readFile((await completeFile.path())!)).digest("hex")).toBe(saved.batch.manifest.workbookSha256);
+    const confirmedBook = new ExcelJS.Workbook(); await confirmedBook.xlsx.readFile((await completeFile.path())!);
+    expect(confirmedBook.getWorksheet("周期工作记录")!.getCell("G2").value).toBe(session.content);
     expect(saved.batch.manifest.worksheetOrder.slice(0, 2)).toEqual(["薪资总览", "周期工作记录"]);
     const download = owner.waitForEvent("download"); await owner.getByRole("button", { name: "重取已确认原文件" }).click(); expect((await download).suggestedFilename()).toBe(saved.batch.fileName);
     expect(errors).toEqual([]);
