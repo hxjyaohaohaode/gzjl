@@ -47,7 +47,12 @@ test("calendar month navigation clamps month ends and loads all opaque cursor pa
   await page.goto("/calendar");
   await page.getByRole("button", { name: "月", exact: true }).click();
   await expect(page.locator(".calendar-period-bar h2")).toHaveText("2026年1月");
-  await expect(page.locator(".calendar-audit-row")).toHaveCount(101);
+  await expect(page.locator(".calendar-audit-row")).toHaveCount(8);
+  const pager = page.getByRole("navigation", { name: "日历对账分页" });
+  await expect(pager).toContainText("101 项");
+  for (let index = 1; index < 13; index++) await pager.getByRole("button", { name: "下一页" }).click();
+  await expect(pager).toContainText("第 13 / 13 页");
+  await expect(page.locator(".calendar-audit-row")).toHaveCount(5);
   const timer = page.locator(".calendar-audit-row").filter({ hasText: "日历完整记录 最后一条" });
   await expect(timer.getByRole("button", { name: "后一天" })).toHaveCount(0);
   await page.getByRole("button", { name: "下一周期" }).click();
@@ -111,6 +116,7 @@ test("organization unit live updates keep unsaved changes until explicit reload"
   let unit = { id: "unit", name: "交付部门", description: "", parentId: null, leaderMembershipId: null, version: 1, sortOrder: 0 };
   await page.route("**/api/organization", (route) => route.fulfill({ json: { organization: { id: "org", name: "审查组织", timezone: "Asia/Shanghai" }, units: [unit], members: [], roles: [], professionalIdentities: [], ownerMembershipId: memberId, ownershipTransfer: null } }));
   await page.goto("/organization");
+  await page.getByRole("tab", { name: "组织树", exact: true }).click();
   await page.locator(".organization-tree-node").filter({ hasText: "交付部门" }).click();
   await page.getByLabel("单元名称", { exact: true }).fill("正在编辑的部门");
   unit = { ...unit, name: "其他端部门版本", version: 2 };
@@ -161,12 +167,13 @@ test("closing a deep-linked member stays closed after background updates", async
     members: [{ membership: { id: memberId, status: "active", positionTitle: null, orgUnitId: null }, user: { displayName }, positionTitle: null, unitName: null, isOwner: true, accessRoles: [], professionalIdentities: [] }],
   } }));
   await page.goto(`/organization?member=${memberId}`);
-  await expect(page.getByRole("button", { name: "关闭成员详情", exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "关闭成员详情", exact: true }).click();
+  const closeMember = page.getByRole("button", { name: /关闭.*人员详情与编辑/ });
+  await expect(closeMember).toBeVisible();
+  await closeMember.click();
   displayName = "刷新后的成员";
   await refresh();
   await expect(page.getByText("刷新后的成员", { exact: true }).first()).toBeVisible();
-  await expect(page.getByRole("button", { name: "关闭成员详情", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /关闭.*人员详情与编辑/ })).toHaveCount(0);
 });
 
 test("reimbursement history selects the requested month and notification links locate the original claim", async ({ page }) => {

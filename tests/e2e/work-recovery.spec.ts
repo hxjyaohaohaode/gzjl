@@ -1,3 +1,4 @@
+import { openApprovalCards, openWorkCards, wizardStep } from "./workspace-flows.js";
 import { expect, test, type Page } from "@playwright/test";
 
 async function workspace(page: Page, membershipId = "member", canReview = false) {
@@ -18,8 +19,11 @@ test("unfinished work recovers text, evidence and partial dates on refresh while
   await workspace(page);
   await page.goto("/work");
   await page.getByRole("button", { name: "手工录入", exact: true }).click();
+  await wizardStep(page, 1, "work");
   await page.getByLabel(/^工作内容/).fill("刷新后仍在的录入");
+  await wizardStep(page, 2, "work");
   await page.getByLabel("本段文字证据", { exact: true }).fill("会议纪要未丢失");
+  await wizardStep(page, 0, "work");
   await page.getByLabel("结束时间", { exact: true }).fill("");
   await expect.poll(() => page.evaluate(() => sessionStorage.getItem("workbench:editor-recovery:v1:member"))).toContain("刷新后仍在的录入");
   await page.reload();
@@ -38,7 +42,9 @@ test("time-first and incomplete break input recovers before any work description
   await workspace(page);
   await page.goto("/work");
   await page.getByRole("button", { name: "手工录入", exact: true }).click();
+  await wizardStep(page, 0, "work");
   await page.getByLabel("开始时间", { exact: true }).fill("2026-09-22T09:15");
+  await wizardStep(page, 0, "work");
   await page.getByLabel("结束时间", { exact: true }).fill("");
   await page.getByRole("button", { name: /添加休息区间/ }).click();
   await page.getByLabel("第 1 段休息开始", { exact: true }).fill("2026-09-22T10:00");
@@ -65,18 +71,25 @@ for (const outcome of ["cancel", "save"] as const) test(`a new unsaved entry sur
   });
   await page.goto("/work");
   await page.getByRole("button", { name: "手工录入", exact: true }).click();
+  await wizardStep(page, 1, "work");
   await page.getByLabel(/^工作内容/).fill("尚未保存的新录入 A");
+  await wizardStep(page, 2, "work");
   await page.getByLabel("本段文字证据", { exact: true }).fill("A 的独立证据");
+  await page.getByRole("button", { name: "关闭补录一段真实工作", exact: true }).click();
+  await openWorkCards(page);
   await page.getByRole("button", { name: "编辑草稿", exact: true }).click();
   await expect(page.getByLabel(/^工作内容/)).toHaveValue("历史草稿 B");
+  await wizardStep(page, 1, "work");
   await page.getByLabel(/^工作内容/).fill("历史草稿 B 的修改");
   if (outcome === "cancel") {
     page.once("dialog", (dialog) => dialog.accept());
-    await page.getByRole("button", { name: "收起录入", exact: true }).click();
+    await page.getByRole("button", { name: "关闭编辑手工草稿", exact: true }).click();
   } else {
+    await wizardStep(page, 4);
     await page.getByRole("button", { name: "保存修改", exact: true }).click();
     await expect.poll(() => saved).toBe(true);
   }
+  await page.getByRole("button", { name: "手工录入", exact: true }).click();
   await expect(page.getByLabel(/^工作内容/)).toHaveValue("尚未保存的新录入 A");
   await expect(page.getByLabel("本段文字证据", { exact: true })).toHaveValue("A 的独立证据");
   await page.reload();
@@ -88,10 +101,12 @@ test("clearing the final new-entry field flushes deletion even before the deboun
   await workspace(page);
   await page.goto("/work");
   await page.getByRole("button", { name: "手工录入", exact: true }).click();
+  await wizardStep(page, 1, "work");
   await page.getByLabel(/^工作内容/).fill("本来要记录但已清空");
   await expect.poll(() => page.evaluate(() => sessionStorage.getItem("workbench:editor-recovery:v1:member"))).toContain("本来要记录但已清空");
   await page.clock.install();
   await page.clock.pauseAt(new Date(Date.now() + 1000));
+  await wizardStep(page, 1, "work");
   await page.getByLabel(/^工作内容/).fill("");
   await page.reload();
   await page.clock.resume();
@@ -103,6 +118,7 @@ test("missing attachment reminders survive repeated refreshes until explicitly r
   await workspace(page);
   await page.goto("/work");
   await page.getByRole("button", { name: "手工录入", exact: true }).click();
+  await wizardStep(page, 1, "work");
   await page.getByLabel(/^工作内容/).fill("附件仍需重新选择的录入");
   await page.locator(".work-direct-file input[type=file]").first().setInputFiles({ name: "未上传的验收记录.txt", mimeType: "text/plain", buffer: Buffer.from("尚未提交") });
   await expect.poll(() => page.evaluate(() => sessionStorage.getItem("workbench:editor-recovery:v1:member"))).toContain("未上传的验收记录.txt");
@@ -152,6 +168,7 @@ test("approving overlapping work requires an explicit review note", async ({ pag
   });
   await page.goto("/approvals");
   await expect(page.getByText("时段重叠，需核对", { exact: true })).toBeVisible();
+  await openApprovalCards(page);
   const approve = page.getByRole("button", { name: "批准", exact: true });
   await approve.click();
   await expect(approve).toBeDisabled();

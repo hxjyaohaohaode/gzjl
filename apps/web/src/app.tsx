@@ -17,6 +17,7 @@ import { setOrganizationTimezone } from "./timezone.js";
 import { startOfflineReplay } from "./offline.js";
 import {
   AiPage,
+  AiConfigurationPage,
   AnalyticsPage,
   ApprovalsPage,
   CalendarPage,
@@ -39,7 +40,7 @@ import {
   VerifyContactPage,
   WorkPage,
 } from "./pages.js";
-import { AccessUnavailable, PersonalPayrollWorkspace, PayrollHandoffPage, PayrollManagementWorkspace, ReimbursementsPage, WorkPolicyPage } from "./payroll-workspace.js";
+import { AccessUnavailable, ApprovalWorkspace, PersonalPayrollWorkspace, PayrollHandoffPage, PayrollManagementWorkspace, ReimbursementsPage, WorkPolicyPage } from "./payroll-workspace.js";
 import { hasGrant } from "./api.js";
 import { hasOrganizationGrant } from "./api.js";
 
@@ -203,6 +204,9 @@ export function App() {
         <Route path="analytics" element={<AnalyticsPage me={me!} />} />
         <Route path="payroll" element={<PersonalPayrollWorkspace me={me!} />}>
           <Route index element={<PayrollPage key="current" view="current" />} />
+          <Route path="breakdown" element={<PayrollPage key="breakdown" view="breakdown" />} />
+          <Route path="hours" element={<PayrollPage key="hours" view="hours" />} />
+          <Route path="trends" element={<PayrollPage key="trends" view="trends" />} />
           <Route path="history" element={<PayrollPage key="history" view="history" />} />
         </Route>
         <Route path="payroll-management" element={<PayrollManagementWorkspace me={me!} />}>
@@ -214,9 +218,15 @@ export function App() {
         </Route>
         <Route path="reimbursements" element={<ReimbursementsPage me={me!} />} />
         <Route path="ai" element={<AiPage me={me!} />} />
-        <Route path="approvals" element={me && hasGrant(me, "work.review") ? <ApprovalsPage /> : me && hasOrganizationGrant(me, "payroll.settle") ? <Navigate replace to="/approvals/reimbursements" /> : <AccessUnavailable />} />
-        <Route path="approvals/reimbursements" element={<ReimbursementsPage me={me!} reviewOnly />} />
-        <Route path="approvals/reimbursements/history" element={<ReimbursementsPage me={me!} reviewOnly reviewHistory />} />
+        <Route path="ai/reports" element={<AiPage me={me!} view="reports" />} />
+        <Route path="ai/reports/:reportId" element={<AiPage me={me!} view="reports" />} />
+        <Route path="ai/compose" element={<AiPage me={me!} view="compose" />} />
+        <Route path="ai/settings" element={me?.user.isOwner ? <AiConfigurationPage /> : <AccessUnavailable />} />
+        <Route path="approvals" element={<ApprovalWorkspace me={me!} />}>
+          <Route index element={me && hasGrant(me, "work.review") ? <ApprovalsPage /> : me && hasOrganizationGrant(me, "payroll.settle") ? <Navigate replace to="/approvals/reimbursements" /> : <AccessUnavailable />} />
+          <Route path="reimbursements" element={<ReimbursementsPage me={me!} reviewOnly />} />
+          <Route path="reimbursements/history" element={<ReimbursementsPage me={me!} reviewOnly reviewHistory />} />
+        </Route>
         <Route path="organization" element={<OrganizationPage me={me!} />} />
         <Route path="organization/work-policy" element={<WorkPolicyPage me={me!} />} />
         <Route path="security" element={<SecurityPage />} />

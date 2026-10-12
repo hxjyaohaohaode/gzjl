@@ -1,8 +1,14 @@
 import { reducedMotion } from "./motion-preference.js";
+import { CompactDisclosure, CollectionPager, SmoothReveal, StepForm, WorkspaceDialog } from "./reference-primitives.js";
+import { pageSlice, shiftVisualDay } from "./work-visualization-model.js";
+import { HomePulse, PersonalWorkHeatmap, WorkspacePaths } from "./workspace-insights.js";
+import { WorkSwimlane } from "./reference-charts.js";
+import { RegionTransition } from "./workspace-transition.js";
+import { AnimatePresence, motion } from "motion/react";
 import { HistoricalRangePicker, type HistoricalRange } from "./history-range.js";
 import { isSalaryMonth, previousSalaryMonth, salaryMonthForm, salaryPeriodMatchesMonth, suggestedPeriodCutoff } from "./payroll-month.js";
 import { WorkPolicyPanel } from "./submission-policy.js";
-import { aiGenerationOptionsSchema, type AiGenerationOptions } from "@workbench/shared";
+import { aiExtraBodySchema, aiGenerationOptionsSchema, type AiGenerationOptions } from "@workbench/shared";
 import { AiDraftEditor, AiFactAnswer, CycleOverview, WorkFactContext, CitedText, type CycleOverviewData } from "./lifecycle-workbench.js";
 import { DraftArchiveButton, ArchivedDrafts } from "./work-recovery.js";
 import { RecordReadiness } from "./fact-explorer.js";
@@ -12,7 +18,7 @@ import { WorkProgressReporter } from "./work-progress-reporter.js";
 import { PayrollPeriodList } from "./payroll-period-list.js";
 import { latestPeriodRuns, settlementState } from "./payroll-period-model.js";
 import { useWorkspaceDraft } from "./workspace-draft.js";
-import { ApprovalNavigation } from "./workspace-navigation.js";
+import { WorkspaceNavigation } from "./workspace-navigation.js";
 import { PageHeader, Field, EmptyState, ErrorMessage, LoadingBlock } from "./workspace-primitives.js";
 export { PageHeader, Field, EmptyState, ErrorMessage, LoadingBlock } from "./workspace-primitives.js";
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -23,6 +29,7 @@ import {
   ArrowUpRight,
   Bot,
   CalendarDays,
+  ChartNoAxesCombined,
   Check,
   ChevronRight,
   CircleDollarSign,
@@ -61,7 +68,7 @@ import {
   type InputHTMLAttributes,
   type ReactNode,
 } from "react";
-import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { Link, Navigate, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { Badge, Button, Card, CardContent, CardHeader } from "@workbench/ui";
 
 import {
@@ -784,7 +791,7 @@ export function SecurityPage() {
         title="账户安全"
         description="管理可登录、找回密码的邮箱和手机号，以及动态验证码。每个登录标识都必须由对应渠道真实验证；共享密钥仅在设置时展示一次，服务端以 AES‑GCM 加密保存。"
       />
-      <div className="grid max-w-4xl gap-5 lg:grid-cols-2">
+      <div className="fx-security-layout grid gap-5 lg:grid-cols-2">
         <Card className="lg:col-span-2">
           <CardHeader className="max-sm:flex-col max-sm:gap-3">
             <div className="min-w-0">
@@ -1643,7 +1650,8 @@ export function NotificationPreferencesPage() {
         title="通知设置"
         description="按分类控制站内与浏览器提醒；浏览器订阅只作用于当前设备，关闭后不会影响其他已授权设备。"
       />
-      <Card className="mb-5 max-w-4xl">
+      <div className="fx-notification-settings">
+      <Card className="fx-device-settings">
         <CardHeader>
           <div>
             <h2 className="font-bold">当前浏览器</h2>
@@ -1736,7 +1744,7 @@ export function NotificationPreferencesPage() {
           </div>
         </CardContent>
       </Card>
-      <Card className="max-w-4xl">
+      <Card className="fx-category-settings">
         <CardHeader>
           <div>
             <h2 className="font-bold">提醒分类</h2>
@@ -1852,6 +1860,7 @@ export function NotificationPreferencesPage() {
           </div>
         </CardContent>
       </Card>
+      </div>
     </>
   );
 }
@@ -3217,6 +3226,7 @@ export function HomePage({ me }: { me: Me }) {
       <CycleOverview onboarding />
       <div className="home-layout">
         <section className="home-primary">
+          <HomePulse me={me} at={homeClock} />
           <Card className="home-focus-card">
             <CardHeader>
               <div>
@@ -3417,6 +3427,7 @@ export function HomePage({ me }: { me: Me }) {
           </Card>
         </aside>
       </div>
+      <div className="home-insights-secondary"><PersonalWorkHeatmap at={homeClock} /><WorkspacePaths me={me} /></div>
     </div>
   );
 }
@@ -3504,156 +3515,7 @@ function WorkRow({ item, action }: { item: WorkSession; action?: ReactNode }) {
   );
 }
 
-function dayHour(value: string | Date): number {
-  const date = new Date(value);
-  return date.getHours() + date.getMinutes() / 60;
-}
-
-function sameLocalDate(left: string | Date, right: string | Date): boolean {
-  const leftDate = new Date(left);
-  const rightDate = new Date(right);
-  return (
-    leftDate.getFullYear() === rightDate.getFullYear() &&
-    leftDate.getMonth() === rightDate.getMonth() &&
-    leftDate.getDate() === rightDate.getDate()
-  );
-}
-
-function WorkDayTimeline({
-  sessions,
-  startAt,
-  endAt,
-  content,
-  breaks,
-}: {
-  sessions: WorkSession[];
-  startAt: string;
-  endAt: string;
-  content: string;
-  breaks: Array<{ startAt: string; endAt: string }>;
-}) {
-  const startHour = 7;
-  const endHour = 22;
-  const totalHours = endHour - startHour;
-  const manualStart = safeLocalInputDate(startAt);
-  const manualEnd = safeLocalInputDate(endAt);
-  const hasPreview =
-    !Number.isNaN(manualStart.getTime()) &&
-    !Number.isNaN(manualEnd.getTime()) &&
-    manualEnd.getTime() > manualStart.getTime();
-  const breakPreviews = breaks
-    .map((entry) => ({
-      startAt: safeLocalInputDate(entry.startAt),
-      endAt: safeLocalInputDate(entry.endAt),
-    }))
-    .filter(
-      (entry) =>
-        !Number.isNaN(entry.startAt.getTime()) &&
-        !Number.isNaN(entry.endAt.getTime()) &&
-        entry.endAt > entry.startAt,
-    );
-  const toPosition = (value: string | Date) =>
-    Math.max(
-      0,
-      Math.min(100, ((dayHour(value) - startHour) / totalHours) * 100),
-    );
-  const toHeight = (from: string | Date, to: string | Date) =>
-    Math.max(
-      6,
-      Math.min(
-        100,
-        (((sameLocalDate(from, to) ? dayHour(to) : 24) - dayHour(from)) /
-          totalHours) *
-          100,
-      ),
-    );
-  const daySessions = hasPreview
-    ? sessions.filter((item) => sameLocalDate(item.startAt, manualStart))
-    : sessions.slice(0, 5);
-  const hours = ["07", "09", "11", "13", "15", "17", "19", "21"];
-
-  return (
-    <section className="work-day-timeline" aria-label="当日时间预览">
-      <div className="work-day-timeline-head">
-        <div>
-          <p className="app-section-label">当日时间轴</p>
-          <h3 className="mt-2 font-extrabold tracking-[-0.025em]">
-            录入区间预览
-          </h3>
-          <p className="mt-1 max-w-sm text-xs leading-5 text-[var(--text-muted)]">
-            时间预览随表单实时变化；保存时服务端会再次校验重叠、休息区间与净时长。
-          </p>
-        </div>
-        <Badge tone="info">
-          {hasPreview && !sameLocalDate(manualStart, manualEnd)
-            ? "跨日预览"
-            : "日内预览"}
-        </Badge>
-      </div>
-      <div className="work-timeline-frame">
-        <div className="work-timeline-hours">
-          {hours.map((hour) => (
-            <span key={hour}>{hour}:00</span>
-          ))}
-        </div>
-        <div className="work-timeline-track">
-          {daySessions.map((item) => (
-            <div
-              className="work-timeline-event"
-              key={item.id}
-              style={{
-                top: `${toPosition(item.startAt)}%`,
-                height: `${toHeight(item.startAt, item.endAt)}%`,
-              }}
-            >
-              <strong className="truncate">{item.content}</strong>
-              <small>
-                {formatDateTime(item.startAt)} ·{" "}
-                {formatDuration(item.netSeconds)}
-              </small>
-            </div>
-          ))}
-          {hasPreview ? (
-            <div
-              className="work-timeline-event is-preview"
-              style={{
-                top: `${toPosition(manualStart)}%`,
-                height: `${toHeight(manualStart, manualEnd)}%`,
-              }}
-            >
-              <strong className="truncate">
-                {content.trim() || "正在录入的工作"}
-              </strong>
-              <small>
-                {formatDateTime(manualStart)} – {formatDateTime(manualEnd)}
-              </small>
-            </div>
-          ) : null}
-          {breakPreviews.map((entry, index) => (
-            <div
-              className="work-timeline-break"
-              key={[entry.startAt.toISOString(), index].join("-")}
-              style={{
-                top: String(toPosition(entry.startAt)) + "%",
-                height: String(toHeight(entry.startAt, entry.endAt)) + "%",
-              }}
-            >
-              <span>
-                休息 · {formatDateTime(entry.startAt)} –{" "}
-                {formatDateTime(entry.endAt)}
-              </span>
-            </div>
-          ))}
-        </div>
-      </div>
-      {hasPreview && !sameLocalDate(manualStart, manualEnd) ? (
-        <p className="mt-3 text-xs leading-5 text-[var(--text-muted)]">
-          该记录跨越午夜：时间线仅显示开始日片段；精确区间、净时长和薪资切分均由服务端按带时区的时间戳计算。
-        </p>
-      ) : null}
-    </section>
-  );
-}
+function dayHour(value: string | Date): number { const date = new Date(value); return date.getHours() + date.getMinutes() / 60; }
 
 function evidenceCanPreview(item: EvidenceAttachment): boolean {
   if (item.kind !== "file" || item.status !== "available") return false;
@@ -4821,6 +4683,7 @@ function TimerProjectAssociation({
 }
 
 export function WorkPage() {
+  const manualEntryButton = useRef<HTMLButtonElement>(null);
   const [workSearch, setWorkSearch] = useSearchParams();
   const focusedRecord = workSearch.get("record");
   const focusedWork = useQuery({ queryKey: ["work-sessions", "focused", focusedRecord], queryFn: () => api<{ session: WorkSession; ownRecord: boolean }>(`/api/work-facts/${focusedRecord}`), enabled: Boolean(focusedRecord && /^[a-f0-9-]{36}$/i.test(focusedRecord)) });
@@ -4859,6 +4722,9 @@ export function WorkPage() {
     return () => window.clearInterval(timer);
   }, []);
   const [showForm, setShowForm] = useState(Boolean(recoveredBackup));
+  const [recordQuery, setRecordQuery] = useState("");
+  const [recordKindFilter, setRecordKindFilter] = useState("all");
+  const [recordPage, setRecordPage] = useState(1);
   const now = new Date();
   const [initialManualTimes, setInitialManualTimes] = useState(() => recoveredBackup?.initialTimes ?? {
     startAt: recoveredBackup?.manual.startAt ?? localInput(new Date(now.getTime() - 60 * 60_000)),
@@ -4965,6 +4831,10 @@ export function WorkPage() {
   });
   const workData = useMemo(() => workPages.data ? { items: [...new Map(workPages.data.pages.flatMap((page) => page.items).map((item) => [item.id, item])).values()] } : undefined, [workPages.data]);
   const work = { ...workPages, isError: workPages.isError && !workData, data: workData };
+  const filteredWork = (work.data?.items ?? []).filter((item) => (!selectedWorkStatus || item.approvalStatus === selectedWorkStatus) &&
+    (recordKindFilter === "all" || item.recordKind === recordKindFilter) &&
+    (!recordQuery.trim() || [item.content, item.result, ...(item.projectLinks ?? []).map((link) => link.projectNodeTitle)].join(" ").toLowerCase().includes(recordQuery.trim().toLowerCase())));
+  const visibleWork = pageSlice(filteredWork, recordPage, 8);
   const newEntryBackup = useMemo<WorkEditorBackup>(() => {
     const evidenceBackup = (value: PendingWorkEvidence, id: string) => ({ url: value.url, text: value.text, fileNames: [...new Set([...(unselectedEvidenceFiles[id] ?? []), ...value.files.map((file) => file.name)])] });
     return {
@@ -5708,6 +5578,7 @@ export function WorkPage() {
         description="记录真实工作区间、休息、结果与项目归属；提交后进入版本化审核链。"
         actions={
           <Button
+            ref={manualEntryButton}
             disabled={create.isPending}
             onClick={() => {
               if (
@@ -5734,9 +5605,9 @@ export function WorkPage() {
           </Button>
         }
       />
-      <CycleOverview compact /><WorkPolicyPanel />
+      <CycleOverview compact />
       <HistoricalRangePicker onChange={(range) => { const params = new URLSearchParams(workSearch); params.delete("record"); params.delete("version"); if (range) { params.set("from", range.from.toISOString()); params.set("to", range.to.toISOString()); } else { params.delete("from"); params.delete("to"); params.delete("status"); } setWorkSearch(params); }} />
-      <WorkReviewDraft key={`${workSearch.get("from")}|${workSearch.get("to")}`} from={workSearch.get("from")} to={workSearch.get("to")} />
+      <details className="fx-compact-notice work-review-options"><summary>提交规则与周期复核</summary><WorkPolicyPanel /><WorkReviewDraft key={`${workSearch.get("from")}|${workSearch.get("to")}`} from={workSearch.get("from")} to={workSearch.get("to")} /></details>
       {selectedWorkStatus ? <p className="lifecycle-caption">正在查看所选周期与状态：{selectedWorkStatus}。<Link to="/work">清除筛选</Link></p> : null}
       {focusedRecord && /^[a-f0-9-]{36}$/i.test(focusedRecord) ? <Card className="mb-5"><CardHeader><h2>定位工作记录与引用版本</h2><Link to="/work">关闭定位</Link></CardHeader><CardContent><WorkFactContext id={focusedRecord} expectedVersion={workSearch.get("version")}><ReadOnlyEvidenceList sessionId={focusedRecord} /></WorkFactContext><div className="flex flex-wrap gap-2">{focusedWork.data?.ownRecord ? focusedWork.data.session.approvalStatus === "pending_review" ? <Button variant="secondary" onClick={() => withdraw.mutate(focusedWork.data!.session)} disabled={withdraw.isPending}>撤回此记录以修改</Button> : ["approved", "locked"].includes(focusedWork.data.session.approvalStatus) || focusedWork.data.session.source !== "manual" ? <Button variant="secondary" onClick={() => openCorrectionEditor(focusedWork.data!.session)}>申请更正此记录</Button> : <Button onClick={() => openDraftEditor(focusedWork.data!.session)}>编辑定位到的草稿</Button> : null}</div></CardContent></Card> : null}
       {saveMessage ? (
@@ -5777,7 +5648,16 @@ export function WorkPage() {
           <Button type="button" disabled={retryEvidence.isPending} onClick={() => retryEvidence.mutate()}>{retryEvidence.isPending ? "正在重试证据…" : "重试未完成证据"}</Button>
         </CardContent></Card>
       ) : null}
-      {showForm ? (
+      <WorkspaceDialog open={showForm} wide busy={create.isPending} returnFocus={manualEntryButton}
+        title={editingSession ? editingPlan ? "编辑云端计划草稿" : "编辑手工草稿" : correctionSession ? "发起记录更正申请" : "补录一段真实工作"}
+        description="按步骤填写时间、工作、证据和项目；输入会保留，最终保存仍由服务端校验。"
+        onClose={() => {
+          if (create.isPending) return;
+          if (editingSession || correctionSession) {
+            if (!window.confirm(correctionSession ? "放弃本次未提交的更正申请？原始记录不会被改变。" : "放弃本次未保存的修改？已保存的草稿不会被改变。")) return;
+            resetManualEditor();
+          } else setShowForm(false);
+        }}>
         <Card className="work-editor mb-5" id="work-editor">
           <div className="work-editor-grid">
             <fieldset className="work-editor-form min-w-0" disabled={create.isPending} aria-busy={create.isPending}>
@@ -5814,7 +5694,9 @@ export function WorkPage() {
                 </Badge>
               </div>
               {!editingSession && !correctionSession ? (
-                <div className="mb-5 flex flex-col gap-3 rounded-2xl bg-[var(--surface-subtle)] px-4 py-3 sm:flex-row sm:items-center">
+                <details className="fx-editor-backup mb-4">
+                  <summary>预填写与恢复 · 输入会自动暂存</summary>
+                  <div className="mt-2 flex flex-col gap-3 rounded-2xl bg-[var(--surface-subtle)] px-4 py-3 sm:flex-row sm:items-center">
                   <p className="min-w-0 flex-1 text-xs leading-5 text-[var(--text-muted)]">
                     提前写可保存为云端计划草稿：跨设备同步并保留版本，但不会进入事实、统计、AI、薪资、证据或审核。实际结束后须主动转换并核对；本机预填写仍可作为离线临时备份。
                   </p>
@@ -5841,7 +5723,8 @@ export function WorkPage() {
                       删除
                     </button>
                   </div>
-                </div>
+                  </div>
+                </details>
               ) : null}
               {prefillMessage ? (
                 <p className="mb-5 text-xs leading-5 text-[var(--text-muted)]">
@@ -5852,17 +5735,23 @@ export function WorkPage() {
                 以下文件需要重新选择：{missingEvidenceFiles.join("、")}。
                 <button className="ml-2 font-bold text-[var(--accent-strong)]" type="button" onClick={() => setUnselectedEvidenceFiles({})}>移除待补附件提醒</button>
               </div> : null}
-              <p className="mb-4 text-xs leading-5 text-[var(--text-muted)]" role="status">
+              <p className="fx-editor-backup-status mb-4 text-xs leading-5 text-[var(--text-muted)]" role="status">
                 {backupUnavailable ? "此浏览器无法自动暂存录入，请及时保存云端草稿。" : !editingSession && !correctionSession ? "新录入会在当前标签页自动暂存，刷新或返回可恢复文字、时间和关联；附件文件需重新选择。关闭标签页前请保存云端草稿或本机预填写。" : "修改与更正需主动保存；切换页面前请核对是否已提交。"}
               </p>
-              <form
+              <StepForm steps={["工作时间", "内容与结果", "证据与可见性", "关联项目", "核对保存"]}
+                validateStage={(stage) => {
+                  if (stage === 0) { const start = safeLocalInputDate(manual.startAt).getTime(), end = safeLocalInputDate(manual.endAt).getTime(); if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return "请填写有效的开始和结束时间，结束须晚于开始。"; }
+                  if (stage === 1 && !manual.content.trim()) return "请填写实际工作内容。";
+                  if (stage === 3 && linkedProjectNodes.length > 0 && !primaryProjectNodeId) return "请为关联的节点选择一个主项目节点。";
+                  return null;
+                }}
                 className="grid gap-4 md:grid-cols-2"
                 onSubmit={(event) => {
                   event.preventDefault();
                   if (!create.isPending) create.mutate(editingPlan ? "plan" : "fact");
                 }}
               >
-                <Field label="开始时间">
+                <Field label="开始时间" wizardStep={0}>
                   <input
                     className={fieldClass}
                     onChange={(event) =>
@@ -5874,7 +5763,7 @@ export function WorkPage() {
                     value={manual.startAt}
                   />
                 </Field>
-                <Field label="结束时间">
+                <Field label="结束时间" wizardStep={0}>
                   <input
                     className={fieldClass}
                     onChange={(event) =>
@@ -5886,6 +5775,8 @@ export function WorkPage() {
                     value={manual.endAt}
                   />
                 </Field>
+                {!Number.isFinite(manualEndTime) && <p data-wizard-step={0} className="work-plan-evidence-note" role="status">请填写有效的结束时间；不完整或在组织时区中不存在的时间不会被当作计划或真实工时。</p>}
+<div data-wizard-step={1} className="grid gap-4">
                 <div className="md:col-span-2">
                   <Field
                     hint="清楚描述正在推进的事项，便于后续关联项目和审核。"
@@ -5916,11 +5807,13 @@ export function WorkPage() {
                     />
                   </Field>
                 </div>
+
+</div>
+<div data-wizard-step={2} className="grid gap-4">
                 {!editingSession && !correctionSession ? (
                   <div className="md:col-span-2">
                     {!Number.isFinite(manualEndTime) ? (
                       <>
-                        <p className="work-plan-evidence-note" role="status">请填写有效的结束时间；不完整或在组织时区中不存在的时间不会被当作计划或真实工时。</p>
                         {hasPendingWorkEvidence(primaryEvidence) ? <DirectEvidenceFields fileUploadsAvailable={evidenceCapabilities.data?.fileUploads.available === true} onChange={setPrimaryEvidence} value={primaryEvidence} /> : null}
                       </>
                     ) : manualEndTime <= entryNow + 5 * 60_000 ? (
@@ -6080,7 +5973,9 @@ export function WorkPage() {
                     />
                   </div>
                 ) : null}
-                <details className="work-optional-fields md:col-span-2" key={editingSession?.id ?? correctionSession?.id ?? "new"} open={editingSession || correctionSession ? true : undefined}>
+
+</div>
+                <details data-wizard-step={1} className="work-optional-fields md:col-span-2" key={editingSession?.id ?? correctionSession?.id ?? "new"} open={editingSession || correctionSession ? true : undefined}>
                   <summary>补充阻碍与下一步（可选）{manual.blockers || manual.nextStep ? " · 已填写" : ""}</summary>
                   <div className="grid gap-4 md:grid-cols-2">
                 <Field
@@ -6133,6 +6028,7 @@ export function WorkPage() {
                     </Field>
                   </div>
                 ) : null}
+<div data-wizard-step={0} className="grid gap-4">
                 <div className="md:col-span-2">
                   <div className="app-field">
                     <span className="mb-1.5 block text-sm font-semibold">
@@ -6217,9 +6113,11 @@ export function WorkPage() {
                     </button>
                   </div>
                 </div>
+
+</div>
                 <Field
                   hint="提交审核时至少一项证据必须对审核人可见；选择“仅自己”可保存草稿，但不能提交审核。"
-                  label="可见范围"
+                  label="可见范围" wizardStep={2}
                 >
                   <select
                     className={fieldClass}
@@ -6233,6 +6131,7 @@ export function WorkPage() {
                     <option value="project_visible">项目成员</option>
                   </select>
                 </Field>
+<div data-wizard-step={3} className="grid gap-4">
                 <div className="work-project-recommender md:col-span-2">
                   <div className="work-project-recommender-head">
                     <div>
@@ -6471,6 +6370,8 @@ export function WorkPage() {
                     )}
                   </>
                 ) : null}
+
+</div>
                 {conflictSessionId ? (
                   <div className="rounded-xl bg-[var(--warning-soft)] p-4 md:col-span-2">
                     <p className="text-sm font-bold text-[var(--warning)]">检测到跨设备版本冲突</p>
@@ -6481,6 +6382,14 @@ export function WorkPage() {
                     </div>
                   </div>
                 ) : null}
+                <section data-wizard-step={4} className="fx-work-review">
+                  <h3 className="font-bold">核对本次记录</h3><dl className="approval-fact-grid">
+                    <div><dt>工作区间</dt><dd>{manual.startAt.replace("T", " ")} — {manual.endAt.replace("T", " ")}</dd></div>
+                    <div><dt>工作内容</dt><dd>{manual.content || "尚未填写"}</dd></div>
+                    <div><dt>工作结果</dt><dd>{manual.result || "未填写，可保留为空"}</dd></div>
+                    <div><dt>项目关联</dt><dd>{linkedProjectNodes.length ? `${linkedProjectNodes.length} 个节点 · 已选主关联` : "未关联项目"}</dd></div>
+                  </dl>
+                </section>
                 <div className="work-editor-actions md:col-span-2">
                   <label className="work-parallel-toggle">
                     <input
@@ -6527,28 +6436,20 @@ export function WorkPage() {
                             : "保存真实工时草稿"}
                   </Button>
                 </div>
-                <div className="md:col-span-2">
+                <div data-wizard-step="all" className="md:col-span-2">
                   <ErrorMessage
                     error={
                       create.error ?? projects.error ?? linkedProjectTree.error
                     }
                   />
                 </div>
-              </form>
+              </StepForm>
             </fieldset>
-            <aside className="work-editor-preview">
-              <WorkDayTimeline
-                breaks={manualBreaks}
-                content={manual.content}
-                endAt={manual.endAt}
-                sessions={work.data?.items ?? []}
-                startAt={manual.startAt}
-              />
-            </aside>
+
           </div>
         </Card>
-      ) : null}
-      <div className="grid gap-5 xl:grid-cols-[minmax(19rem,0.45fr)_minmax(0,1fr)]">
+      </WorkspaceDialog>
+      <div className="work-list-layout">
         <Card className="work-timer-card">
           <CardHeader>
             <div>
@@ -6729,16 +6630,23 @@ export function WorkPage() {
             </Badge>
           </CardHeader>
           <CardContent>
+            <div className="fx-record-filters" aria-label="工作记录筛选">
+              <input type="search" aria-label="搜索工作记录" placeholder="搜索工作内容、结果或项目节点" value={recordQuery} onChange={(event) => { setRecordQuery(event.target.value); setRecordPage(1); }} />
+              <select aria-label="记录类型" value={recordKindFilter} onChange={(event) => { setRecordKindFilter(event.target.value); setRecordPage(1); }}><option value="all">事实与计划</option><option value="fact">真实工作</option><option value="plan">未来计划</option></select>
+              <select aria-label="记录审批状态" value={selectedWorkStatus ?? ""} onChange={(event) => { const params = new URLSearchParams(workSearch); if (event.target.value) params.set("status", event.target.value); else params.delete("status"); setWorkSearch(params); setRecordKindFilter("all"); setRecordPage(1); }}><option value="">全部状态</option><option value="not_requested">草稿</option><option value="pending_review">待审核</option><option value="approved">已批准</option><option value="returned">已退回</option><option value="locked">已锁定</option></select>
+            </div>
             {work.isPending ? (
               <LoadingBlock />
             ) : work.isError ? (
               <ErrorMessage error={work.error} onRetry={() => void work.refetch()} retrying={work.isFetching} />
-            ) : work.data?.items.length ? (
-              <div className="divide-y divide-[var(--border)]">
-                {work.data.items.filter((item) => !selectedWorkStatus || item.approvalStatus === selectedWorkStatus).map((item) => {
+            ) : filteredWork.length ? (
+              <div className="fx-record-grid">
+                {visibleWork.map((item) => {
                   const correction = latestCorrectionBySession.get(item.id);
                   return (
-                  <div key={item.id} id={`work-record-${item.id}`} className="work-record-entry">
+                  <CompactDisclosure key={item.id} id={`work-record-${item.id}`} className="work-record-entry"
+                    title={item.content} summary={`${formatDateTime(item.startAt)} – ${formatDateTime(item.endAt)} · ${formatDuration(item.netSeconds)}`}
+                    badge={<Badge tone={item.recordKind === "plan" ? "info" : item.approvalStatus === "pending_review" ? "warning" : item.approvalStatus === "returned" ? "danger" : ["approved", "locked"].includes(item.approvalStatus) ? "positive" : "neutral"}>{item.recordKind === "plan" ? "计划草稿" : ({ not_requested: "草稿", pending_review: "待审核", approved: "已批准", returned: "已退回", locked: "已锁定" } as Record<string, string>)[item.approvalStatus]}</Badge>}>
                     <WorkRow
                       action={
                         item.recordKind === "plan" ? (
@@ -6818,6 +6726,11 @@ export function WorkPage() {
                       }
                       item={item}
                     />
+                    <div className="fx-work-fulltext">
+                      <h3>工作结果</h3><p>{item.result || "尚未填写，可在草稿中补充。"}</p>
+                      {item.blockers && <><h3>阻碍与待确认项</h3><p>{item.blockers}</p></>}
+                      {item.nextStep && <><h3>下一步</h3><p>{item.nextStep}</p></>}
+                    </div>
                     {submit.error && submit.variables?.id === item.id ? (
                       <div className="work-review-feedback" role="alert">
                         <AlertCircle size={16} />
@@ -6846,7 +6759,7 @@ export function WorkPage() {
                         {formatDateTime(correction.createdAt)}
                       </p>
                     ) : null}
-                  </div>
+                  </CompactDisclosure>
                   );
                 })}
               </div>
@@ -6857,6 +6770,7 @@ export function WorkPage() {
                 title="还没有工时记录"
               />
             )}
+            <CollectionPager total={filteredWork.length} page={recordPage} onChange={setRecordPage} size={8} label="工作记录分页" />
             <ErrorMessage error={withdraw.error ?? realizePlan.error} />
             {workPages.hasNextPage ? <div className="mt-4 flex flex-wrap items-center gap-3">
               <span className="text-sm text-[var(--text-muted)]">已加载 {work.data?.items.length ?? 0} 条记录，还有更早的记录。</span>
@@ -7487,6 +7401,8 @@ export function ApprovalsPage() {
   useEffect(() => { const timer = window.setInterval(() => setQueueNow(Date.now()), 60_000); return () => window.clearInterval(timer); }, []);
   const me = queryClient.getQueryData<Me>(["me"]);
   const canAdjustPayroll = me?.permissions.some((grant) => grant.permission === "payroll.settle" && grant.scopeKind === "organization") ?? false;
+  const [approvalPage, setApprovalPage] = useState(1);
+  const [approvalQuery, setApprovalQuery] = useState("");
   const [approvalGrouping, setApprovalGrouping] = useState("export");
   const [expandedApprovalId, setExpandedApprovalId] = useState<string | null>(null);
   const [returnReasons, setReturnReasons] = useState<Record<string, string>>({});
@@ -7573,14 +7489,11 @@ export function ApprovalsPage() {
       ]);
     },
   });
+  const filteredApprovals = (approvals.data?.items ?? []).filter((item) => !approvalQuery.trim() || `${item.displayName ?? ""} ${item.session.content} ${item.session.result}`.toLowerCase().includes(approvalQuery.trim().toLowerCase()));
   return (
     <>
-      <PageHeader
-        title="审批"
-        description="仅显示当前角色和授权范围内的待审事实；批准、退回与更正均保留前后快照。"
-      />
-      {me && <ApprovalNavigation me={me} />}
-      <div className="approval-queue-controls"><label>队列优先顺序<select value={approvalGrouping} onChange={(e) => setApprovalGrouping(e.target.value)}><option value="export">临近本期导出</option><option value="waiting">等待最长</option><option value="anomaly">异常优先</option></select></label><p>每页显示最多 50 项；核对项目节点、相邻时段、证据和历史依据后作出决定。</p></div>
+      <div className="approval-queue-controls"><label>队列优先顺序<select value={approvalGrouping} onChange={(e) => setApprovalGrouping(e.target.value)}><option value="export">临近本期导出</option><option value="waiting">等待最长</option><option value="anomaly">异常优先</option></select></label><p>卡片每页显示 8 项；核对项目节点、相邻时段、证据和历史依据后作出决定。</p></div>
+      <div className="fx-record-filters"><input type="search" aria-label="搜索待审记录" placeholder="搜索提交人或工作内容" value={approvalQuery} onChange={(event) => { setApprovalQuery(event.target.value); setApprovalPage(1); }} /></div>
       {approvals.isPending ? (
         <Card>
           <LoadingBlock />
@@ -7588,9 +7501,13 @@ export function ApprovalsPage() {
       ) : approvals.isError ? (
         <Card><CardContent><ErrorMessage error={approvals.error} onRetry={() => void approvals.refetch()} retrying={approvals.isFetching} /></CardContent></Card>
       ) : approvals.data?.items.length ? (
-        <div className="space-y-4">
-          {approvals.data.items.map((item) => (
-            <Card key={item.request.id}>
+        <div className="fx-record-grid">
+          {pageSlice(filteredApprovals, approvalPage, 8).map((item) => (
+            <CompactDisclosure className="fx-approval-card" key={item.request.id}
+              title={`${item.displayName ?? "成员"} · ${item.session.content}`}
+              summary={`${formatDateTime(item.session.startAt)} · ${formatDuration(item.session.netSeconds)} · 已等待 ${Math.max(0, Math.floor((queueNow - Date.parse(item.request.requestedAt ?? item.session.startAt)) / 3_600_000))} 小时`}
+              badge={<Badge tone={item.request.anomalyFlags.length || item.request.priority === "high" ? "danger" : "warning"}>{item.request.anomalyFlags.includes("overlapping_work_requires_review") ? "时段重叠，需核对" : item.request.anomalyFlags.length ? "需核对异常" : "待审核"}</Badge>}
+              id={`approval-card-${item.request.id}`}>
               <CardContent>
                 <div className="flex flex-col gap-4 md:flex-row md:items-center">
                   <div className="min-w-0 flex-1">
@@ -7720,7 +7637,7 @@ export function ApprovalsPage() {
                   </section>
                 ) : null}
               </CardContent>
-            </Card>
+            </CompactDisclosure>
           ))}
         </div>
       ) : (
@@ -7732,6 +7649,7 @@ export function ApprovalsPage() {
           />
         </Card>
       )}
+      <CollectionPager total={filteredApprovals.length} page={approvalPage} onChange={setApprovalPage} size={8} label="工时审批分页" />
       {approvals.hasNextPage ? <Button variant="secondary" disabled={approvals.isFetchingNextPage} onClick={() => void approvals.fetchNextPage()}>{approvals.isFetchingNextPage ? "正在读取…" : "加载更多待审记录"}</Button> : null}
       {corrections.isPending ? (
         <Card className="mt-5">
@@ -8899,7 +8817,7 @@ export function PayrollManagementPanel({ me, section }: { me: Me; section: "over
   );
 }
 
-export function PayrollPage({ view }: { view: "current" | "history" }) {
+export function PayrollPage({ view }: { view: "current" | "breakdown" | "hours" | "trends" | "history" }) {
   const chartPalette = useChartPalette();
   const [payrollSearch, setPayrollSearch] = useSearchParams();
   const sourceId = payrollSearch.get("source");
@@ -9334,11 +9252,23 @@ export function PayrollPage({ view }: { view: "current" | "history" }) {
     : 0;
   return (
     <>
-      {view === "current" && livePreview && Number(livePreview.approvedReimbursementAmount ?? 0) > 0 && <Card className="mb-4"><CardContent>
+      {view === "current" && livePreview && <>
+        <section className="fx-salary-overview" aria-label="本月实时薪资">
+          <div className="fx-salary-amount"><p className="app-page-kicker">本月实时预估</p><strong>{money(livePreview.currency, livePreview.estimatedAmount)}</strong><Badge tone={livePreview.includesPending ? "warning" : "positive"}>{livePreview.includesPending ? "含待审核预估" : "仅已批准"}</Badge><p>结算截止 / 计划导出 · {formatDateTime(livePreview.period.cutoffAt)}</p></div>
+          <div className="fx-salary-keyfacts"><StatusLine label="本月已批准工时" value={formatDuration(livePreview.approvedSeconds)} /><StatusLine label="待审核工时" value={formatDuration(livePreview.pendingSeconds)} /><StatusLine label="已批准报销 · 已计入本月预估" value={money(livePreview.currency, livePreview.approvedReimbursementAmount ?? "0")} /></div>
+        </section>
+        <div className="fx-salary-shortcuts" aria-label="薪资详情入口">
+          <Link to="/payroll/breakdown"><span>计算依据<small>计薪方式、奖励、补贴与报销</small></span><ArrowUpRight size={18} /></Link>
+          <Link to="/payroll/hours"><span>工时明细<small>逐周与逐日核对已批、待审工时</small></span><ArrowUpRight size={18} /></Link>
+          <Link to="/payroll/trends"><span>趋势与预测<small>每日投入、累计金额与预测区间</small></span><ArrowUpRight size={18} /></Link>
+        </div>
+        <p className="fx-detail-meta">预估包含当前可计薪的工作、奖励与已批准报销；待审核部分会随审批结果更新。正式金额可在历史工资单中核对。</p>
+      </>}
+      {view === "breakdown" && livePreview && Number(livePreview.approvedReimbursementAmount ?? 0) > 0 && <Card className="mb-4"><CardContent>
         <StatusLine label="已批准报销 · 已计入本月预估" value={money(livePreview.currency, livePreview.approvedReimbursementAmount!)} />
         <p className="mt-2 text-xs text-[var(--text-muted)]">按选定周期期末计入，不增加工时，也不作为未来工资增长的预测依据。</p>
       </CardContent></Card>}
-      {view === "current" && livePreview ? (
+      {view === "breakdown" && livePreview ? (
         <section className="mb-4 grid gap-2.5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4" aria-label="本月实时薪资">
           <Card><CardContent><StatusLine label={livePreview.planType === "hourly" || livePreview.planType === "hybrid" ? "基础时薪" : compensationTypeLabels[livePreview.planType]} value={`${money(livePreview.currency, livePreview.baseAmount)}${livePreview.planType === "hourly" || livePreview.planType === "hybrid" ? " / 小时" : ""}`} /></CardContent></Card>
           <Card><CardContent><StatusLine label={livePreview.currentWeek ? `本周已记录工时 · ${payrollWeekRangeLabel(livePreview.currentWeek)}` : "本周已记录工时"} value={formatDuration(livePreview.currentWeek?.totalSeconds ?? 0)} /><p className="mt-1 text-xs text-[var(--text-muted)]">已批准 {formatDuration(livePreview.currentWeek?.approvedSeconds ?? 0)}{livePreview.currentWeek?.pendingSeconds ? ` · 待审核 ${formatDuration(livePreview.currentWeek.pendingSeconds)}` : ""}</p></CardContent></Card>
@@ -9350,7 +9280,7 @@ export function PayrollPage({ view }: { view: "current" | "history" }) {
           <Card><CardContent><StatusLine label="结算截止 / 计划导出" value={formatDateTime(livePreview.period.cutoffAt)} /></CardContent></Card>
         </section>
       ) : null}
-      {view === "current" && livePreview ? (
+      {view === "breakdown" && livePreview ? (
         <Card className="mb-4">
           <CardHeader>
             <div><p className="app-page-kicker">实时口径</p><h2 className="mt-1 font-bold">本月实时预估怎样计算</h2></div>
@@ -9382,7 +9312,7 @@ export function PayrollPage({ view }: { view: "current" | "history" }) {
           </CardContent>
         </Card>
       ) : null}
-      {view === "current" && livePreview && livePreview.salaryTimeline.length ? (
+      {view === "trends" && livePreview && livePreview.salaryTimeline.length ? (
         <section className="mb-4" aria-label="实时薪资与预测图表">
           <Card className="analytics-chart-card salary-forecast-unified-card">
             <CardHeader><div><p className="app-page-kicker">本月趋势</p><h2 className="mt-1 font-bold">每日工时、薪资与月末预测</h2></div><Badge tone="warning">事实与预测分开展示</Badge></CardHeader>
@@ -9410,17 +9340,18 @@ export function PayrollPage({ view }: { view: "current" | "history" }) {
           </Card>
         </section>
       ) : null}
-      {view === "current" && livePreview && (activeSalaryWeeks.length || activeSalaryDays.length) ? (
+      {view === "hours" && livePreview ? (
         <section className="mb-4 grid gap-4 xl:grid-cols-2" aria-label="每日与每周工时明细">
           <Card>
             <CardHeader><h2 className="font-bold">每周工时</h2><Badge>{activeSalaryWeeks.length} 个周段</Badge></CardHeader>
-            <CardContent className="divide-y divide-[var(--border)]">
+            <CardContent className="max-h-96 divide-y divide-[var(--border)] overflow-y-auto">
               {activeSalaryWeeks.map((week) => (
                 <div className="grid gap-1 py-3 text-sm sm:grid-cols-[1fr_auto] sm:items-center" key={`${week.weekStartDate}-${week.startsOn}`}>
                   <div><p className="font-semibold">{payrollWeekRangeLabel(week)}</p><p className="text-xs text-[var(--text-muted)]">已批准 {formatDuration(week.approvedSeconds)}{week.pendingSeconds ? ` · 待审核 ${formatDuration(week.pendingSeconds)}` : ""}</p></div>
                   <p className="font-semibold tabular-nums">总工时 {formatDuration(week.approvedSeconds + week.pendingSeconds)}{week.weeklyBonusSeconds ? ` · 奖励 ${formatDuration(week.weeklyBonusSeconds)}` : week.weeklyBonusEstimatedSeconds ? ` · 可能奖励 ${formatDuration(week.weeklyBonusEstimatedSeconds)}` : ""}</p>
                 </div>
               ))}
+              {!activeSalaryWeeks.length && <p className="py-5 text-sm text-[var(--text-muted)]">本月暂无可展示的周工时。</p>}
             </CardContent>
           </Card>
           <Card>
@@ -9432,6 +9363,7 @@ export function PayrollPage({ view }: { view: "current" | "history" }) {
                   <p className="font-semibold tabular-nums">{formatDuration(day.workedSeconds)}{day.weeklyBonusSeconds ? ` · 奖励 ${formatDuration(day.weeklyBonusSeconds)}` : day.weeklyBonusEstimatedSeconds ? ` · 可能奖励 ${formatDuration(day.weeklyBonusEstimatedSeconds)}` : ""}</p>
                 </div>
               ))}
+              {!activeSalaryDays.length && <p className="py-5 text-sm text-[var(--text-muted)]">本月暂无已记录的日工时。</p>}
             </CardContent>
           </Card>
         </section>
@@ -9534,8 +9466,9 @@ export function PayrollPage({ view }: { view: "current" | "history" }) {
           />
         </Card>
       ) : null}
-      {view === "current" && payroll.isPending && <Card><LoadingBlock /></Card>}
-      {view === "current" && payroll.isSuccess && !livePreview && <Card><EmptyState icon={<CircleDollarSign />} title="暂无本月薪资预估" description={payroll.data.currentPlan ? "本月尚无可用薪资预估，可到历史工资单查看已生成的账单。" : "管理员尚未为你配置生效的薪资方案。"} /></Card>}
+      {view !== "history" && payroll.isPending && <Card><LoadingBlock /></Card>}
+      {view !== "history" && payroll.isSuccess && !livePreview && <Card><EmptyState icon={<CircleDollarSign />} title="暂无本月薪资预估" description={payroll.data.currentPlan ? "本月尚无可用薪资预估，可到历史工资单查看已生成的账单。" : "管理员尚未为你配置生效的薪资方案。"} /></Card>}
+      {view === "trends" && livePreview && !livePreview.salaryTimeline.length && <Card><EmptyState icon={<ChartNoAxesCombined />} title="暂无薪资趋势" description="形成每日投入后，可以在这里查看累计金额与预测区间。" /></Card>}
       <div className="mt-4">
         <ErrorMessage error={payroll.error} onRetry={() => void payroll.refetch()} retrying={payroll.isFetching} />
         <ErrorMessage error={acknowledge.error} />
@@ -10145,21 +10078,49 @@ interface TeamActivityResponse {
   members: TeamMemberActivity[];
 }
 export function TeamPage() {
+  const [teamPage, setTeamPage] = useState(1);
+  const [teamQuery, setTeamQuery] = useState("");
+  const [teamFrom, setTeamFrom] = useState("");
+  const [teamTo, setTeamTo] = useState("");
+  const [teamMember, setTeamMember] = useState("");
+  const [teamProject, setTeamProject] = useState("");
   const [expandedActivityId, setExpandedActivityId] = useState<string | null>(null);
-  const activity = useQuery({
+  const baseActivity = useQuery({
     queryKey: ["team-activity"],
     queryFn: () =>
-      api<TeamActivityResponse>("/api/team-activity?limit=50"),
+      api<TeamActivityResponse>("/api/team-activity?limit=100"),
   });
+  const params = new URLSearchParams({ limit: "100" });
+  if (teamQuery.trim()) params.set("q", teamQuery.trim());
+  if (teamMember) params.set("memberId", teamMember);
+  if (teamProject) params.set("project", teamProject);
+  if (teamFrom) params.set("from", zonedInputToDate(`${teamFrom}T00:00`, getOrganizationTimezone()).toISOString());
+  if (teamTo) params.set("to", zonedInputToDate(`${shiftVisualDay(teamTo, 1)}T00:00`, getOrganizationTimezone()).toISOString());
+  const filtered = Boolean(teamQuery.trim() || teamMember || teamProject || teamFrom || teamTo);
+  const invalidRange = Boolean(teamFrom && teamTo && teamFrom > teamTo);
+  const filteredData = useQuery({ queryKey: ["team-activity", params.toString()], queryFn: () => api<TeamActivityResponse>(`/api/team-activity?${params}`), enabled: filtered && !invalidRange, placeholderData: (previous) => previous ?? baseActivity.data });
+  const activity = filtered ? filteredData : baseActivity;
+  const filteredActivity = invalidRange ? [] : (activity.data?.items ?? []).filter((item) => !teamQuery.trim() || `${item.displayName} ${item.content} ${item.result} ${item.projectName ?? ""}`.toLowerCase().includes(teamQuery.trim().toLowerCase()));
   return (
     <>
       <PageHeader title="团队动态" />
+      <div className="fx-team-filters fx-record-filters" aria-label="团队动态筛选">
+        <input aria-label="搜索团队动态" type="search" maxLength={200} placeholder="搜索工作内容、结果、成员或项目" value={teamQuery} onChange={(event) => { setTeamQuery(event.target.value); setTeamPage(1); }} />
+        <select aria-label="筛选动态成员" value={teamMember} onChange={(event) => { setTeamMember(event.target.value); setTeamPage(1); }}><option value="">全部可见成员</option>{baseActivity.data?.members.map((member) => <option key={member.membershipId} value={member.membershipId}>{member.displayName}</option>)}</select>
+        <select aria-label="筛选动态项目" value={teamProject} onChange={(event) => { setTeamProject(event.target.value); setTeamPage(1); }}><option value="">全部项目主体</option><option value="__unlinked">未关联项目</option>{[...new Set(baseActivity.data?.members.flatMap((member) => member.projectNames) ?? [])].map((name) => <option key={name}>{name}</option>)}</select>
+        <label>从<input type="date" aria-label="团队动态开始日期" value={teamFrom} max={teamTo || undefined} onChange={(event) => { setTeamFrom(event.target.value); setTeamPage(1); }} /></label>
+        <label>至<input type="date" aria-label="团队动态结束日期" value={teamTo} min={teamFrom || undefined} onChange={(event) => { setTeamTo(event.target.value); setTeamPage(1); }} /></label>
+        {filtered && <Button variant="ghost" size="compact" onClick={() => { setTeamQuery(""); setTeamMember(""); setTeamProject(""); setTeamFrom(""); setTeamTo(""); setTeamPage(1); }}>重置筛选</Button>}
+      </div>
+      {invalidRange && <p role="alert" className="fx-filter-error">结束日期不能早于开始日期。</p>}
+      {activity.isFetching && activity.data && <p role="status" className="fx-filter-note">正在更新筛选结果…</p>}
       {activity.isPending ? (
         <Card>
           <LoadingBlock />
         </Card>
       ) : activity.data ? (
-        <div className="team-activity-layout">
+        <div className="team-activity-layout" aria-busy={activity.isFetching}>
+          <WorkSwimlane records={filteredActivity} renderDetail={(item) => <ReadOnlyEvidenceList sessionId={item.id} />} />
           <section className="team-member-overview" aria-label="可见协作成员">
             <div className="team-section-heading">
               <h2>协作成员</h2>
@@ -10169,7 +10130,7 @@ export function TeamPage() {
             </div>
             <div className="team-member-grid">
               {activity.data.members.map((member) => (
-                <article className="team-member-item" key={member.membershipId}>
+                <button type="button" className="team-member-item" key={member.membershipId} aria-label={`筛选 ${member.displayName} 的动态`} aria-pressed={teamMember === member.membershipId} onClick={() => { setTeamMember((current) => current === member.membershipId ? "" : member.membershipId); setTeamPage(1); }}>
                   {member.avatarUrl ? (
                     <img alt="" src={member.avatarUrl} />
                   ) : (
@@ -10191,7 +10152,7 @@ export function TeamPage() {
                         : "暂无公开工作记录"}
                     </time>
                   </div>
-                </article>
+                </button>
               ))}
             </div>
           </section>
@@ -10201,8 +10162,9 @@ export function TeamPage() {
               <div className="team-section-heading">
                 <h2>最近工作</h2>
               </div>
-              {activity.data.items.map((item) => (
-                <article className="team-activity-item" key={item.id}>
+              <div className="fx-team-feed-list">
+              {pageSlice(filteredActivity, teamPage, 8).map((item) => (
+                <motion.article layout="position" className="team-activity-item" key={item.id} transition={{ duration: reducedMotion() ? 0 : .4 }}>
                   <button
                     aria-expanded={expandedActivityId === item.id}
                     className="team-activity-summary"
@@ -10236,8 +10198,8 @@ export function TeamPage() {
                       size={17}
                     />
                   </button>
-                  {expandedActivityId === item.id ? (
-                    <section className="team-activity-detail" aria-label="完整工作与附件详情">
+                  <AnimatePresence initial={false}>{expandedActivityId === item.id ? (
+                    <motion.section className="team-activity-detail" aria-label="完整工作与附件详情" initial={{ opacity: 0, height: reducedMotion() ? "auto" : 0 }} animate={{ opacity: 1, height: "auto" }} exit={{ opacity: 0, height: reducedMotion() ? "auto" : 0 }} transition={{ duration: reducedMotion() ? 0 : .28 }}>
                       <dl className="approval-fact-grid">
                         <div><dt>工作内容</dt><dd>{item.content}</dd></div>
                         <div><dt>工作结果</dt><dd>{item.result || "未填写"}</dd></div>
@@ -10249,17 +10211,20 @@ export function TeamPage() {
                         ) : null}
                       </dl>
                       <ReadOnlyEvidenceList sessionId={item.id} />
-                    </section>
-                  ) : null}
-                </article>
+                    </motion.section>
+                  ) : null}</AnimatePresence>
+                </motion.article>
               ))}
+              {!filteredActivity.length && <p className="fx-chart-empty">没有符合筛选条件的工作动态。</p>}
+              </div>
+              <CollectionPager total={filteredActivity.length} page={teamPage} onChange={setTeamPage} size={8} label="团队动态分页" />
             </section>
           ) : (
             <Card>
               <EmptyState
-                description="成员发布项目可见工作后会出现在这里。"
+                description={filtered ? "试着更换成员、日期、项目或搜索内容。" : "成员发布项目可见工作后会出现在这里。"}
                 icon={<Users />}
-                title="暂无公开工作动态"
+                title={filtered ? "所选范围暂无工作动态" : "暂无公开工作动态"}
               />
             </Card>
           )}
@@ -11781,8 +11746,20 @@ function AiSettingsEditor({
     password: "",
     totpCode: "",
   }));
+  const [extraBodyText, setExtraBodyText] = useState(() => JSON.stringify(form.generationOptions.extraBody, null, 2));
+  const extraBody = useMemo(() => {
+    try {
+      const parsed = aiExtraBodySchema.safeParse(JSON.parse(extraBodyText.trim() || "{}"));
+      return parsed.success ? { data: parsed.data, error: null } : { data: null, error: parsed.error.issues[0]?.message ?? "请填写有效的 JSON 对象。" };
+    } catch { return { data: null, error: "JSON 格式有误，请检查双引号、逗号和括号。" }; }
+  }, [extraBodyText]);
+  const hasUnsavedChanges = Boolean(form.apiKey.trim() || form.clearApiKey || extraBody.error) ||
+    form.enabled !== current.enabled || form.baseUrl !== current.baseUrl || form.model !== current.model ||
+    form.dailyRequestLimit !== current.dailyRequestLimit || form.monthlyRequestLimit !== current.monthlyRequestLimit || form.maxOutputTokens !== current.maxOutputTokens ||
+    JSON.stringify({ ...form.generationOptions, extraBody: extraBody.data }) !== JSON.stringify(aiGenerationOptionsSchema.parse(current.generationOptions ?? {}));
   const save = useMutation({
     mutationFn: async (testAfterSave: boolean = false) => {
+      if (!extraBody.data) throw new Error(extraBody.error ?? "扩展参数无效。");
       const updated = await api<AiSettings>("/api/ai/settings", {
         method: "PUT",
         body: {
@@ -11792,7 +11769,7 @@ function AiSettingsEditor({
           dailyRequestLimit: form.dailyRequestLimit,
           monthlyRequestLimit: form.monthlyRequestLimit,
           maxOutputTokens: form.maxOutputTokens,
-          generationOptions: form.generationOptions,
+          generationOptions: { ...form.generationOptions, extraBody: extraBody.data },
           ...(form.apiKey.trim() ? { apiKey: form.apiKey.trim() } : {}),
           clearApiKey: form.clearApiKey,
           password: form.password,
@@ -11813,6 +11790,7 @@ function AiSettingsEditor({
     },
     onSuccess: async ({ updated, message }) => {
       onSaved(message);
+      setExtraBodyText(JSON.stringify(aiGenerationOptionsSchema.parse(updated.generationOptions ?? {}).extraBody, null, 2));
       setForm({
         enabled: updated.enabled,
         baseUrl: updated.baseUrl,
@@ -11866,15 +11844,15 @@ function AiSettingsEditor({
       <CardContent className="p-5 sm:p-6">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div>
-            <p className="app-section-label">Owner only · organization scope</p>
+            <p className="app-section-label">组织配置 · 仅负责人可修改</p>
             <h2 className="mt-2 text-xl font-extrabold tracking-[-0.035em]">
-              组织级 AI 与成本控制
+              连接你选择的 AI 模型
             </h2>
             <p className="mt-2 max-w-3xl text-sm leading-6 text-[var(--text-muted)]">
-              员工不会接触 API Key。保存时会先做密码二次验证；已保存的密钥仅以加密形式存在服务端，页面永远只显示是否已配置。
+              填写兼容接口地址、任意模型标识和 API Key，再按模型需要调整参数。配置对本组织生效，新任务使用保存后的模型；密钥加密保存并且不回显。
             </p>
           </div>
-          <Button onClick={onClose} size="compact" variant="secondary">
+          <Button disabled={save.isPending || checkProvider.isPending} onClick={() => { if (!hasUnsavedChanges || window.confirm("配置尚未保存，确定离开？已保存的模型配置不会被改变。")) onClose(); }} size="compact" variant="secondary">
             关闭配置
           </Button>
         </div>
@@ -11905,14 +11883,16 @@ function AiSettingsEditor({
             生产服务尚未提供 AI_CONFIG_ENCRYPTION_KEY。可查看默认配置，但不能安全保存组织 API Key；请先在 API 服务和 Worker 中填入同一随机密钥。
           </p>
         ) : null}
-        <form
-          className="mt-5 grid gap-4 md:grid-cols-2"
+        <StepForm steps={["连接模型", "生成参数", "使用额度", "验证保存"]} validateStage={(stage) => stage === 1 && extraBody.error ? extraBody.error : null}
+          className="ai-configuration-form mt-5 grid gap-4 md:grid-cols-2"
           onSubmit={(event) => {
             event.preventDefault();
             save.mutate(false);
           }}
         >
-          <label className="flex items-center gap-3 rounded-xl bg-[var(--surface-subtle)] px-3 py-3 text-sm font-semibold md:col-span-2">
+          <fieldset className="contents" disabled={save.isPending || checkProvider.isPending}>
+          <div data-wizard-step={0} className="ai-configuration-section md:col-span-2"><h3>连接与模型</h3><p>模型名称自由填写，无需修改代码或重新部署。</p></div>
+          <label data-wizard-step={0} className="flex items-center gap-3 rounded-xl bg-[var(--surface-subtle)] px-3 py-3 text-sm font-semibold md:col-span-2">
             <input
               checked={form.enabled}
               onChange={(event) =>
@@ -11922,7 +11902,7 @@ function AiSettingsEditor({
             />
             启用本组织 AI 工作洞察
           </label>
-          <Field
+          <Field wizardStep={0}
             hint="填写供应商提供的 OpenAI 兼容 API 基础路径（如 /v1）；也可粘贴完整 /chat/completions 地址，系统会自动规范化。生产环境使用 HTTPS。"
             label="AI Base URL"
           >
@@ -11933,11 +11913,12 @@ function AiSettingsEditor({
                 setForm((current) => ({ ...current, baseUrl: event.target.value }))
               }
               required
+              placeholder="https://你的供应商地址/v1"
               type="url"
               value={form.baseUrl}
             />
           </Field>
-          <Field hint="复制供应商提供的完整模型标识，支持 provider/model 等带斜杠的名称。" label="模型标识">
+          <Field wizardStep={0} hint="复制供应商提供的完整模型标识，支持 provider/model 等带斜杠的名称。" label="模型标识">
             <input
               autoCapitalize="none"
               className={fieldClass}
@@ -11945,10 +11926,11 @@ function AiSettingsEditor({
                 setForm((current) => ({ ...current, model: event.target.value }))
               }
               required
+              placeholder="填写供应商提供的完整模型标识"
               value={form.model}
             />
           </Field>
-          <Field
+          <Field wizardStep={0}
             hint={current.source === "deployment_default" ? "首次保存组织配置请填写密钥，部署密钥不会自动复制；之后留空可保留组织密钥。" : current.hasApiKey ? "留空会保留当前密钥；输入新值会安全替换它。" : "首次启用必须填写；保存后不可再次查看。"}
             label="API Key"
           >
@@ -11962,7 +11944,8 @@ function AiSettingsEditor({
               value={form.apiKey}
             />
           </Field>
-          <Field hint="限制单份报告长度，直接控制输出成本。" label="最大输出 Token">
+          <div className="ai-configuration-section md:col-span-2"><h3>生成与兼容参数</h3><p>可选参数留空时使用供应商默认值；按实际模型能力配置。</p></div>
+          <Field wizardStep={1} hint="限制单份报告长度，直接控制输出成本。" label="最大输出 Token">
             <input
               className={fieldClass}
               max={16000}
@@ -11973,29 +11956,37 @@ function AiSettingsEditor({
               value={form.maxOutputTokens}
             />
           </Field>
-          <Field hint="超时覆盖连接与完整响应读取，慢模型可适当调高。" label="请求超时（秒）">
+          <Field wizardStep={1} hint="超时覆盖连接与完整响应读取，慢模型可适当调高。" label="请求超时（秒）">
             <input className={fieldClass} type="number" min={5} max={300} required value={form.generationOptions.requestTimeoutMs / 1000} onChange={(event) => setForm((current) => ({ ...current, generationOptions: { ...current.generationOptions, requestTimeoutMs: Number(event.target.value) * 1000 } }))} />
           </Field>
-          <Field hint="包含首次请求；1 表示不自动重试。网络、限流、服务或回答格式异常可重试，配置错误直接提示。" label="最大尝试次数">
+          <Field wizardStep={1} hint="包含首次请求；1 表示不自动重试。网络、限流、服务或回答格式异常可重试，配置错误直接提示。" label="最大尝试次数">
             <input className={fieldClass} type="number" min={1} max={5} required value={form.generationOptions.maxAttempts} onChange={(event) => setForm((current) => ({ ...current, generationOptions: { ...current.generationOptions, maxAttempts: Number(event.target.value) } }))} />
           </Field>
-          <Field hint="留空使用模型默认值，适用于不接受此参数的模型。" label="温度（Temperature，可选）">
+          <Field wizardStep={1} hint="留空使用模型默认值，适用于不接受此参数的模型。" label="温度（Temperature，可选）">
             <input className={fieldClass} type="number" min={0} max={2} step="0.01" placeholder="模型默认" value={form.generationOptions.temperature ?? ""} onChange={(event) => setForm((current) => ({ ...current, generationOptions: { ...current.generationOptions, temperature: event.target.value === "" ? null : Number(event.target.value) } }))} />
           </Field>
-          <Field hint="留空使用模型默认值；通常只调整温度或 Top P 中的一项。" label="Top P（可选）">
+          <Field wizardStep={1} hint="留空使用模型默认值；通常只调整温度或 Top P 中的一项。" label="Top P（可选）">
             <input className={fieldClass} type="number" min={0} max={1} step="0.01" placeholder="模型默认" value={form.generationOptions.topP ?? ""} onChange={(event) => setForm((current) => ({ ...current, generationOptions: { ...current.generationOptions, topP: event.target.value === "" ? null : Number(event.target.value) } }))} />
           </Field>
-          <Field hint="按供应商文档选择；部分推理模型要求 max_completion_tokens。" label="输出 Token 参数">
+          <Field wizardStep={1} hint="按供应商文档选择；部分推理模型要求 max_completion_tokens。" label="输出 Token 参数">
             <select className={fieldClass} value={form.generationOptions.tokenLimitParameter} onChange={(event) => setForm((current) => ({ ...current, generationOptions: { ...current.generationOptions, tokenLimitParameter: event.target.value as AiGenerationOptions["tokenLimitParameter"] } }))}>
               <option value="max_tokens">max_tokens</option><option value="max_completion_tokens">max_completion_tokens</option>
             </select>
           </Field>
-          <Field hint="通用模式通过提示词要求结构化回答；供应商支持时可启用 JSON 模式。" label="响应格式">
+          <Field wizardStep={1} hint="通用模式通过提示词要求结构化回答；供应商支持时可启用 JSON 模式。" label="响应格式">
             <select className={fieldClass} value={form.generationOptions.responseFormat} onChange={(event) => setForm((current) => ({ ...current, generationOptions: { ...current.generationOptions, responseFormat: event.target.value as AiGenerationOptions["responseFormat"] } }))}>
               <option value="text">通用模式</option><option value="json_object">JSON 对象模式</option>
             </select>
           </Field>
-          <Field hint={`按 ${current.usage.timezone} 组织时区计数。重复相同事实的请求会复用已有任务。`} label="每日请求上限">
+          <div data-wizard-step={1} className="md:col-span-2">
+            <Field wizardStep={1} label="供应商扩展参数（JSON，可选）" hint="按供应商文档填写额外生成参数，例如 reasoning_effort 或 thinking。使用 JSON 对象；模型、消息和上方已有参数不能重复填写，密钥只填入 API Key。">
+              <textarea className={`${textAreaClass} ai-extra-body`} aria-invalid={Boolean(extraBody.error)} aria-describedby="ai-extra-body-error" maxLength={8192} spellCheck={false} rows={5} value={extraBodyText} onChange={(event) => setExtraBodyText(event.target.value)} />
+            </Field>
+            {extraBody.error ? <p id="ai-extra-body-error" role="alert" className="mt-2 text-xs text-[var(--danger)]">{extraBody.error}</p> : null}
+            <Button className="mt-2" size="compact" variant="ghost" disabled={!extraBody.data} onClick={() => setExtraBodyText(JSON.stringify(extraBody.data, null, 2))}>格式化 JSON</Button>
+          </div>
+          <div data-wizard-step={2} className="ai-configuration-section md:col-span-2"><h3>使用额度</h3><p>通过请求次数和输出长度控制使用成本。</p></div>
+          <Field wizardStep={2} hint={`按 ${current.usage.timezone} 组织时区计数。重复相同事实的请求会复用已有任务。`} label="每日请求上限">
             <input
               className={fieldClass}
               max={10000}
@@ -12006,7 +11997,7 @@ function AiSettingsEditor({
               value={form.dailyRequestLimit}
             />
           </Field>
-          <Field hint="失败任务也会计入额度，避免供应商异常时反复消耗。" label="每月请求上限">
+          <Field wizardStep={2} hint="失败任务也会计入额度，避免供应商异常时反复消耗。" label="每月请求上限">
             <input
               className={fieldClass}
               max={300000}
@@ -12017,7 +12008,8 @@ function AiSettingsEditor({
               value={form.monthlyRequestLimit}
             />
           </Field>
-          <Field hint="修改组织密钥、模型或额度需重新输入当前密码。" label="当前 Owner 密码">
+          <div data-wizard-step={3} className="ai-configuration-section md:col-span-2"><h3>验证与保存</h3><p>{hasUnsavedChanges ? "有未保存更改。可选择保存后立即测试新配置。" : "当前配置已保存；填写密码后可测试连接。"}</p></div>
+          <Field wizardStep={3} hint="修改组织密钥、模型或额度需重新输入当前密码。" label="当前 Owner 密码">
             <PasswordInput
               autoComplete="current-password"
               inputLabel="当前 Owner 密码"
@@ -12029,7 +12021,7 @@ function AiSettingsEditor({
               value={form.password}
             />
           </Field>
-          <Field hint="若当前 Owner 已启用双因素认证，则必填。" label="动态验证码（如已启用）">
+          <Field wizardStep={3} hint="若当前 Owner 已启用双因素认证，则必填。" label="动态验证码（如已启用）">
             <input
               autoComplete="one-time-code"
               className={fieldClass}
@@ -12054,16 +12046,16 @@ function AiSettingsEditor({
             清除已保存密钥并停用组织 AI（不能与替换密钥同时使用）
           </label>
           <div className="flex flex-wrap items-center gap-3 md:col-span-2">
-            <Button disabled={save.isPending || checkProvider.isPending} type="submit">
+            <Button disabled={save.isPending || checkProvider.isPending || Boolean(extraBody.error)} type="submit">
               <KeyRound size={16} />
               {save.isPending ? "正在安全保存…" : "验证并保存组织配置"}
             </Button>
-            <Button disabled={save.isPending || checkProvider.isPending || !form.enabled || form.password.length < 8} type="button" variant="secondary" onClick={(event) => { if (event.currentTarget.form?.reportValidity()) save.mutate(true); }}>保存并测试新配置</Button>
+            <Button disabled={save.isPending || checkProvider.isPending || Boolean(extraBody.error) || !form.enabled || form.password.length < 8} type="button" variant="secondary" onClick={(event) => { if (event.currentTarget.form?.reportValidity()) save.mutate(true); }}>保存并测试新配置</Button>
             <Button
               disabled={
                 checkProvider.isPending || save.isPending ||
                 form.password.length < 8 ||
-                !current.usable
+                !current.usable || hasUnsavedChanges
               }
               onClick={() => checkProvider.mutate()}
               type="button"
@@ -12073,11 +12065,12 @@ function AiSettingsEditor({
               {checkProvider.isPending ? "正在测试…" : "测试已保存配置"}
             </Button>
           </div>
-          <div className="md:col-span-2">
+          <div data-wizard-step="all" className="md:col-span-2">
             <ErrorMessage error={save.error ?? checkProvider.error} />
             {saveMessage ? <p role="status" className="mt-2 text-sm text-[var(--text-muted)]">{saveMessage}</p> : null}
           </div>
-        </form>
+          </fieldset>
+        </StepForm>
         <section className="mt-5" aria-label="AI 连接测试历史">
           <div className="flex items-center justify-between gap-3">
             <h3 className="text-sm font-bold">连接记录</h3>
@@ -12110,10 +12103,17 @@ function AiSettingsEditor({
   );
 }
 
-export function AiPage({ me }: { me: Me }) {
+export function AiConfigurationPage() {
+  const navigate = useNavigate();
+  return <><PageHeader title="AI 模型配置" /><AiSettingsPanel onClose={() => navigate("/ai")} /></>;
+}
+
+export function AiPage({ me, view = "chat" }: { me: Me; view?: "chat" | "reports" | "compose" }) {
   const queryClient = useQueryClient();
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
+  const { reportId } = useParams();
+  const [conversationsOpen, setConversationsOpen] = useState(false);
   const requestedConversationId = searchParams.get("conversation") ?? "primary";
   const conversationId = /^[a-zA-Z0-9_-]{1,64}$/.test(requestedConversationId)
     ? requestedConversationId
@@ -12145,9 +12145,11 @@ export function AiPage({ me }: { me: Me }) {
         ? 5_000
         : false,
   });
-  const [scope, setScope] = useState<"self" | "team">("self");
+  const [scope, setScope] = useState<"self" | "team">(() => searchParams.get("scope") === "team" && me.permissions.some((grant) => grant.permission === "ai.team_analysis" && grant.scopeKind === "organization") ? "team" : "self");
   const [taskType, setTaskType] = useState<AiTaskType>("weekly_summary");
-  const [questionDrafts, setQuestionDrafts] = useState<Record<string, string>>({});
+  const questionCache = useWorkspaceDraft<Record<string, string>>({ identity: me.user.membershipId, entity: "ai-question-drafts", version: 1, initial: {} });
+  const questionDrafts = questionCache.value;
+  const setQuestionDrafts = questionCache.setValue;
   const question = questionDrafts[conversationId] ?? "";
   const setQuestion = (value: string) => {
     // History changes before React renders the new conversation. Read the
@@ -12156,13 +12158,12 @@ export function AiPage({ me }: { me: Me }) {
     const targetId = /^[a-zA-Z0-9_-]{1,64}$/.test(requestedId) ? requestedId : "primary";
     setQuestionDrafts((current) => ({ ...current, [targetId]: value }));
   };
-  const activeReportId = searchParams.get("report");
+  const activeReportId = reportId ?? searchParams.get("report");
   const setActiveReportId = (id: string) => {
     const next = new URLSearchParams(searchParams);
-    next.set("report", id);
-    navigate({ search: `?${next.toString()}` });
+    next.delete("report");
+    navigate(`/ai/reports/${encodeURIComponent(id)}?${next.toString()}`);
   };
-  const [settingsOpen, setSettingsOpen] = useState(false);
   const chatScrollRef = useRef<HTMLDivElement | null>(null);
   // Same-bucket requests deduplicate; a tab left open overnight must still
   // request a fresh range when the user next creates a report.
@@ -12186,12 +12187,12 @@ export function AiPage({ me }: { me: Me }) {
     },
     onSuccess: async (response) => {
       // A late creation must not change a conversation or page the user opened meanwhile.
-      if (response.job?.id && window.location.href === response.origin) setActiveReportId(response.job.id);
       await queryClient.invalidateQueries({ queryKey: ["ai-reports"] });
+      if (response.job?.id && window.location.href === response.origin) setActiveReportId(response.job.id);
     },
   });
   const sendChat = useMutation({
-    mutationFn: (input: { question: string; conversationId: string }) => {
+    mutationFn: (input: { question: string; conversationId: string; rangeDays?: number }) => {
       const to = new Date();
       to.setSeconds(0, 0);
       to.setMinutes(Math.floor(to.getMinutes() / 5) * 5);
@@ -12203,7 +12204,7 @@ export function AiPage({ me }: { me: Me }) {
           question: input.question.trim(),
           conversationId: input.conversationId,
           ...(pageContext ? { pageContext } : {}),
-          from: new Date(to.getTime() - 31 * 86_400_000).toISOString(),
+          from: new Date(to.getTime() - (input.rangeDays ?? 31) * 86_400_000).toISOString(),
           to: to.toISOString(),
         },
       });
@@ -12266,7 +12267,8 @@ export function AiPage({ me }: { me: Me }) {
     const next = new URLSearchParams(searchParams);
     next.set("conversation", id);
     next.delete("report");
-    navigate({ search: `?${next.toString()}` });
+    setConversationsOpen(false);
+    navigate(`/ai?${next.toString()}`);
   };
   const newConversation = () => {
     const suffix = crypto.randomUUID().replaceAll("-", "").slice(0, 12);
@@ -12287,24 +12289,31 @@ export function AiPage({ me }: { me: Me }) {
     if (!container) return;
     container.scrollTo({ top: container.scrollHeight, behavior: reducedMotion() ? "instant" : "smooth" });
   }, [chatUpdateKey]);
-  const selected =
-    reportItems.find((item) => item.job.id === activeReportId || item.report?.id === activeReportId) ??
-    reportItems[0] ??
-    null;
+  const selected = activeReportId
+    ? reportItems.find((item) => item.job.id === activeReportId || item.report?.id === activeReportId) ?? null
+    : reportItems[0] ?? null;
   const selectedReport = selected?.report ?? null;
   const selectedDetail = useQuery({
     queryKey: ["ai-report-detail", selectedReport?.id],
     queryFn: () => api<AiReportDetail>(`/api/ai/reports/${selectedReport!.id}`),
-    enabled: Boolean(selectedReport?.id),
+    enabled: view === "reports" && Boolean(selectedReport?.id),
   });
   const isSalaryReport = selected?.job.taskType === "salary_explanation";
+  const navigationParams = new URLSearchParams();
+  if (conversationId !== "primary") navigationParams.set("conversation", conversationId);
+  if (pageContext) { navigationParams.set("area", pageContext.area); if ("entityId" in pageContext && pageContext.entityId) navigationParams.set("entity", pageContext.entityId); }
+  if (scope === "team") navigationParams.set("scope", "team");
+  const navigationSearch = navigationParams.size ? `?${navigationParams}` : "";
 
+  if (view === "chat" && searchParams.get("report")) return <Navigate replace to={`/ai/reports/${encodeURIComponent(searchParams.get("report")!)}`} />;
   return (
     <>
       <PageHeader
         title="AI 工作洞察"
         actions={
           <>
+            <Button size="compact" variant="secondary" onClick={() => setConversationsOpen(true)}>对话记录</Button>
+            <Button size="compact" onClick={newConversation}><Plus size={14} />新建</Button>
             <label className="sr-only" htmlFor="ai-scope">AI 分析范围</label>
             <select
               className={`${fieldClass} min-h-10 w-auto min-w-32`}
@@ -12322,7 +12331,7 @@ export function AiPage({ me }: { me: Me }) {
               {canAnalyzeTeam ? <option value="team">团队范围</option> : null}
             </select>
             {me.user.isOwner ? (
-              <Button onClick={() => setSettingsOpen((open) => !open)} variant="secondary">
+              <Button onClick={() => navigate("/ai/settings")} variant="secondary">
                 <Settings2 size={16} />
                 组织 AI 配置
               </Button>
@@ -12330,17 +12339,8 @@ export function AiPage({ me }: { me: Me }) {
           </>
         }
       />
-      {settingsOpen ? <AiSettingsPanel onClose={() => setSettingsOpen(false)} /> : null}
-      {reports.isPending ? (
-        <Card>
-          <LoadingBlock />
-        </Card>
-      ) : reports.isError && !reports.data ? (
-        <Card><CardContent><ErrorMessage error={reports.error} onRetry={() => void reports.refetch()} retrying={reports.isFetching} /></CardContent></Card>
-      ) : (
-        <div className="ai-workspace">
-          <aside className="ai-history">
-            <Card className="mb-4 ai-conversations-card">
+      <WorkspaceNavigation label="AI 工作区导航" items={[{ to: `/ai${navigationSearch}`, label: "对话" }, { to: `/ai/reports${navigationSearch}`, label: "报告历史", end: false }, { to: `/ai/compose${navigationSearch}`, label: "新建分析" }]} />
+      <WorkspaceDialog open={conversationsOpen} title="对话记录" onClose={() => setConversationsOpen(false)}>            <Card className="mb-4 ai-conversations-card">
               <CardHeader>
                 <h2 className="font-extrabold tracking-[-0.025em]">对话</h2>
                 <Button onClick={newConversation} size="compact" type="button">
@@ -12365,7 +12365,17 @@ export function AiPage({ me }: { me: Me }) {
                 ) : null}
               </div>
             </Card>
-            <Card>
+</WorkspaceDialog>
+      <RegionTransition changeKey={view}>
+      {reports.isPending ? (
+        <Card>
+          <LoadingBlock />
+        </Card>
+      ) : reports.isError && !reports.data ? (
+        <Card><CardContent><ErrorMessage error={reports.error} onRetry={() => void reports.refetch()} retrying={reports.isFetching} /></CardContent></Card>
+      ) : (
+        <div className={view === "chat" ? "fx-ai-chat-only" : view === "reports" ? "fx-ai-report-layout" : "fx-ai-compose-page"}>
+          {view === "reports" && <aside className="ai-history ai-history-card">            <Card>
               <CardHeader>
                 <div>
                   <h2 className="font-extrabold tracking-[-0.025em]">
@@ -12403,9 +12413,9 @@ export function AiPage({ me }: { me: Me }) {
                 )}
               </div>
             </Card>
-          </aside>
+</aside>}
           <section className="min-w-0">
-            <Card className="ai-chat-card">
+            {view === "chat" && (            <Card className="ai-chat-card">
               <CardHeader>
                 <div>
                   <p className="app-page-kicker">基于当前授权事实</p>
@@ -12417,14 +12427,14 @@ export function AiPage({ me }: { me: Me }) {
               </CardHeader>
               <CardContent>
                 {chatItems.length ? (
-                  <div className="max-h-[32rem] space-y-4 overflow-y-auto pr-1" aria-live="polite" ref={chatScrollRef}>
+                  <div className="ai-chat-transcript space-y-4 pr-1" aria-live="polite" ref={chatScrollRef}>
                     {chatItems.map((item) => (
                       <div className="space-y-2" key={item.job.id}>
                         <div className="ml-auto max-w-[88%] rounded-2xl rounded-br-md bg-[var(--accent)] px-4 py-3 text-sm leading-6 text-[var(--accent-foreground)]">
                           {item.job.scope.question || "工作分析"}
                         </div>
                         <div className="max-w-[92%] rounded-2xl rounded-bl-md bg-[var(--surface-subtle)] px-4 py-3 text-sm leading-7">
-                          {(item.report ? <AiFactAnswer reportId={item.report.id} text={item.report.summary} /> : null) ??
+                          {(item.report ? <AiFactAnswer reportId={item.report.id} text={item.report.summary} conversationId={conversationId} scope={scope} /> : null) ??
                             (item.job.status === "failed"
                               ? item.job.errorSummary || "本次回答生成失败，可以重试。"
                               : item.job.status === "cancelled"
@@ -12447,7 +12457,7 @@ export function AiPage({ me }: { me: Me }) {
                     ))}
                   </div>
                 ) : (
-                  <div className="py-6 text-center text-sm text-[var(--text-muted)]">
+                  <div className="fx-chat-introduction py-6 text-center text-sm text-[var(--text-muted)]">
                     可以询问工作进展、项目阻塞、成员状态或下一步安排。
                   </div>
                 )}
@@ -12458,34 +12468,31 @@ export function AiPage({ me }: { me: Me }) {
                     if (question.trim().length >= 2 && !sendChat.isPending) sendChat.mutate({ question, conversationId });
                   }}
                 >
+                  <SmoothReveal show={!question} className="fx-ai-actions" label="快捷提问">
+                    {aiTaskPresets.filter((preset) => (!preset.teamOnly || (canAnalyzeTeam && scope === "team")) && (!preset.ownerOnly || me.user.isOwner) && (!preset.selfOnly || scope === "self") && (!preset.requiresOwnPayroll || canViewOwnPayroll)).map((preset) =>
+                      <button type="button" key={preset.type} disabled={sendChat.isPending} onClick={() => sendChat.mutate({ question: `${preset.label}：${preset.description}`, conversationId, rangeDays: preset.rangeDays })}>{preset.label}</button>)}
+                  </SmoothReveal>
                   <textarea
                     aria-label="向 AI 提问"
                     className={`${textAreaClass} min-h-28 resize-y`}
                     maxLength={2_000}
                     onChange={(event) => setQuestion(event.target.value)}
+                    onKeyDown={(event) => { if (event.key === "Enter" && (event.ctrlKey || event.metaKey) && question.trim().length >= 2 && !sendChat.isPending) { event.preventDefault(); sendChat.mutate({ question, conversationId }); } }}
                     placeholder={scope === "team" ? "例如：哪些项目当前受阻，分别需要谁处理？" : "例如：总结我本周的投入、成果和待处理事项。"}
                     value={question}
                   />
-                  <div className="flex flex-wrap items-center justify-between gap-3">
-                    <div className="flex flex-wrap gap-2">
-                      {(scope === "team"
-                        ? me.user.isOwner
-                          ? ["给我一份老板今天必须知道的决策简报", "梳理项目阻塞、影响和建议责任角色", "列出未来七天需要盯住的交付与审核风险"]
-                          : ["生成今日运营待办和优先级", "梳理项目阻塞、影响和建议责任角色", "列出待审核、异常和协作缺口"]
-                        : ["总结我今天的工作", "梳理当前项目阻塞", "给出下一步优先级"]
-                      ).map((prompt) => (
-                        <button className="rounded-lg bg-[var(--surface-subtle)] px-3 py-2 text-xs font-semibold hover:bg-[var(--accent-soft)]" key={prompt} onClick={() => setQuestion(prompt)} type="button">{prompt}</button>
-                      ))}
-                    </div>
+                  <div className="flex items-center justify-end gap-3">
                     <Button disabled={question.trim().length < 2 || sendChat.isPending} type="submit">
                       <ArrowUpRight size={16} />
                       {sendChat.isPending ? "正在发送…" : "发送"}
                     </Button>
                   </div>
+                  <ErrorMessage error={sendChat.error} />
                 </form>
               </CardContent>
             </Card>
-            <Card className="ai-compose-card mt-5">
+)}
+            {view === "compose" && (            <Card className="ai-compose-card mt-5">
               <CardContent>
                 <div className="flex items-start justify-between gap-3">
                   <h2 className="text-xl font-extrabold tracking-[-0.04em]">
@@ -12505,6 +12512,7 @@ export function AiPage({ me }: { me: Me }) {
                       <button
                         aria-label={preset.label}
                         aria-pressed={taskType === preset.type}
+                        disabled={create.isPending}
                         className={`ai-preset ${taskType === preset.type ? "is-active" : ""}`}
                         key={preset.type}
                         onClick={() => {
@@ -12520,6 +12528,7 @@ export function AiPage({ me }: { me: Me }) {
                     ))}
                 </div>
                 <div className="mt-4 flex flex-wrap items-center gap-3">
+                  <p className="fx-ai-selection" role="status">已选择：{aiTaskPresets.find((preset) => preset.type === taskType)?.label} · {scope === "team" ? "团队" : "本人"} · 近 {aiTaskPresets.find((preset) => preset.type === taskType)?.rangeDays ?? 7} 天</p>
                   <Button
                     disabled={create.isPending}
                     onClick={() => create.mutate(window.location.href)}
@@ -12528,9 +12537,11 @@ export function AiPage({ me }: { me: Me }) {
                     <ArrowUpRight size={16} />
                   </Button>
                 </div>
+                <ErrorMessage error={create.error} />
               </CardContent>
             </Card>
-            {selected ? (
+)}
+            {view === "reports" && <>            {selected ? (
               <Card className="ai-report-card mt-5">
                 <CardHeader>
                   {selectedReport ? (
@@ -12639,60 +12650,30 @@ export function AiPage({ me }: { me: Me }) {
                   ) : (
                     <div className="min-h-48">
                       <EmptyState
-                        description={
-                          selected.job.status === "failed"
-                            ? selected.job.errorSummary ||
-                              "生成失败，请稍后重新创建报告。"
-                            : selected.job.status === "cancelled"
-                              ? "该任务已安全取消；如仍需要此报告，可以重新生成。"
-                            : "报告完成后，摘要、风险和建议会基于同一授权范围显示在这里。"
-                        }
+                        description={selected.job.status === "failed" ? selected.job.errorSummary || "生成失败，请稍后重新创建报告。" : selected.job.status === "cancelled" ? "该任务已安全取消；如仍需要此报告，可以重新生成。" : "报告完成后，摘要、风险和建议会基于同一授权范围显示在这里。"}
                         icon={<Bot />}
-                        title={
-                          selected.job.status === "failed"
-                            ? "报告未完成"
-                            : selected.job.status === "cancelled"
-                              ? "任务已取消"
-                            : "正在整理事实"
-                        }
+                        title={selected.job.status === "failed" ? "报告未完成" : selected.job.status === "cancelled" ? "任务已取消" : "正在整理事实"}
                       />
                       <div className="mt-4 flex justify-center gap-2">
-                        {selected.job.status === "queued" || selected.job.status === "running" ? (
-                          <Button disabled={cancel.isPending} onClick={() => cancel.mutate(selected.job.id)} size="compact" variant="secondary">
-                            {cancel.isPending ? "正在取消…" : "取消任务"}
-                          </Button>
-                        ) : null}
-                        {selected.job.status === "failed" || selected.job.status === "cancelled" ? (
-                          <Button disabled={retry.isPending} onClick={() => retry.mutate(selected.job.id)} size="compact" variant="secondary">
-                            <RotateCcw size={15} />
-                            {retry.isPending ? "正在重试…" : "重新生成"}
-                          </Button>
-                        ) : null}
+                        {["queued", "running"].includes(selected.job.status) && <Button disabled={cancel.isPending} onClick={() => cancel.mutate(selected.job.id)} size="compact" variant="secondary">{cancel.isPending ? "正在取消…" : "取消任务"}</Button>}
+                        {["failed", "cancelled"].includes(selected.job.status) && <Button disabled={retry.isPending} onClick={() => retry.mutate(selected.job.id)} size="compact" variant="secondary"><RotateCcw size={15} />{retry.isPending ? "正在重试…" : "重新生成"}</Button>}
                       </div>
                     </div>
                   )}
                 </CardContent>
               </Card>
             ) : (
-              <Card className="ai-report-card mt-5">
-                <EmptyState
-                  action={
-                    <Button disabled={create.isPending} onClick={() => create.mutate(window.location.href)}>
-                      <Bot size={17} />
-                      生成第一份报告
-                    </Button>
-                  }
-                  description="选择一种报告，系统会在后台整理当前授权范围内的事实。"
-                  icon={<Bot />}
-                  title="从一份可追溯的报告开始"
-                />
+              <Card className="ai-report-card">
+                <EmptyState action={activeReportId ? <Button onClick={() => navigate("/ai/reports")}>查看可用报告</Button> : <Button onClick={() => navigate("/ai/compose")}><Bot size={17} />生成第一份报告</Button>} description={activeReportId ? "这份报告未出现在当前授权范围内。可返回报告历史核对；不会用另一份报告替代当前引用。" : "选择一种报告，系统会在后台整理当前授权范围内的事实。"} icon={<Bot />} title={activeReportId ? "当前报告不可用" : "从一份可追溯的报告开始"} />
               </Card>
             )}
+            </>}
           </section>
         </div>
       )}
+      </RegionTransition>
       <div className="mt-4">
-        <ErrorMessage error={create.error ?? sendChat.error ?? cancel.error ?? retry.error} />
+        <ErrorMessage error={cancel.error ?? retry.error} />
         {reports.data ? <ErrorMessage error={reports.error} onRetry={() => void reports.refetch()} retrying={reports.isFetching} /> : null}
       </div>
     </>

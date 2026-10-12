@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { aiChatEndpoint, aiGenerationOptionsSchema, AiProviderResponseError, buildAiChatBody, requestAiChatCompletion, type AiChatProvider } from "./ai-provider.js";
+import { aiChatEndpoint, aiExtraBodySchema, aiGenerationOptionsSchema, AiProviderResponseError, buildAiChatBody, requestAiChatCompletion, type AiChatProvider } from "./ai-provider.js";
 
 const provider: AiChatProvider = {
   baseUrl: "https://provider.example/v1", apiKey: "test-secret", model: "vendor/model:free", maxOutputTokens: 4096,
@@ -9,6 +9,25 @@ const messages = [{ role: "user" as const, content: "Only reply OK" }];
 afterEach(() => vi.useRealTimers());
 
 describe("configurable OpenAI-compatible transport", () => {
+  it("forwards provider-specific JSON options alongside the selected model and parameters", () => {
+    const extraBody = { reasoning_effort: "high", thinking: { type: "enabled", budget_tokens: 2048 }, top_k: 16 };
+    const body = buildAiChatBody({ ...provider, generationOptions: aiGenerationOptionsSchema.parse({ extraBody }) }, messages);
+    expect(body).toMatchObject({ ...extraBody, model: provider.model, messages, stream: false, max_tokens: 4096 });
+  });
+  it.each(["model", "messages", "stream", "n", "temperature", "max_tokens", "max_completion_tokens", "tools", "response_format"])("rejects an extension that overrides managed %s", (key) => {
+    expect(aiExtraBodySchema.safeParse({ [key]: "override" }).success).toBe(false);
+  });
+  it("rejects credentials anywhere in extensions, arrays and non-object JSON", () => {
+    for (const extraBody of [[], null, "text", { api_key: "private" }, { nested: [{ authorization: "private" }] }, { options: { password: "private" } }, JSON.parse('{"__proto__":{"unsafe":true}}')]) {
+      expect(aiExtraBodySchema.safeParse(extraBody).success).toBe(false);
+    }
+  });
+  it("bounds extension size and nesting without rejecting supported zero or false values", () => {
+    expect(aiExtraBodySchema.safeParse({ long_option: "x".repeat(8192) }).success).toBe(false);
+    expect(aiExtraBodySchema.safeParse({ a: { b: { c: { d: { e: { f: { g: 1 } } } } } } }).success).toBe(false);
+    expect(aiExtraBodySchema.parse({ top_k: 0, enable_thinking: false })).toEqual({ top_k: 0, enable_thinking: false });
+    expect(aiGenerationOptionsSchema.parse({}).extraBody).toEqual({});
+  });
   it("normalizes base URLs and pasted completion endpoints without duplicating paths", () => {
     for (const url of ["https://provider.example/v1", "https://provider.example/v1/", "https://provider.example/v1/chat/completions/"]) {
       expect(aiChatEndpoint(url)).toBe("https://provider.example/v1/chat/completions");

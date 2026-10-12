@@ -1,3 +1,5 @@
+import { WorkspaceDialog } from "./reference-primitives.js";
+import { ProjectMemberContributions } from "./project-member-contributions.js";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Archive,
@@ -31,7 +33,7 @@ import {
   UserPlus,
   UsersRound,
 } from "lucide-react";
-import { lazy, Suspense, useEffect, useMemo, useState, type SetStateAction } from "react";
+import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState, type SetStateAction } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import {
   calculateDerivedProjectProgress,
@@ -995,11 +997,13 @@ function ProjectTeamPanel({
   nodeAssignees = [],
   canManage,
   onClose,
+  onInspectMember,
 }: {
   projectId: string;
   nodeAssignees?: ProjectNodeAssignee[];
   canManage: boolean;
   onClose: () => void;
+  onInspectMember: (member: ProjectMember) => void;
 }) {
   const queryClient = useQueryClient();
   const [membershipId, setMembershipId] = useState("");
@@ -1102,8 +1106,8 @@ function ProjectTeamPanel({
                     {initials(member.displayName)}
                   </span>
                 )}
-                <span className="min-w-0">
-                  <strong>{member.displayName}</strong>
+                <button className="min-w-0 project-member-profile-button" type="button" aria-label={`查看 ${member.displayName} 的项目与贡献`} onClick={() => onInspectMember(member)}>
+                  <strong>{member.displayName} →</strong>
                   <small>
                     {projectMemberRoleLabel(member.role)} · 负责/参与 {assignmentCounts.get(member.membershipId) ?? 0} 个节点 ·{" "}
                     {member.publicActivityVisible
@@ -1113,7 +1117,7 @@ function ProjectTeamPanel({
                       ? ` · 最后工作 ${formatProjectWorkTime(member.lastActivityAt)}`
                       : " · 暂无工作提交"}
                   </small>
-                </span>
+                </button>
                 {canManage ? <select
                   aria-label={`设置 ${member.displayName} 的项目角色`}
                   className={fieldClass}
@@ -1276,6 +1280,34 @@ function NodeInspectorContent({
   onDeriveBranch?: () => void;
   onOpenRecycle?: () => void;
 }) {
+  const inspectorRef = useRef<HTMLElement>(null);
+  useLayoutEffect(() => {
+    const element = inspectorRef.current;
+    if (!element) return;
+    let frame = 0;
+    const measure = () => {
+      // A sticky panel may start below its sticky inset while the project
+      // heading is still visible. Reserve space from its actual screen top.
+      const top = Math.max(80, element.getBoundingClientRect().top);
+      element.style.setProperty("--project-inspector-space", `${Math.max(0, window.innerHeight - top - 16)}px`);
+    };
+    const schedule = () => {
+      window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(measure);
+    };
+    const observer = new ResizeObserver(schedule);
+    observer.observe(element);
+    if (element.parentElement) observer.observe(element.parentElement);
+    window.addEventListener("scroll", schedule, { passive: true });
+    window.addEventListener("resize", schedule);
+    measure();
+    return () => {
+      observer.disconnect();
+      window.cancelAnimationFrame(frame);
+      window.removeEventListener("scroll", schedule);
+      window.removeEventListener("resize", schedule);
+    };
+  }, []);
   const queryClient = useQueryClient();
   const contentDraft = useVersionedDraft(node.version, {
     title: node.title,
@@ -1366,7 +1398,17 @@ function NodeInspectorContent({
         },
       }),
     onSuccess: async ({ node: savedNode }) => {
-      contentDraft.saved(savedNode.version, { ...form, title: savedNode.title, description: savedNode.description ?? "", status: savedNode.status, progress: String(savedNode.progress), progressMode: savedNode.progressMode ?? "manual", weight: String(savedNode.weight ?? "1"), startAt: toDateTimeLocalInput(savedNode.startAt), dueAt: toDateTimeLocalInput(savedNode.dueAt) });
+      contentDraft.saved(savedNode.version, {
+        ...form,
+        title: savedNode.title ?? form.title,
+        description: savedNode.description === undefined ? form.description : savedNode.description ?? "",
+        status: savedNode.status ?? form.status,
+        progress: savedNode.progress === undefined ? form.progress : String(savedNode.progress),
+        progressMode: savedNode.progressMode ?? form.progressMode,
+        weight: String(savedNode.weight ?? form.weight),
+        startAt: savedNode.startAt === undefined ? form.startAt : toDateTimeLocalInput(savedNode.startAt),
+        dueAt: savedNode.dueAt === undefined ? form.dueAt : toDateTimeLocalInput(savedNode.dueAt),
+      });
       await refresh();
     },
   });
@@ -1526,6 +1568,7 @@ function NodeInspectorContent({
   const plannedHours = calculatePlannedHours(node);
   return (
     <aside
+      ref={inspectorRef}
       aria-label={`${node.title} 节点详情`}
       className="project-node-inspector"
     >
@@ -2219,6 +2262,7 @@ export function ProjectDetailPage({ me }: { me: Me }) {
   }, [projectId, linkedNodeId]);
   const [showCreate, setShowCreate] = useState(false);
   const [showTeam, setShowTeam] = useState(false);
+  const [teamMemberDetail, setTeamMemberDetail] = useState<ProjectMember | null>(null);
   const [showBranch, setShowBranch] = useState(false);
   const [branchSourceNodeId, setBranchSourceNodeId] = useState<string | null>(null);
   const [showBranchManager, setShowBranchManager] = useState(false);
@@ -2637,7 +2681,7 @@ export function ProjectDetailPage({ me }: { me: Me }) {
             </Link>
             <Button
               aria-expanded={showTeam}
-              onClick={() => setShowTeam((value) => !value)}
+              onClick={() => { setTeamMemberDetail(null); setShowTeam((value) => !value); }}
               size="compact"
               variant="secondary"
             >
@@ -3084,14 +3128,12 @@ export function ProjectDetailPage({ me }: { me: Me }) {
               </Card>
             </>
           ) : null}
-          {showTeam ? (
-            <ProjectTeamPanel
-              canManage={canManage}
-              nodeAssignees={tree.data.nodeAssignees ?? []}
-              onClose={() => setShowTeam(false)}
-              projectId={projectId}
-            />
-          ) : null}
+          <WorkspaceDialog open={showTeam} wide title={teamMemberDetail ? `${teamMemberDetail.displayName} · 参与与贡献` : "项目协作成员"}
+            description="项目协作角色与组织权限分开维护；贡献按授权事实展示。"
+            onClose={() => { setShowTeam(false); setTeamMemberDetail(null); }} back={teamMemberDetail ? () => setTeamMemberDetail(null) : undefined} keepMounted>
+            {teamMemberDetail ? <ProjectMemberContributions key={teamMemberDetail.membershipId} me={me} member={teamMemberDetail} projectId={projectId} onClose={() => { setShowTeam(false); setTeamMemberDetail(null); }} /> :
+              <ProjectTeamPanel canManage={canManage} nodeAssignees={tree.data.nodeAssignees ?? []} onClose={() => setShowTeam(false)} onInspectMember={setTeamMemberDetail} projectId={projectId} />}
+          </WorkspaceDialog>
           {showBranch && canManage ? (
             <div className="project-branch-form">
               <GitBranch size={16} />

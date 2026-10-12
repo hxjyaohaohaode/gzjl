@@ -233,6 +233,8 @@ export async function registerOrganizationRoutes(
   const manageOrg = requirePermission("org.manage", () => ({
     scopeKind: "organization",
   }));
+  app.get("/api/organization/permission-overview", { preHandler: [authenticate, manageMembers] },
+    async (request) => service.permissionOverview(request.auth!));
   app.get(
     "/api/organization",
     { preHandler: [authenticate, manageMembers] },

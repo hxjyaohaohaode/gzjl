@@ -17,23 +17,24 @@ export function createInteractionController(root: HTMLElement, client: QueryClie
   const updates = new Map<HTMLElement, ReturnType<typeof setTimeout>>();
   let statusTimer: ReturnType<typeof setTimeout> | undefined;
   let status: OperationStatus = "idle";
-  const register = (element: HTMLElement) => {
+  const register = (element: HTMLElement, fresh = false) => {
     if (element.dataset.interactionId) return;
     element.dataset.interactionId = `ui-${++sequence}`;
     element.dataset.interactionKind = element.matches("[data-ui=metric],[data-ui=badge],[role=progressbar]") ? "value" : element.matches("input,textarea,select") ? "field"
       : element.matches("summary,details") ? "disclosure"
       : element.matches("[role=alert],[role=status]") ? "feedback"
       : element.matches(surfaceSelector) ? "surface" : "action";
+    if (fresh && element.matches(surfaceSelector) && !element.closest(".fx-dialog,.fx-disclosure,.fx-region-host,.react-flow")) element.dataset.surfaceArrival = "true";
   };
-  const scan = (node: Node) => {
+  const scan = (node: Node, fresh = false) => {
     if (!(node instanceof HTMLElement)) return;
-    if (node.matches(trackedSelector)) register(node);
-    node.querySelectorAll<HTMLElement>(trackedSelector).forEach(register);
+    if (node.matches(trackedSelector)) register(node, fresh);
+    node.querySelectorAll<HTMLElement>(trackedSelector).forEach((element) => register(element, fresh));
   };
   scan(root);
   const observer = new MutationObserver((records) => {
     for (const record of records) {
-      record.addedNodes.forEach(scan);
+      record.addedNodes.forEach((node) => scan(node, true));
       const parent = record.target instanceof HTMLElement ? record.target : record.target.parentElement;
       const metric = parent?.closest<HTMLElement>("[data-ui=metric],[data-ui=badge]");
       if (metric?.isConnected && !updates.has(metric)) {

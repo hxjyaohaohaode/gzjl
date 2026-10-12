@@ -83,9 +83,13 @@ export function CitedText({ text, sources = [] }: { text: string; sources?: Arra
   })}</>;
 }
 
-export function AiFactAnswer({ reportId, text }: { reportId: string; text: string }) {
-  const query = useQuery({ queryKey: ["ai-report-detail", reportId], queryFn: () => api<{ stale?: boolean; sources: Array<FactSource & { stale?: boolean }> }>(`/api/ai/reports/${reportId}`) });
-  return <><CitedText text={text} sources={query.data?.sources} />{query.data?.stale ? <p className="lifecycle-warning">来源版本已变化，请重新生成并核对。</p> : null}{query.isError ? <p className="lifecycle-caption">来源暂时无法核对，请重试或打开报告查看。</p> : null}<Link className="fact-citation" to={`/ai?report=${reportId}`}>查看完整来源与报告</Link></>;
+export function AiFactAnswer({ reportId, text, conversationId, scope }: { reportId: string; text: string; conversationId?: string | undefined; scope?: "self" | "team" | undefined }) {
+  const query = useQuery({ queryKey: ["ai-report-detail", reportId], queryFn: () => api<{ report?: { structuredOutput?: { highlights?: string[]; risks?: string[]; suggestions?: string[] } }; stale?: boolean; sources: Array<FactSource & { stale?: boolean }> }>(`/api/ai/reports/${reportId}`) });
+  const output = query.data?.report?.structuredOutput;
+  const params = new URLSearchParams(); if (conversationId) params.set("conversation", conversationId); if (scope === "team") params.set("scope", "team");
+  return <><div className="fx-ai-answer-copy"><CitedText text={text} sources={query.data?.sources} /></div>
+    {output && <div className="fx-ai-answer-sections">{([["highlights", "工作事实"], ["risks", "需要留意"], ["suggestions", "下一步"]] as const).map(([key, label]) => output[key]?.length ? <section key={key}><h3>{label}</h3><ul>{output[key]!.map((line, index) => <li key={index}><CitedText text={line} sources={query.data?.sources} /></li>)}</ul></section> : null)}</div>}
+    {query.data?.stale ? <p className="lifecycle-warning">来源版本已变化，请重新生成并核对。</p> : null}{query.isError ? <p className="lifecycle-caption">来源暂时无法核对，请重试或打开报告查看。</p> : null}<Link className="fact-citation" to={`/ai/reports/${encodeURIComponent(reportId)}${params.size ? `?${params}` : ""}`}>查看完整来源与报告</Link></>;
 }
 
 export function AiDraftEditor({ report }: { report: { title: string; summary: string; structuredOutput: { highlights?: string[]; risks?: string[]; suggestions?: string[] } } }) {

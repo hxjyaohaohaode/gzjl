@@ -8,6 +8,8 @@ import { WorkspaceErrorBoundary } from "./error-boundary.js";
 import { InteractionProvider } from "./interaction-system.js";
 import "./styles.css";
 import "./interaction-system.css";
+import "./admin-theme.css";
+import "./reference-interactions.css";
 
 const queryClient = new QueryClient({
   mutationCache: new MutationCache({

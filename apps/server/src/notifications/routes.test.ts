@@ -180,6 +180,12 @@ describe("notification read state", () => {
       {} as ServerConfig,
     );
 
+    const from = created[0]!.createdAt.toISOString(), to = new Date(created[0]!.createdAt.getTime() + 1).toISOString();
+    const filtered = await app.inject({ method: "GET", url: `/api/notifications?${new URLSearchParams({ q: "第一", from, to, read: "unread" })}` });
+    expect(filtered.statusCode).toBe(200);
+    expect(filtered.json().items.map((item: { id: string }) => item.id)).toEqual([created[0]!.id]);
+    expect((await app.inject({ method: "GET", url: `/api/notifications?${new URLSearchParams({ q: "其他员工" })}` })).json().items).toEqual([]);
+    expect((await app.inject({ method: "GET", url: "/api/notifications?q=%25" })).json().items).toEqual([]);
     const readAll = await app.inject({ method: "POST", url: "/api/notifications/read-all" });
     expect(readAll.statusCode).toBe(200);
     expect(readAll.json()).toEqual({ updatedCount: 2 });

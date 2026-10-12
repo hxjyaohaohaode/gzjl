@@ -58,7 +58,18 @@ export function ReimbursementPanel({ reviewOnly = false, reviewHistory = false }
       client.invalidateQueries({ queryKey: ["payroll-me"] }), client.invalidateQueries({ queryKey: ["payroll-management"] })]);
   };
   const create = useMutation({ mutationFn: () => api<{ request: Claim }>("/api/reimbursements", { method: "POST", body: form }),
-    onSuccess: async ({ request }) => { setCreating(false); setExpanded(request.id); navigate(`${location.pathname}${location.search}#reimbursement-${request.id}`, { replace: true }); setForm({ title: "", description: "", expenseDate: "", amount: "", currency: "CNY" }); await refresh(); } });
+    onSuccess: async ({ request }) => {
+      // Seed the exact newly located scope before navigating. Otherwise the
+      // id-filtered fetch briefly unmounts the evidence editor and can erase
+      // text typed while its first refresh is still completing.
+      if (data && !reviewOnly) {
+        const locatedQuery = new URLSearchParams({ ownOnly: "true", id: request.id }).toString();
+        client.setQueryData(["reimbursements", locatedQuery], { pages: [{ ...data, items: [request], nextCursor: null }], pageParams: [""] });
+      }
+      setCreating(false); setExpanded(request.id);
+      navigate(`${location.pathname}${location.search}#reimbursement-${request.id}`, { replace: true });
+      setForm({ title: "", description: "", expenseDate: "", amount: "", currency: "CNY" }); await refresh();
+    } });
   const action = useMutation({ mutationFn: ({ claim, action }: { claim: Claim; action: "submit" | "cancel" | "approve" | "reject" }) =>
     api(`/api/reimbursements/${claim.id}/actions`, { method: "POST", body: { action, expectedVersion: claim.version,
       ...(reviews[claim.id]?.note ? { note: reviews[claim.id]!.note } : {}),

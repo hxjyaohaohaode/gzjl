@@ -1,6 +1,6 @@
 const lightForeground = "#ffffff";
 const darkForeground = "#172036";
-const defaultAccent = "#5b5ce2";
+const defaultAccent = "#236de9";
 const darkSurface = "#171c30";
 const minimumSurfaceContrast = 3;
 

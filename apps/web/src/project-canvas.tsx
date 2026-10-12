@@ -1,14 +1,17 @@
-import { reducedMotion } from "./motion-preference.js";
+import { reducedMotion, useMotionPreference } from "./motion-preference.js";
+import { motion } from "motion/react";
 import {
   Background,
-  Controls,
+  EdgeLabelRenderer,
   MarkerType,
   MiniMap,
   Panel,
   Position,
   ReactFlow,
   useNodesState,
+  getSmoothStepPath,
   type Edge,
+  type EdgeProps,
   type Node,
   type ReactFlowInstance,
 } from "@xyflow/react";
@@ -16,12 +19,31 @@ import {
   calculateNodeScheduleProgress,
   calculatePlannedHours,
 } from "@workbench/shared";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
+import { GitBranch, Layers, Link2, Maximize2, Minus, Plus, Scan } from "lucide-react";
 
 import "@xyflow/react/dist/style.css";
 
 import { accessibleAccent } from "./color.js";
+import { layoutProjectTree, PROJECT_COLUMN_STEP, PROJECT_NODE_HEIGHT, PROJECT_NODE_WIDTH, type ProjectLayoutDirection } from "./project-canvas-layout.js";
+
+function HierarchyEdge({ id, sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, style, data, markerEnd }: EdgeProps) {
+  const { reduced } = useMotionPreference();
+  const [path, labelX, labelY] = getSmoothStepPath({ sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, borderRadius: 14 });
+  const active = data?.pathActive === true;
+  const depth = Number(data?.depth ?? 1);
+  return <>
+    <motion.path id={id} d={path} fill="none" markerEnd={markerEnd} className="react-flow__edge-path project-hierarchy-link" style={{ stroke: style?.stroke ?? "var(--project-accent)", strokeWidth: style?.strokeWidth ?? 1.5, opacity: style?.opacity ?? 1 }}
+      initial={{ pathLength: reduced ? 1 : 0 }} animate={{ pathLength: 1 }} transition={{ duration: reduced ? 0 : .42, delay: reduced ? 0 : Math.max(0, depth * .2 - .12) }} />
+    {active && !reduced && [0, 1].map((index) => <circle className="project-path-pulse" r="3" fill="var(--project-accent)" key={index}>
+      <animateMotion path={path} dur="3.333s" begin={`${index * -1.6665}s`} repeatCount="indefinite" />
+      <animate attributeName="opacity" values="0;.9;0" dur="3.333s" begin={`${index * -1.6665}s`} repeatCount="indefinite" />
+    </circle>)}
+    {data?.relationshipLabel ? <EdgeLabelRenderer><span className="project-edge-label" style={{ transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)` }}>{String(data.relationshipLabel)}</span></EdgeLabelRenderer> : null}
+  </>;
+}
+const canvasEdgeTypes = { hierarchy: HierarchyEdge };
 
 interface ProjectCanvasNode {
   id: string;
@@ -115,65 +137,8 @@ function formatWorkDuration(seconds: number): string {
   return hours < 1 ? `${Math.max(1, Math.round(seconds / 60))} 分钟` : `${hours.toFixed(hours >= 10 ? 1 : 2)} 小时`;
 }
 
-function layoutTree(nodes: ProjectCanvasNode[]): Map<string, { x: number; y: number }> {
-  const dense = nodes.length > 18;
-  const veryDense = nodes.length > 40;
-  const columnGap = veryDense ? 224 : dense ? 258 : 306;
-  const rowGap = veryDense ? 172 : dense ? 238 : 318;
-  const byId = new Map(nodes.map((node) => [node.id, node]));
-  const children = new Map<string, string[]>();
-  for (const node of nodes) {
-    if (!node.parentId || !byId.has(node.parentId) || node.parentId === node.id) continue;
-    const siblings = children.get(node.parentId) ?? [];
-    siblings.push(node.id);
-    children.set(node.parentId, siblings);
-  }
-  const sortIds = (ids: string[]) =>
-    [...ids].sort((leftId, rightId) => {
-      const left = byId.get(leftId)!;
-      const right = byId.get(rightId)!;
-      return left.sortOrder - right.sortOrder || left.title.localeCompare(right.title, "zh-CN");
-    });
-  const positions = new Map<string, { x: number; y: number }>();
-  const visiting = new Set<string>();
-  let nextColumn = 0;
-
-  const visit = (id: string, depth: number): { x: number; y: number } => {
-    const known = positions.get(id);
-    if (known) return known;
-    if (visiting.has(id)) {
-      const cycleFallback = { x: nextColumn * columnGap, y: depth * rowGap };
-      nextColumn += 1;
-      return cycleFallback;
-    }
-    visiting.add(id);
-    const childIds = sortIds(children.get(id) ?? []);
-    const childPositions = childIds.map((childId) => visit(childId, depth + 1));
-    const x = childPositions.length
-      ? (childPositions[0]!.x + childPositions[childPositions.length - 1]!.x) / 2
-      : nextColumn++ * columnGap;
-    const position = { x, y: depth * rowGap };
-    positions.set(id, position);
-    visiting.delete(id);
-    return position;
-  };
-
-  const roots = sortIds(
-    nodes
-      .filter((node) => !node.parentId || !byId.has(node.parentId))
-      .map((node) => node.id),
-  );
-  roots.forEach((id) => visit(id, 0));
-  // The API rejects cycles, but retain a deterministic fallback so a damaged
-  // legacy tree cannot make the entire canvas unusable.
-  sortIds(nodes.map((node) => node.id))
-    .filter((id) => !positions.has(id))
-    .forEach((id) => visit(id, 0));
-  return positions;
-}
-
 export default function ProjectCanvas({
-  nodes,
+  nodes: allNodes,
   edges,
   accent,
   canManage = false,
@@ -193,11 +158,34 @@ export default function ProjectCanvas({
   onDeriveBranch?: (node: ProjectCanvasNode) => void;
   onNodeSelect?: (nodeId: string) => void;
 }) {
+  const [collapsedIds, setCollapsedIds] = useState<Set<string>>(new Set());
+  const [infoVisible, setInfoVisible] = useState(false);
+  const [minimapVisible, setMinimapVisible] = useState(false);
+  const [showRelationships, setShowRelationships] = useState(false);
+  const [direction, setDirection] = useState<ProjectLayoutDirection>(() => window.matchMedia("(max-width: 640px)").matches ? "vertical" : "horizontal");
+  const [zoomPercent, setZoomPercent] = useState(100);
+  const viewportMode = useRef<"readable" | "overview">("readable");
+  const nodes = useMemo(() => {
+    const byId = new Map(allNodes.map((node) => [node.id, node]));
+    return allNodes.filter((node) => { let parent = node.parentId; const visited = new Set<string>(); while (parent && !visited.has(parent)) { if (collapsedIds.has(parent)) return false; visited.add(parent); parent = byId.get(parent)?.parentId ?? null; } return true; });
+  }, [allNodes, collapsedIds]);
   const projectAccent = accessibleAccent(accent);
   const dense = nodes.length > 18;
   const veryDense = nodes.length > 40;
   const [focusRelationships, setFocusRelationships] = useState(false);
   const flowInstanceRef = useRef<ReactFlowInstance | null>(null);
+  const canvasRootRef = useRef<HTMLDivElement>(null);
+  const ancestorEdges = useMemo(() => {
+    const byId = new Map(allNodes.map((node) => [node.id, node]));
+    const active = new Set<string>();
+    let current = selectedNodeId ? byId.get(selectedNodeId) : undefined;
+    while (current?.parentId && !active.has(current.id)) { active.add(current.id); current = byId.get(current.parentId); }
+    return active;
+  }, [allNodes, selectedNodeId]);
+  const nodeDepths = useMemo(() => {
+    const byId = new Map(allNodes.map((node) => [node.id, node]));
+    return new Map(allNodes.map((node) => { const seen = new Set<string>(); let current: ProjectCanvasNode | undefined = node; while (current?.parentId && !seen.has(current.id)) { seen.add(current.id); current = byId.get(current.parentId); } return [node.id, seen.size]; }));
+  }, [allNodes]);
   const relatedNodeIds = useMemo(() => {
     if (!selectedNodeId) return new Set<string>();
     const ids = new Set<string>([selectedNodeId]);
@@ -218,9 +206,9 @@ export default function ProjectCanvas({
   }, [edges, nodes, selectedNodeId]);
   const focusActive = focusRelationships && Boolean(selectedNodeId);
   const flowNodes = useMemo<Node[]>(() => {
-    const positions = layoutTree(nodes);
+    const positions = layoutProjectTree(nodes, direction);
     const directChildCount = new Map<string, number>();
-    nodes.forEach((node) => {
+    allNodes.forEach((node) => {
       if (!node.parentId) return;
       directChildCount.set(
         node.parentId,
@@ -246,6 +234,7 @@ export default function ProjectCanvas({
       ).length;
       const scheduleProgress = calculateNodeScheduleProgress(node);
       const plannedHours = calculatePlannedHours(node);
+      const responsible = node.assignees?.find((assignee) => assignee.isResponsible) ?? node.assignees?.[0];
       return {
         id: node.id,
         ariaLabel: `${node.title}，${statusLabel(node.status)}，进度 ${progress}%${childCount ? `，${childCount} 个直接子节点` : "，末级节点"}`,
@@ -253,12 +242,14 @@ export default function ProjectCanvas({
         data: {
           label: (
             <div
-              className={`project-flow-node project-flow-node--${node.status} ${selectedNodeId === node.id ? "is-selected" : ""} ${dense ? "is-dense" : ""} ${veryDense ? "is-very-dense" : ""}`}
-              style={{ "--node-accent": nodeAccent } as CSSProperties}
+              title={node.title}
+              className={`project-flow-node ${!node.parentId ? "is-root" : ""} project-flow-node--${node.status} ${selectedNodeId === node.id ? "is-selected" : ""}`}
+              style={{ "--node-accent": nodeAccent, "--node-entrance-delay": `${(nodeDepths.get(node.id) ?? 0) * .2 + .18}s` } as CSSProperties}
             >
               <div className="project-flow-node-top">
-                <span className="project-flow-node-kind">
-                  {nodeTypeLabel(node.type)} · {node.branchName ?? "项目节点"}
+                {childCount > 0 && <button className="nodrag nopan project-node-collapse" type="button" aria-label={`${collapsedIds.has(node.id) ? "展开" : "收起"} ${node.title} 的子节点`} aria-expanded={!collapsedIds.has(node.id)} onClick={(event) => { event.stopPropagation(); setCollapsedIds((current) => { const next = new Set(current); if (next.has(node.id)) next.delete(node.id); else next.add(node.id); return next; }); }}>{collapsedIds.has(node.id) ? "+" : "−"}</button>}
+                <span className="project-flow-node-kind" title={node.branchName}>
+                  {nodeTypeLabel(node.type)}{!node.parentId ? " · 起点" : ""}
                 </span>
                 <strong className="text-[0.74rem] tabular-nums text-[var(--node-accent)]">
                   {progress}%
@@ -285,7 +276,7 @@ export default function ProjectCanvas({
                 </small>
               </div> : null}
               <div className="project-flow-node-assignees">
-                <span>{progressModeLabel(node.progressMode)} · 权重 {Number(node.weight ?? 1)}</span>
+                <span title={`${progressModeLabel(node.progressMode)} · 权重 ${Number(node.weight ?? 1)}`}>{responsible?.displayName ?? "待分配负责人"}</span>
                 {node.assignees?.length ? (
                   <span
                     aria-label={`协作者：${node.assignees.map((assignee) => assignee.displayName).join("、")}`}
@@ -312,7 +303,7 @@ export default function ProjectCanvas({
                     ) : null}
                   </span>
                 ) : (
-                  <span>未分配</span>
+                  <span />
                 )}
               </div>
               <div className="project-flow-node-footer">
@@ -344,7 +335,7 @@ export default function ProjectCanvas({
                     }}
                     title="新增下级节点"
                     type="button"
-                  >＋</button>
+                  ><Plus size={15} /></button>
                   <button
                     aria-label={`从 ${node.title} 建立节点关联`}
                     onClick={(event) => {
@@ -353,7 +344,7 @@ export default function ProjectCanvas({
                     }}
                     title="建立节点关联"
                     type="button"
-                  >↗</button>
+                  ><Link2 size={15} /></button>
                   <button
                     aria-label={`从 ${node.title} 卡片快捷派生工作线`}
                     onClick={(event) => {
@@ -362,7 +353,7 @@ export default function ProjectCanvas({
                     }}
                     title="派生并行工作线"
                     type="button"
-                  >⑂</button>
+                  ><GitBranch size={15} /></button>
                 </div>
               ) : null}
             </div>
@@ -373,19 +364,23 @@ export default function ProjectCanvas({
           border: "none",
           opacity: focusActive && !relatedNodeIds.has(node.id) ? 0.16 : 1,
           padding: 0,
-          transition: "opacity 160ms ease",
-          width: veryDense ? 210 : dense ? 232 : 246,
+          width: PROJECT_NODE_WIDTH,
+          height: PROJECT_NODE_HEIGHT,
         },
-        sourcePosition: Position.Bottom,
-        targetPosition: Position.Top,
+        sourcePosition: direction === "horizontal" ? Position.Right : Position.Bottom,
+        targetPosition: direction === "horizontal" ? Position.Left : Position.Top,
       };
     });
   }, [
     canManage,
+    allNodes,
+    collapsedIds,
     dense,
+    direction,
     edges,
     focusActive,
     nodes,
+    nodeDepths,
     onAddChild,
     onAddRelation,
     onDeriveBranch,
@@ -396,42 +391,77 @@ export default function ProjectCanvas({
   ]);
 
   const [canvasNodes, setCanvasNodes, onNodesChange] = useNodesState(flowNodes);
+  const readableView = useCallback((duration: number, usePlannedPositions = false) => {
+    const instance = flowInstanceRef.current, stage = canvasRootRef.current;
+    if (!instance || !stage || !flowNodes.length) return;
+    viewportMode.current = "readable";
+    const visible = new Set(nodes.map((node) => node.id));
+    const roots = nodes.filter((node) => !node.parentId || !visible.has(node.parentId));
+    const childCount = (id: string) => nodes.filter((node) => node.parentId === id).length;
+    roots.sort((a, b) => childCount(b.id) - childCount(a.id) || a.sortOrder - b.sortOrder);
+    const preferred = flowNodes.find((node) => node.id === selectedNodeId) ?? flowNodes.find((node) => node.id === roots[0]?.id) ?? flowNodes[0]!;
+    const primary = usePlannedPositions ? preferred : instance.getNode(preferred.id) ?? preferred;
+    const zoom = Math.max(.75, Math.min(1, (stage.clientWidth - 40) / PROJECT_NODE_WIDTH));
+    const childSpace = direction === "horizontal" && stage.clientWidth >= 720 && childCount(primary.id) ? PROJECT_COLUMN_STEP / 2 : 0;
+    void instance.setViewport({
+      x: stage.clientWidth / 2 - (primary.position.x + PROJECT_NODE_WIDTH / 2 + childSpace) * zoom,
+      y: direction === "horizontal" ? stage.clientHeight / 2 - (primary.position.y + PROJECT_NODE_HEIGHT / 2) * zoom : Math.max(24, stage.clientHeight * .08) - primary.position.y * zoom,
+      zoom,
+    }, { duration: reducedMotion() ? 0 : duration });
+  }, [direction, flowNodes, nodes, selectedNodeId]);
+  const previousNodeSet = useRef(`${direction}:${flowNodes.map((node) => node.id).join("|")}`);
 
   useEffect(() => {
+    const nextNodeSet = `${direction}:${flowNodes.map((node) => node.id).join("|")}`;
+    const structureChanged = previousNodeSet.current !== nextNodeSet;
+    previousNodeSet.current = nextNodeSet;
     setCanvasNodes((currentNodes) => {
       const currentById = new Map(currentNodes.map((node) => [node.id, node]));
       return flowNodes.map((node) => {
         const current = currentById.get(node.id);
-        return current
+        return current && !structureChanged
           ? { ...current, ...node, position: current.position }
           : node;
       });
     });
-  }, [flowNodes, setCanvasNodes]);
+    if (!structureChanged) return;
+    const frame = window.requestAnimationFrame(() => {
+      if (viewportMode.current === "overview") void flowInstanceRef.current?.fitView({ padding: .12, minZoom: .04, maxZoom: 1, duration: reducedMotion() ? 0 : 620 });
+      else readableView(620, true);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [direction, flowNodes, readableView, setCanvasNodes]);
 
   const flowEdges = useMemo<Edge[]>(
     () => {
       const visibleNodeIds = new Set(nodes.map((node) => node.id));
-      const relationPairKeys = new Set(
-        edges.map((edge) =>
-          [edge.sourceNodeId, edge.targetNodeId].sort().join("::"),
-        ),
-      );
+      const pairKey = (source: string, target: string) => [source, target].sort().join("::");
+      const byId = new Map(nodes.map((node) => [node.id, node]));
+      // Only a child depending on its actual parent shares the hierarchy direction.
+      // Other relation types and reverse dependencies keep their own arrows and states.
+      const coalescedRelationshipIds = new Set(edges.filter((edge) => edge.type === "depends_on" && byId.get(edge.sourceNodeId)?.parentId === edge.targetNodeId).map((edge) => edge.id));
       const hierarchy = nodes
         .filter(
           (node) =>
             node.parentId &&
-            visibleNodeIds.has(node.parentId) &&
-            !relationPairKeys.has([node.id, node.parentId].sort().join("::")),
+            visibleNodeIds.has(node.parentId),
         )
         .map((node) => ({
           id: `hierarchy-${node.id}`,
           source: node.parentId!,
           target: node.id,
-          type: "smoothstep",
+          type: "hierarchy",
+          className: ancestorEdges.has(node.id) ? "project-hierarchy-active" : "",
+          data: {
+            pathActive: ancestorEdges.has(node.id), depth: nodeDepths.get(node.id) ?? 1,
+            relationshipLabel: showRelationships || node.id === selectedNodeId || node.parentId === selectedNodeId
+              ? [...new Set(edges.filter((edge) => coalescedRelationshipIds.has(edge.id) && pairKey(edge.sourceNodeId, edge.targetNodeId) === pairKey(node.id, node.parentId!)).map((edge) => `${relationshipLabel(edge.type)}${edge.label ? ` · ${edge.label}` : ""}`))].join(" / ") : "",
+          },
+          ...(edges.some((edge) => coalescedRelationshipIds.has(edge.id) && edge.sourceNodeId === node.id) && (showRelationships || node.id === selectedNodeId || node.parentId === selectedNodeId)
+            ? { markerEnd: { type: MarkerType.ArrowClosed, color: projectAccent } } : {}),
           style: {
-            stroke: "color-mix(in srgb, var(--project-accent) 28%, var(--border))",
-            strokeWidth: 1.8,
+            stroke: ancestorEdges.has(node.id) ? projectAccent : "color-mix(in srgb, var(--project-accent) 28%, var(--border))",
+            strokeWidth: ancestorEdges.has(node.id) ? 2.2 : 1.5,
             opacity:
               focusActive &&
               (!relatedNodeIds.has(node.parentId!) || !relatedNodeIds.has(node.id))
@@ -441,6 +471,9 @@ export default function ProjectCanvas({
         }));
       const seenRelationships = new Set<string>();
       const relationships = edges.flatMap((edge) => {
+        if (!visibleNodeIds.has(edge.sourceNodeId) || !visibleNodeIds.has(edge.targetNodeId)) return [];
+        if (coalescedRelationshipIds.has(edge.id)) return [];
+        if (!showRelationships && edge.sourceNodeId !== selectedNodeId && edge.targetNodeId !== selectedNodeId) return [];
         const symmetricKey =
           edge.type === "relates_to"
             ? `${edge.type}:${[edge.sourceNodeId, edge.targetNodeId].sort().join("::")}`
@@ -463,7 +496,7 @@ export default function ProjectCanvas({
           id: `relation-${edge.id}`,
           source,
           target,
-          label: edge.label ?? relationshipLabel(edge.type),
+          label: `${relationshipLabel(edge.type)}${edge.label ? ` · ${edge.label}` : ""}`,
           animated: blocks,
           ...(edge.type === "relates_to"
             ? {}
@@ -496,47 +529,79 @@ export default function ProjectCanvas({
       });
       return [...hierarchy, ...relationships];
     },
-    [edges, focusActive, nodes, projectAccent, relatedNodeIds],
+    [ancestorEdges, edges, focusActive, nodes, nodeDepths, projectAccent, relatedNodeIds, selectedNodeId, showRelationships],
   );
 
+  const focusCanvasNode = (id: string) => {
+    const instance = flowInstanceRef.current, node = instance?.getNode(id);
+    if (!instance || !node) return;
+    void instance.setCenter(node.position.x + PROJECT_NODE_WIDTH / 2, node.position.y + PROJECT_NODE_HEIGHT / 2, { zoom: Math.max(1, instance.getZoom()), duration: reducedMotion() ? 0 : 550 })
+      .then(() => canvasRootRef.current?.querySelector<HTMLElement>(`.react-flow__node[data-id="${CSS.escape(id)}"]`)?.focus({ preventScroll: true }));
+  };
+
+  const overview = () => {
+    viewportMode.current = "overview";
+    void flowInstanceRef.current?.fitView({ padding: .12, minZoom: .04, maxZoom: 1, duration: reducedMotion() ? 0 : 620 });
+  };
   const resetLayout = () => {
     setCanvasNodes(flowNodes);
     window.requestAnimationFrame(() =>
-      void flowInstanceRef.current?.fitView({ padding: 0.22, duration: reducedMotion() ? 0 : 260 }),
+      viewportMode.current === "overview" ? overview() : readableView(620, true),
     );
   };
 
   return (
     <div
-      className="project-canvas h-[min(66vh,660px)] min-h-[430px] touch-none overflow-hidden rounded-[18px] bg-[var(--surface)]"
-      style={{ "--project-accent": projectAccent } as CSSProperties}
+      className="project-canvas"
+      data-direction={direction}
+      style={{ "--project-accent": projectAccent, "--project-node-height": `${PROJECT_NODE_HEIGHT}px` } as CSSProperties}
     >
-      <ReactFlow
+      <div className="project-canvas-heading">
+        <div><Layers size={16} /><strong>项目结构</strong><span>{nodes.length}{nodes.length !== allNodes.length ? ` / ${allNodes.length}` : ""} 个节点</span></div>
+        <div className="project-canvas-orientation" role="group" aria-label="画布排布方向"><button type="button" aria-pressed={direction === "horizontal"} onClick={() => setDirection("horizontal")}>横向</button><button type="button" aria-pressed={direction === "vertical"} onClick={() => setDirection("vertical")}>纵向</button></div>
+      </div>
+      <div className="project-canvas-stage" ref={canvasRootRef} onKeyDownCapture={(event) => {
+        const target = event.target as HTMLElement;
+        if (target.closest("button,input,select,textarea")) return;
+        const wrapper = target.closest<HTMLElement>(".react-flow__node"), current = nodes.find((node) => node.id === wrapper?.dataset.id);
+        if (!current || !["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Enter"].includes(event.key)) return;
+        event.preventDefault(); event.stopPropagation();
+        if (event.key === "Enter") { focusCanvasNode(current.id); return; }
+        const siblings = canvasNodes.filter((node) => nodeDepths.get(node.id) === nodeDepths.get(current.id)).sort((left, right) => direction === "horizontal" ? left.position.y - right.position.y : left.position.x - right.position.x);
+        const index = siblings.findIndex((node) => node.id === current.id);
+        const next = event.key === "ArrowUp" ? current.parentId : event.key === "ArrowDown" ? nodes.find((node) => node.parentId === current.id)?.id : siblings[index + (event.key === "ArrowRight" ? 1 : -1)]?.id;
+        if (next) { onNodeSelect?.(next); focusCanvasNode(next); }
+      }}><ReactFlow
         edges={flowEdges}
+        edgeTypes={canvasEdgeTypes}
         elementsSelectable
-        fitView
-        fitViewOptions={{ padding: 0.27 }}
         nodes={canvasNodes}
         nodesConnectable={false}
         nodesDraggable
         onlyRenderVisibleElements
-        minZoom={0.15}
+        minZoom={0.04}
         maxZoom={2.5}
         onNodeClick={(_, node) => onNodeSelect?.(node.id)}
+        onNodeDoubleClick={(_, node) => focusCanvasNode(node.id)}
         onNodesChange={onNodesChange}
         onInit={(instance) => {
           flowInstanceRef.current = instance;
+          readableView(0);
         }}
+        onMoveEnd={(_, viewport) => setZoomPercent(Math.round(viewport.zoom * 100))}
         panOnDrag
         panOnScroll
         preventScrolling
         selectionOnDrag={false}
         zoomOnPinch
+        zoomActivationKeyCode={["Control", "Meta"]}
+        zoomOnScroll={false}
         zoomOnDoubleClick={false}
       >
         <Background color="var(--border)" gap={22} size={1} />
-        <Panel className="project-flow-legend" position="top-left">
-          <strong>{nodes.length} 个节点</strong>
+        {infoVisible && <Panel className="project-flow-legend" position="bottom-left">
+          <button type="button" aria-label="隐藏画布信息" onClick={() => setInfoVisible(false)}>关闭信息 ×</button>
+          <strong>{nodes.length} / {allNodes.length} 个可见节点</strong>
           <span>{nodes.filter((node) => node.parentId).length} 条层级</span>
           <span>{edges.length} 条关联</span>
           <span>
@@ -551,29 +616,27 @@ export default function ProjectCanvas({
             <i data-kind="block" />
             阻塞
           </span>
-          <small>拖动节点自由排布 · 拖拽空白处平移 · 滚轮缩放 · 点击节点查看详情</small>
-        </Panel>
-        <Panel className="project-flow-tools" position="top-right">
-          <button onClick={resetLayout} type="button">自动重排</button>
-          <button
-            aria-pressed={focusActive}
-            disabled={!selectedNodeId}
-            onClick={() => setFocusRelationships((value) => !value)}
-            type="button"
-          >
-            {focusActive ? "显示全部" : "聚焦关联"}
-          </button>
-          {dense ? <span>{veryDense ? "超紧凑视图" : "紧凑视图"}</span> : null}
-        </Panel>
-        <Controls showInteractive={false} />
-        <MiniMap
-          className="hidden md:block"
-          maskColor="rgb(91 92 226 / 0.1)"
+          <small>拖动节点排布 · 空白处拖拽 / 滚轮平移 · Ctrl / ⌘ + 滚轮缩放 · 双击聚焦 · 方向键切换层级</small>
+        </Panel>}
+        {minimapVisible && <MiniMap
+          maskColor="color-mix(in srgb, var(--canvas) 70%, transparent)"
           nodeColor={() => projectAccent}
           pannable
           zoomable
-        />
-      </ReactFlow>
+        />}
+      </ReactFlow>{!infoVisible && <div className="project-canvas-hint" aria-hidden="true">拖动画布 · 双击节点聚焦<span>Ctrl / ⌘ + 滚轮缩放</span></div>}</div>
+      <div className="project-flow-tools project-flow-dock" role="toolbar" aria-label="结构画布工具">
+        <div className="project-canvas-zoom"><button type="button" aria-label="缩小画布" onClick={() => void flowInstanceRef.current?.zoomOut({ duration: reducedMotion() ? 0 : 340 })}><Minus size={15} /></button><output aria-label="当前缩放比例">{zoomPercent}%</output><button type="button" aria-label="放大画布" onClick={() => void flowInstanceRef.current?.zoomIn({ duration: reducedMotion() ? 0 : 340 })}><Plus size={15} /></button></div>
+        <button type="button" onClick={() => readableView(550)}><Scan size={14} />可读视图</button>
+        <button type="button" onClick={overview}><Maximize2 size={14} />查看全貌</button>
+        <button type="button" aria-pressed={showRelationships} disabled={!edges.length} onClick={() => setShowRelationships((value) => !value)}>节点关联{edges.length ? ` · ${edges.length}` : ""}</button>
+        <button type="button" aria-pressed={infoVisible} onClick={() => setInfoVisible((value) => !value)}>画布信息</button>
+        <button type="button" aria-pressed={minimapVisible} onClick={() => setMinimapVisible((value) => !value)}>缩略图</button>
+        <button onClick={resetLayout} type="button">自动重排</button>
+        <button type="button" disabled={!selectedNodeId} onClick={() => { if (selectedNodeId) focusCanvasNode(selectedNodeId); }}>聚焦节点</button>
+        <button aria-pressed={focusActive} disabled={!selectedNodeId} onClick={() => setFocusRelationships((value) => !value)} type="button">{focusActive ? "显示全部" : "聚焦关联"}</button>
+        {dense ? <span>{veryDense ? "超紧凑视图" : "紧凑视图"}</span> : null}
+      </div>
     </div>
   );
 }

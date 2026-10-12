@@ -1,3 +1,5 @@
+import { CollectionPager } from "./reference-primitives.js";
+import { pageSlice } from "./work-visualization-model.js";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   CalendarDays,
@@ -298,6 +300,8 @@ function CalendarMilestone({
 
 export function CalendarPage() {
   const queryClient = useQueryClient();
+  const [auditPage, setAuditPage] = useState(1);
+  const [auditQuery, setAuditQuery] = useState("");
   const [view, setView] = useState<CalendarView>(() =>
     window.matchMedia("(max-width: 640px)").matches ? "day" : "week",
   );
@@ -390,6 +394,7 @@ export function CalendarPage() {
     const endsAt = new Date(item.endAt).getTime();
     return startsAt < periodEndInstant.getTime() && endsAt > periodStartInstant.getTime();
   });
+  const filteredAudit = periodSessions.filter((item) => !auditQuery.trim() || item.content.toLowerCase().includes(auditQuery.trim().toLowerCase()));
   const factualPeriodSessions = periodSessions.filter(
     (item) => item.recordKind !== "plan",
   );
@@ -907,9 +912,10 @@ export function CalendarPage() {
                 </Badge>
               </CardHeader>
               <CardContent>
+                <div className="fx-record-filters"><input type="search" aria-label="搜索日历对账记录" placeholder="搜索本周期工作或计划" value={auditQuery} onChange={(event) => { setAuditQuery(event.target.value); setAuditPage(1); }} /></div>
                 {periodSessions.length ? (
                   <div className="calendar-audit-list">
-                    {periodSessions.map((item) => (
+                    {pageSlice(filteredAudit, auditPage, 8).map((item) => (
                       <div className="calendar-audit-row" key={item.id}>
                         <div className="min-w-0 flex-1">
                           <strong>{item.content}</strong>
@@ -966,6 +972,7 @@ export function CalendarPage() {
                   />
                 )}
                 <ErrorMessage error={reschedule.error} />
+                <CollectionPager total={filteredAudit.length} page={auditPage} onChange={setAuditPage} size={8} label="日历对账分页" />
               </CardContent>
             </Card>
           </section>

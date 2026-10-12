@@ -130,7 +130,7 @@ describe("organization AI provider health check", () => {
         status: "succeeded",
       }),
     ]);
-    const options = aiGenerationOptionsSchema.parse({ requestTimeoutMs: 150000, maxAttempts: 4, temperature: null, topP: 0.8, tokenLimitParameter: "max_completion_tokens", responseFormat: "json_object" });
+    const options = aiGenerationOptionsSchema.parse({ requestTimeoutMs: 150000, maxAttempts: 4, temperature: null, topP: 0.8, tokenLimitParameter: "max_completion_tokens", responseFormat: "json_object", extraBody: { reasoning_effort: "high", thinking: { type: "disabled" } } });
     const updated = await service.updateSettings(actor, { enabled: true, baseUrl: "https://second.example/api/v1/chat/completions/", model: "vendor/reasoning-model:free", apiKey: "replacement-secret", maxOutputTokens: 8000, dailyRequestLimit: 50, monthlyRequestLimit: 600, generationOptions: options });
     expect(updated).toMatchObject({ baseUrl: "https://second.example/api/v1", model: "vendor/reasoning-model:free", hasApiKey: true, generationOptions: options });
     expect(JSON.stringify(updated)).not.toContain("replacement-secret");
@@ -138,7 +138,7 @@ describe("organization AI provider health check", () => {
     expect(provider).toMatchObject({ baseUrl: updated.baseUrl, model: updated.model, apiKey: "replacement-secret", maxAttempts: 4, generationOptions: options, configurationVersion: 2 });
     const switchedFetch = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body));
-      expect(body).toMatchObject({ model: updated.model, max_completion_tokens: 8000, top_p: 0.8, response_format: { type: "json_object" } });
+      expect(body).toMatchObject({ model: updated.model, max_completion_tokens: 8000, top_p: 0.8, response_format: { type: "json_object" }, reasoning_effort: "high", thinking: { type: "disabled" } });
       expect(body).not.toHaveProperty("temperature");
       expect(body).not.toHaveProperty("max_tokens");
       expect(init?.headers).toMatchObject({ authorization: "Bearer replacement-secret" });

@@ -6,6 +6,7 @@ import { Check, ChevronRight, CircleAlert, LoaderCircle } from "lucide-react";
 import { createInteractionController, type InteractionSnapshot } from "./interaction-controller.js";
 import { useMotionPreference } from "./motion-preference.js";
 import { workspacePage } from "./workspace-pages.js";
+import { workspaceRouteFamily } from "./workspace-route-family.js";
 import { hasOrganizationGrant, type Me } from "./api.js";
 
 const initial: InteractionSnapshot = { pending: 0, status: "idle", revision: 0 };
@@ -36,13 +37,16 @@ export function WorkspaceOrientation({ me }: { me: Me }) {
   const operation = useContext(InteractionContext);
   const fetching = useIsFetching({ predicate: (query) => query.queryKey[0] !== "me" && query.getObserversCount() > 0 });
   const { reduced } = useMotionPreference();
+  const family = workspaceRouteFamily(pathname);
   useEffect(() => {
     document.title = `${workspacePage(pathname).title} · 时序工作台`;
+  }, [pathname]);
+  useEffect(() => {
     const header = document.querySelector<HTMLElement>(".app-page-header");
     if (!header || reduced) return;
     const animation = animate(header, { opacity: [0.6, 1] }, { duration: 0.22 });
     return () => animation.stop();
-  }, [pathname, reduced]);
+  }, [family, reduced]);
   const label = operation.pending ? `正在处理 ${operation.pending} 项操作`
     : operation.status === "error" ? "操作未完成，请查看页面提示"
     : operation.status === "success" ? "操作已完成"

@@ -15,7 +15,8 @@ test("home weekly totals advance after organization midnight instead of keeping 
   const ranges: Array<{ from: string | null; to: string | null }> = [];
   await page.route("**/api/analytics/summary?**", (route) => {
     const params = new URL(route.request().url()).searchParams;
-    ranges.push({ from: params.get("from"), to: params.get("to") });
+    // Pulse aggregates use minute boundaries; the weekly card includes now.
+    if (Date.parse(params.get("to") ?? "") % 60_000 > 1_000) ranges.push({ from: params.get("from"), to: params.get("to") });
     return route.fulfill({ json: { totals: { totalSeconds: 3600 } } });
   });
   await page.goto("/");

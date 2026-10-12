@@ -51,12 +51,23 @@ await new Promise<void>((resolve) => storage.listen(3101, "127.0.0.1", resolve))
 const config = loadServerConfig({
   NODE_ENV: "test", SESSION_SECRET: "isolated-acceptance-session-secret-2026",
   DATABASE_URL: "postgresql://unused:unused@127.0.0.1/unused",
+  AI_CONFIG_ENCRYPTION_KEY: "isolated-ai-encryption-key-for-acceptance-only-2026",
   WEB_ORIGIN: "http://127.0.0.1:3100", PUBLIC_APP_URL: "http://127.0.0.1:3100",
   S3_ENDPOINT: "http://127.0.0.1:3101", S3_BROWSER_ORIGIN: "http://127.0.0.1:3101",
   S3_REGION: "us-east-1", S3_BUCKET: "acceptance", S3_ACCESS_KEY_ID: "test-only",
   S3_SECRET_ACCESS_KEY: "test-only", S3_FORCE_PATH_STYLE: "true",
 });
-const app = await buildApp({ config, database: db, readiness: { async check() { await database.query("select 1"); } } });
+// Exercise the real authenticated settings routes without relaxing the public
+// endpoint validator or sending paid requests to an external AI provider.
+const aiProviderCalls: Array<{ url: string; body: unknown; acceptanceKeyMatched: boolean }> = [];
+const aiProviderFetch: typeof fetch = async (input, init) => {
+  const url = String(input);
+  if (url !== "https://ai.acceptance.test/v1/chat/completions") return new Response("Unexpected acceptance provider", { status: 404 });
+  aiProviderCalls.push({ url, body: JSON.parse(String(init?.body)), acceptanceKeyMatched: new Headers(init?.headers).get("authorization") === "Bearer acceptance-key-only" });
+  return new Response(JSON.stringify({ id: "acceptance-check", choices: [{ message: { content: '{"ok":true}' } }], usage: { prompt_tokens: 1, completion_tokens: 1 } }), { headers: { "content-type": "application/json" } });
+};
+const app = await buildApp({ config, database: db, aiProviderFetch, readiness: { async check() { await database.query("select 1"); } } });
+app.get("/__acceptance/ai-provider-calls", () => ({ items: aiProviderCalls }));
 await app.register(staticFiles, { root: resolve(import.meta.dirname, "../../web/dist") });
 app.setNotFoundHandler((request, reply) => request.url.startsWith("/api/")
   ? reply.code(404).send({ error: "not_found" }) : reply.sendFile("index.html"));

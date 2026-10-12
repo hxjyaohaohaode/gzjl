@@ -1,3 +1,8 @@
+import { CollectionPager, WorkspaceDialog } from "./reference-primitives.js";
+import { pageSlice } from "./work-visualization-model.js";
+import { OrganizationPermissions } from "./organization-permissions.js";
+import { StateTabs } from "./state-tabs.js";
+import { RegionTransition } from "./workspace-transition.js";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   BriefcaseBusiness,
@@ -30,7 +35,7 @@ import { useVersionedDraft } from "./versioned-draft.js";
 import { ErrorMessage, Field, LoadingBlock, PageHeader } from "./workspace-primitives.js";
 import { fieldClass, PasswordInput, textAreaClass } from "./pages.js";
 
-type OrganizationTab = "tree" | "members" | "layers";
+type OrganizationTab = "tree" | "members" | "permissions" | "layers";
 type ScopeKind = "organization" | "org_unit" | "project" | "self";
 
 interface OrganizationUnit {
@@ -483,6 +488,7 @@ function MemberInspector({
     queryKey: ["totp-status"],
     queryFn: () => api<{ enabled: boolean; pending: boolean }>("/api/auth/mfa/totp"),
   });
+  const [memberPane, setMemberPane] = useState<"profile" | "identities" | "permissions" | "account">("profile");
   const [profile, setProfile] = useState({
     positionTitle: member.positionTitle ?? "",
     orgUnitId: member.membership.orgUnitId ?? "",
@@ -737,6 +743,7 @@ function MemberInspector({
     <aside
       aria-label={`${member.user.displayName} 的成员详情`}
       className="organization-inspector"
+      data-member-pane={memberPane}
     >
       <div className="organization-inspector-head">
         <div className="flex min-w-0 items-center gap-3">
@@ -761,8 +768,9 @@ function MemberInspector({
           关闭
         </Button>
       </div>
+      <StateTabs label="人员详情分区" value={memberPane} onChange={setMemberPane} items={[{ value: "profile", label: "岗位归属" }, { value: "identities", label: "专业身份" }, { value: "permissions", label: "访问权限" }, { value: "account", label: "账户管理" }]} />
       <div className="organization-inspector-scroll">
-        <section className="organization-inspector-section">
+        <section className="organization-inspector-section" data-member-panel="profile">
           <CategoryLabel icon={<BriefcaseBusiness size={14} />}>
             组织岗位
           </CategoryLabel>
@@ -808,7 +816,7 @@ function MemberInspector({
             </Button>
           </div>
         </section>
-        <section className="organization-inspector-section">
+        <section className="organization-inspector-section" data-member-panel="identities">
           <CategoryLabel icon={<Sparkles size={14} />}>专业身份</CategoryLabel>
           <p className="organization-inspector-description">
             专业身份用于工作标签、筛选与匹配，不会自动扩大任何数据访问范围。
@@ -840,7 +848,7 @@ function MemberInspector({
             保存专业身份
           </Button>
         </section>
-        <section className="organization-inspector-section">
+        <section className="organization-inspector-section" data-member-panel="permissions">
           <CategoryLabel icon={<ShieldCheck size={14} />}>
             访问角色与范围
           </CategoryLabel>
@@ -993,7 +1001,7 @@ function MemberInspector({
           ) : null}
         </section>
         {isCurrentOwner ? (
-          <section className="organization-inspector-section">
+          <section className="organization-inspector-section" data-member-panel="account">
             <CategoryLabel icon={<Crown size={14} />}>所有权转移</CategoryLabel>
             <p className="organization-inspector-description">
               只有当前 Owner 能发起；接收人必须是拥有组织级 Manager
@@ -1100,7 +1108,7 @@ function MemberInspector({
           </section>
         ) : null}
         {isTransferRecipient && ownershipTransfer ? (
-          <section className="organization-inspector-section">
+          <section className="organization-inspector-section" data-member-panel="account">
             <CategoryLabel icon={<Crown size={14} />}>
               待确认所有权转移
             </CategoryLabel>
@@ -1168,7 +1176,7 @@ function MemberInspector({
             </div>
           </section>
         ) : null}
-        <section className="organization-inspector-section">
+        <section className="organization-inspector-section" data-member-panel="account">
           <CategoryLabel icon={<UserCog size={14} />}>成员状态</CategoryLabel>
           <p className="organization-inspector-description">
             {memberActivityLabel(member)}
@@ -1260,7 +1268,7 @@ function MemberInspector({
           ) : null}
         </section>
         {canIssueManualPasswordReset ? (
-          <section className="organization-inspector-section">
+          <section className="organization-inspector-section" data-member-panel="account">
             <CategoryLabel icon={<KeyRound size={14} />}>
               手工密码重置链接
             </CategoryLabel>
@@ -2128,7 +2136,11 @@ export function OrganizationPage({ me }: { me: Me }) {
     queryFn: () => api<{ items: ProjectChoice[] }>("/api/projects"),
     enabled: Boolean(organization.data),
   });
-  const [tab, setTab] = useState<OrganizationTab>("tree");
+  const [tab, setTab] = useState<OrganizationTab>("members");
+  const [directoryOpen, setDirectoryOpen] = useState(false);
+  const [memberQuery, setMemberQuery] = useState("");
+  const [memberStatus, setMemberStatus] = useState("all");
+  const [memberPage, setMemberPage] = useState(1);
   const [selectedUnitId, setSelectedUnitId] = useState<string | null>(null);
   const [selectedMemberId, setSelectedMemberId] = useState<string | null>(null);
   const openedMemberLink = useRef<string | null>(null);
@@ -2181,6 +2193,8 @@ export function OrganizationPage({ me }: { me: Me }) {
         : (overview?.members ?? []),
     [overview?.members, selectedUnitId, tab],
   );
+  const boardMembers = (overview?.members ?? []).filter((member) => (memberStatus === "all" || member.membership.status === memberStatus) &&
+    (!memberQuery.trim() || [member.user.displayName, member.positionTitle, member.unitName, ...member.accessRoles.map((role) => role.roleName), ...member.professionalIdentities.map((identity) => identity.identityName)].join(" ").toLowerCase().includes(memberQuery.trim().toLowerCase())));
   const selectedInspector = selectedMember ? (
     <MemberInspector
       currentMembershipId={me.user.membershipId}
@@ -2206,31 +2220,10 @@ export function OrganizationPage({ me }: { me: Me }) {
         title="组织与人员"
         description="角色、岗位与专业身份分层维护：角色决定权限，岗位描述组织职责，身份服务业务协作；三者不会互相越权。"
         actions={
-          <div
-            className="organization-view-switch"
-            role="tablist"
-            aria-label="组织视图"
-          >
-            {(
-              [
-                ["tree", "组织树", FolderTree],
-                ["members", "成员", UsersRound],
-                ["layers", "分层说明", Layers3],
-              ] as const
-            ).map(([value, label, Icon]) => (
-              <Button
-                aria-selected={tab === value}
-                key={value}
-                onClick={() => setTab(value)}
-                role="tab"
-                size="compact"
-                variant={tab === value ? "primary" : "secondary"}
-              >
-                <Icon size={14} />
-                {label}
-              </Button>
-            ))}
-          </div>
+          <>
+          <Button size="compact" variant="secondary" onClick={() => setDirectoryOpen(true)}><Plus size={14} />目录与邀请</Button>
+          <StateTabs label="组织视图" value={tab} onChange={setTab} items={([["tree", "组织树", FolderTree], ["members", "成员", UsersRound], ["permissions", "权限全景", ShieldCheck], ["layers", "分层说明", Layers3]] as const).map(([value, label, Icon]) => ({ value, label: <><Icon size={14} />{label}</> }))} />
+          </>
         }
       />
       {organization.isPending ? (
@@ -2244,15 +2237,8 @@ export function OrganizationPage({ me }: { me: Me }) {
             selectedInspector && "has-inspector",
           )}
         >
-          <div className="organization-layer-index">
-            <span>01</span>
-            <span>组织结构</span>
-            <span>02</span>
-            <span>成员与岗位</span>
-            <span>03</span>
-            <span>角色与身份</span>
-          </div>
           <main className="organization-main-panel">
+            <RegionTransition changeKey={tab}>
             {tab === "tree" ? (
               <>
                 <div className="organization-panel-toolbar">
@@ -2322,70 +2308,30 @@ export function OrganizationPage({ me }: { me: Me }) {
                 <div className="organization-panel-toolbar">
                   <div>
                     <p className="app-section-label">成员总览</p>
-                    <h2>每个人的三类属性在同一行对齐展示。</h2>
+                    <h2>成员看板 · 点击卡片查看与编辑</h2>
                   </div>
                   <span className="organization-live-count">
                     <span />
                     {overview.members.length} 位成员
                   </span>
                 </div>
-                <div className="organization-members-table">
-                  <div className="organization-member-table-head">
-                    <span>成员</span>
-                    <span>访问角色</span>
-                    <span>组织岗位</span>
-                    <span>专业身份</span>
-                    <span>状态</span>
-                  </div>
-                  {overview.members.map((member) => (
-                    <button
-                      className={cn(
-                        "organization-member-row",
-                        selectedMember?.membership.id ===
-                          member.membership.id && "is-selected",
-                      )}
-                      key={member.membership.id}
-                      onClick={() => {
-                        setSelectedMemberId(member.membership.id);
-                        setSelectedUnitId(null);
-                      }}
-                      type="button"
-                    >
-                      <span className="organization-member-person">
-                        <span className="organization-member-avatar">
-                          {initials(member.user.displayName)}
-                        </span>
-                        <span className="min-w-0">
-                          <strong className="block truncate">
-                            {member.user.displayName}
-                          </strong>
-                          <small>
-                            {member.isOwner
-                              ? "唯一 Owner"
-                              : member.unitName || "未归属单元"}
-                          </small>
-                        </span>
-                      </span>
-                      <MemberLayerSummary
-                        member={member}
-                        projects={projects.data?.items ?? []}
-                        units={overview.units}
-                      />
-                      <span className="organization-member-presence">
-                        <Badge tone={memberStatusTone(member.membership.status)}>
-                          {memberStatusLabel(member.membership.status)}
-                        </Badge>
-                        <small>{memberActivityLabel(member)}</small>
-                      </span>
-                      <ChevronRight
-                        className="organization-row-arrow"
-                        size={16}
-                      />
-                    </button>
-                  ))}
+                <div className="fx-record-filters" aria-label="成员筛选">
+                  <input type="search" aria-label="搜索组织成员" placeholder="搜索姓名、岗位、部门、角色或专业身份" value={memberQuery} onChange={(event) => { setMemberQuery(event.target.value); setMemberPage(1); }} />
+                  <select aria-label="成员状态" value={memberStatus} onChange={(event) => { setMemberStatus(event.target.value); setMemberPage(1); }}><option value="all">所有状态</option><option value="active">已激活</option><option value="invited">待加入</option><option value="inactive">已停用</option></select>
                 </div>
+                <div className="fx-member-board">
+                  {pageSlice(boardMembers, memberPage, 9).map((member) => <button className="fx-member-card" type="button" key={member.membership.id} aria-label={`查看和编辑 ${member.user.displayName}`} onClick={() => { setSelectedMemberId(member.membership.id); setSelectedUnitId(null); }}>
+                    <header><span className="organization-member-avatar">{initials(member.user.displayName)}</span><Badge tone={memberStatusTone(member.membership.status)}>{memberStatusLabel(member.membership.status)}</Badge></header>
+                    <strong>{member.user.displayName}</strong>
+                    <MemberLayerSummary member={member} units={overview.units} projects={projects.data?.items ?? []} />
+                    <footer><span>{memberActivityLabel(member)}</span><ChevronRight size={15} /></footer>
+                  </button>)}
+                </div>
+                {!boardMembers.length && <p className="fx-chart-empty">当前筛选没有匹配成员。</p>}
+                <CollectionPager total={boardMembers.length} page={memberPage} onChange={setMemberPage} size={9} label="组织成员分页" />
               </>
             ) : null}
+            {tab === "permissions" && <OrganizationPermissions members={overview.members} roles={overview.roles} onMember={(id) => { setSelectedMemberId(id); setSelectedUnitId(null); }} />}
             {tab === "layers" ? (
               <>
                 <div className="organization-panel-toolbar">
@@ -2473,24 +2419,17 @@ export function OrganizationPage({ me }: { me: Me }) {
                 </section>
               </>
             ) : null}
+            </RegionTransition>
           </main>
-          <OrganizationSidebar
-            onSelectMember={(member) =>
-              setSelectedMemberId(member?.membership.id ?? null)
-            }
-            onSelectUnit={(unit) => setSelectedUnitId(unit?.id ?? null)}
-            overview={overview}
-            selectedUnit={selectedUnit}
-          />
-          {selectedInspector ? (
-            <button
-              aria-label="关闭成员或组织单元详情"
-              className="organization-inspector-backdrop"
-              onClick={closeInspector}
-              type="button"
-            />
-          ) : null}
-          {selectedInspector}
+          <WorkspaceDialog open={directoryOpen} title="组织目录与邀请" description="按需管理部门、专业身份与邀请，不占用成员主工作区。" onClose={() => setDirectoryOpen(false)} keepMounted>
+            <OrganizationSidebar
+              onSelectMember={(member) => { setSelectedMemberId(member?.membership.id ?? null); setSelectedUnitId(null); setDirectoryOpen(false); }}
+              onSelectUnit={(unit) => { setSelectedUnitId(unit?.id ?? null); setSelectedMemberId(null); setDirectoryOpen(false); }}
+              overview={overview} selectedUnit={selectedUnit} />
+          </WorkspaceDialog>
+          <WorkspaceDialog open={Boolean(selectedInspector)} title={selectedMember ? `${selectedMember.user.displayName} · 人员详情与编辑` : `${selectedUnit?.name ?? "组织单元"} · 详情与编辑`} onClose={closeInspector} keepMounted>
+            {selectedInspector}
+          </WorkspaceDialog>
         </div>
       ) : null}
       <ErrorMessage error={organization.error} onRetry={() => void organization.refetch()} retrying={organization.isFetching} />

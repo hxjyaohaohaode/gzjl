@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import { and, desc, eq, gt, isNull, or } from "drizzle-orm";
+import { and, desc, eq, gt, gte, ilike, isNull, isNotNull, lt, or } from "drizzle-orm";
 import type { FastifyInstance, preHandlerHookHandler } from "fastify";
 import { z } from "zod";
 import type { Database } from "@workbench/db";
@@ -16,6 +16,7 @@ import {
 import type { ServerConfig } from "../config.js";
 
 const notificationParams = z.object({ notificationId: z.uuid() });
+const notificationFilter = z.object({ q: z.string().trim().max(200).optional(), from: z.iso.datetime({ offset: true }).optional(), to: z.iso.datetime({ offset: true }).optional(), read: z.enum(["read", "unread"]).optional() }).refine((value) => !value.from || !value.to || Date.parse(value.to) > Date.parse(value.from), "结束时间须晚于开始时间");
 const notificationCategories = [
   "forgotten_work",
   "timer_long_running",
@@ -147,6 +148,8 @@ export async function registerNotificationRoutes(
     "/api/notifications",
     { preHandler: authenticate },
     async (request) => {
+      const filter = notificationFilter.parse(request.query);
+      const pattern = filter.q ? `%${filter.q.replace(/[\\%_]/g, "\\$&")}%` : null;
       const [candidates, preferences] = await Promise.all([
         db
           .select()
@@ -158,6 +161,10 @@ export async function registerNotificationRoutes(
                 notifications.recipientMembershipId,
                 request.auth!.membershipId,
               ),
+              filter.from ? gte(notifications.createdAt, new Date(filter.from)) : undefined,
+              filter.to ? lt(notifications.createdAt, new Date(filter.to)) : undefined,
+              pattern ? or(ilike(notifications.title, pattern), ilike(notifications.body, pattern)) : undefined,
+              filter.read === "read" ? isNotNull(notifications.readAt) : filter.read === "unread" ? isNull(notifications.readAt) : undefined,
               or(
                 isNull(notifications.validUntil),
                 gt(notifications.validUntil, new Date()),

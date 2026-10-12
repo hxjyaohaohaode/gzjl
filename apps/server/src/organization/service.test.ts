@@ -8,6 +8,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { Database } from "@workbench/db";
 import {
   organizations,
+  accessRoles,
+  rolePermissions,
   organizationOwners,
   orgMemberships,
   userCredentials,
@@ -83,6 +85,20 @@ afterEach(async () => {
 });
 
 describe("organization invitation lifecycle", () => {
+  it("returns the actual role permissions for one organization without exposing another organization's roles", async () => {
+    const { db, service, actor } = await createService();
+    await service.permissionOverview(actor);
+    const [other] = await db.insert(organizations).values({ name: "其他组织" }).returning();
+    const [localRole] = await db.insert(accessRoles).values({ organizationId: actor.organizationId, name: "本组织审核人", kind: "custom" }).returning();
+    const [otherRole] = await db.insert(accessRoles).values({ organizationId: other!.id, name: "其他组织薪资管理员", kind: "custom" }).returning();
+    await db.insert(rolePermissions).values([{ roleId: localRole!.id, permissionCode: "work.review" }, { roleId: otherRole!.id, permissionCode: "payroll.configure" }]);
+    const overview = await service.permissionOverview(actor);
+    expect(overview.organizationId).toBe(actor.organizationId);
+    expect(overview.bindings).toContainEqual(expect.objectContaining({ roleId: localRole!.id, permission: "work.review" }));
+    expect(overview.bindings.some((binding) => binding.roleId === otherRole!.id)).toBe(false);
+    await db.delete(rolePermissions).where(eq(rolePermissions.roleId, localRole!.id));
+    expect((await service.permissionOverview(actor)).bindings.some((binding) => binding.roleId === localRole!.id)).toBe(false);
+  });
   it("moves organizational units within one transaction, rejects cycles and requires parents before archiving", async () => {
     const { service, actor } = await createService();
     const first = await service.createUnit(actor, { name: "第一部门", parentId: null });

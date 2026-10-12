@@ -735,7 +735,6 @@ input[type="file"]::file-selector-button {
   align-content: start;
   overflow: hidden;
   border: 1px solid color-mix(in srgb, var(--accent) 33%, transparent);
-  border-left: 3px solid var(--accent);
   border-radius: 0.65rem;
   background: color-mix(in srgb, var(--accent) 13%, var(--surface));
   padding: 0.48rem 0.55rem;
@@ -1045,7 +1044,6 @@ input[type="file"]::file-selector-button {
   margin-bottom: 0.45rem;
   overflow: hidden;
   border: 1px solid color-mix(in srgb, var(--accent) 19%, transparent);
-  border-left: 3px solid var(--accent);
   border-radius: 0.65rem;
   background: color-mix(in srgb, var(--accent) 9%, var(--surface));
   padding: 0.45rem 0.5rem;
@@ -1073,7 +1071,6 @@ input[type="file"]::file-selector-button {
   margin-bottom: 0.45rem;
   border-radius: 0.65rem;
   background: color-mix(in srgb, var(--milestone-color) 10%, var(--surface));
-  box-shadow: inset 3px 0 0 var(--milestone-color);
   padding: 0.45rem 0.5rem 0.45rem 0.62rem;
   color: var(--text);
   font-size: 0.68rem;
@@ -1395,13 +1392,7 @@ input[type="file"]::file-selector-button {
 }
 
 .metric-card::after {
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 3px;
-  height: 100%;
-  background: var(--metric-accent, var(--accent));
-  content: "";
+  content: none;
 }
 
 .metric-card [data-ui="card-content"] {
@@ -1879,7 +1870,7 @@ input[type="file"]::file-selector-button {
 }
 
 .ai-preset.is-active {
-  box-shadow: inset 3px 0 0 var(--accent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 30%, transparent);
 }
 
 .ai-preset strong,
@@ -2144,12 +2135,7 @@ input[type="file"]::file-selector-button {
 }
 
 .project-flow-node::before {
-  position: absolute;
-  inset: 0 auto 0 0;
-  width: 3px;
-  border-radius: 0.8rem 0 0 0.8rem;
-  background: var(--node-accent, var(--accent));
-  content: "";
+  content: none;
 }
 
 .project-flow-node-top {
@@ -3997,7 +3983,6 @@ body {
 .work-timeline-event,
 .calendar-event {
   border-color: transparent;
-  border-left-color: var(--accent);
   background: color-mix(in srgb, var(--accent) 10%, var(--surface));
 }
 
@@ -5244,7 +5229,6 @@ body {
   opacity: 0.72;
 }
 .calendar-event.is-plan {
-  border-left-color: var(--info);
   background: color-mix(in srgb, var(--info) 10%, var(--surface));
 }
 .calendar-event-kind {
@@ -5315,7 +5299,7 @@ body {
   flex: none;
 }
 .calendar-list-item.is-plan {
-  box-shadow: inset 3px 0 0 var(--info);
+  background: color-mix(in srgb, var(--info) 8%, var(--surface));
 }
 
 .calendar-audit-list {
@@ -7531,14 +7515,7 @@ body,
 }
 
 .project-branch-card[style*="margin-left"]::before {
-  position: absolute;
-  top: 0.55rem;
-  bottom: 0.55rem;
-  left: 0.18rem;
-  width: 2px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--accent) 28%, transparent);
-  content: "";
+  content: none;
 }
 
 .project-branch-card:hover,
@@ -7790,7 +7767,6 @@ body,
 .project-timeline-row:hover,
 .project-timeline-row.is-selected {
   background: color-mix(in srgb, var(--accent-soft) 48%, transparent);
-  box-shadow: inset 3px 0 0 color-mix(in srgb, var(--accent) 60%, transparent);
 }
 
 .project-timeline-node-label {
@@ -7902,7 +7878,7 @@ body,
 }
 
 .project-workbench-tree-row.is-selected {
-  box-shadow: inset 3px 0 0 var(--accent);
+  background: var(--accent-soft);
 }
 
 .project-tree-node-cell {

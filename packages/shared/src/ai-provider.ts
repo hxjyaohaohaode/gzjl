@@ -1,6 +1,50 @@
 import { z } from "zod";
 
 export const maximumAiRequestTimeoutMs = 300_000;
+const managedAiParameters = new Set([
+  "model", "messages", "stream", "n", "temperature", "top_p", "response_format",
+  "max_tokens", "max_completion_tokens", "max_output_tokens", "tools", "tool_choice",
+  "functions", "function_call", "input", "prompt", "system", "instructions",
+]);
+const privateParameterName = /^(?:api[_-]?key|authorization|headers|password|secret|access[_-]?token|session[_-]?token|base[_-]?url|__proto__|constructor|prototype)$/i;
+
+/** Provider-specific options are public configuration; credentials belong in
+ * the separately encrypted API key, and the fact prompt remains authoritative. */
+export const aiExtraBodySchema = z.preprocess((input, context) => {
+  // Zod intentionally drops __proto__ while parsing records. Check the raw
+  // JSON first so that an invalid extension is reported rather than hidden.
+  const inspectKeys = (value: unknown, depth: number): void => {
+    if (value === null || typeof value !== "object" || depth > 6) return;
+    for (const [key, item] of Object.entries(value)) {
+      if (["__proto__", "constructor", "prototype"].includes(key)) context.addIssue({ code: "custom", message: "扩展参数不能包含原型属性。" });
+      inspectKeys(item, depth + 1);
+    }
+  };
+  inspectKeys(input, 0);
+  return input;
+}, z.record(z.string().min(1).max(64), z.json()).default({}).superRefine((body, context) => {
+  if (Object.keys(body).length > 24 || JSON.stringify(body).length > 8_192) {
+    context.addIssue({ code: "custom", message: "扩展参数最多 24 项，JSON 长度不能超过 8192 字符。" });
+  }
+  for (const key of Object.keys(body)) {
+    if (managedAiParameters.has(key)) context.addIssue({ code: "custom", path: [key], message: `${key} 由上方表单或系统管理，请勿在扩展参数中重复填写。` });
+  }
+  const inspect = (value: unknown, path: Array<string | number>, depth: number): void => {
+    if (depth > 6) {
+      context.addIssue({ code: "custom", path, message: "扩展参数最多嵌套 6 层。" });
+      return;
+    }
+    if (Array.isArray(value)) value.forEach((item, index) => inspect(item, [...path, index], depth + 1));
+    else if (value !== null && typeof value === "object") {
+      for (const [key, item] of Object.entries(value)) {
+        if (privateParameterName.test(key)) context.addIssue({ code: "custom", path: [...path, key], message: "密钥、凭据和连接地址不能放入扩展参数，请使用专用表单。" });
+        inspect(item, [...path, key], depth + 1);
+      }
+    }
+  };
+  inspect(body, [], 0);
+}));
+
 export const aiGenerationOptionsSchema = z.object({
   requestTimeoutMs: z.number().int().min(5_000).max(maximumAiRequestTimeoutMs).default(60_000),
   maxAttempts: z.number().int().min(1).max(5).default(2),
@@ -8,6 +52,7 @@ export const aiGenerationOptionsSchema = z.object({
   topP: z.number().min(0).max(1).nullable().default(null),
   tokenLimitParameter: z.enum(["max_tokens", "max_completion_tokens"]).default("max_tokens"),
   responseFormat: z.enum(["text", "json_object"]).default("text"),
+  extraBody: aiExtraBodySchema,
 });
 export type AiGenerationOptions = z.infer<typeof aiGenerationOptionsSchema>;
 export interface AiChatProvider {
@@ -32,6 +77,7 @@ export function aiChatEndpoint(baseUrl: string): string {
 export function buildAiChatBody(provider: AiChatProvider, messages: Array<{ role: "system" | "user"; content: string }>) {
   const options = provider.generationOptions;
   return {
+    ...options.extraBody,
     model: provider.model,
     messages,
     stream: false,

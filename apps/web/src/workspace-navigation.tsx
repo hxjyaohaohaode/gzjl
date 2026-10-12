@@ -12,9 +12,9 @@ export function WorkspaceNavigation({ label, items }: {
   const id = useId();
   const { reduced } = useMotionPreference();
   return <nav aria-label={label} className="workspace-section-nav">
-    {items.map((item) => <NavLink key={item.to} end={item.end ?? true} to={item.to}
+    {items.map((item) => <NavLink key={item.to.split(/[?#]/)[0]} end={item.end ?? true} to={item.to}
       className={({ isActive }) => cn("workspace-section-link", isActive && "workspace-section-link--active")}>
-      {({ isActive }) => <>{isActive && <motion.span className="workspace-selection-indicator" layoutId={`workspace-nav-${id}`} transition={reduced ? { duration: 0 } : { type: "spring", stiffness: 480, damping: 38 }} aria-hidden="true" />}<span className="workspace-selection-label">{item.label}</span></>}
+      {({ isActive }) => <>{isActive && <motion.span className="workspace-selection-indicator" layoutId={`workspace-nav-${id}`} transition={reduced ? { duration: 0 } : { duration: .52, ease: [.16,1,.3,1] }} aria-hidden="true" />}<span className="workspace-selection-label">{item.label}</span></>}
     </NavLink>)}
   </nav>;
 }
