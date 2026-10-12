@@ -68,7 +68,9 @@ test("long content, evidence queue, restoration, contextual approval and exact h
     await expect(owner.getByText("图片证据.png", { exact: true }).first()).toBeVisible();
     // A boss-defined partial cycle must be usable through the actual form.
     await owner.goto("/payroll-management/periods");
-    const localInput = (date: Date) => new Intl.DateTimeFormat("sv-SE", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" }).format(date).replace(" ", "T");
+    // Native datetime-local values omit zero seconds. Preserve nonzero seconds
+    // while using the browser's canonical format at a minute boundary.
+    const localInput = (date: Date) => new Intl.DateTimeFormat("sv-SE", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" }).format(date).replace(" ", "T").replace(/:00$/, "");
     await owner.getByLabel("周期名称", { exact: true }).fill("老板指定非自然月交接验收");
     await owner.getByLabel("周期开始（含）", { exact: true }).fill(localInput(new Date(Date.now() - 86400_000)));
     await owner.getByLabel("周期结束（不含）", { exact: true }).fill(localInput(new Date(Date.now() - 1000)));

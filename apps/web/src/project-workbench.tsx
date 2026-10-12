@@ -33,7 +33,7 @@ import {
   UserPlus,
   UsersRound,
 } from "lucide-react";
-import { lazy, Suspense, useEffect, useMemo, useState, type SetStateAction } from "react";
+import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState, type SetStateAction } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import {
   calculateDerivedProjectProgress,
@@ -1280,6 +1280,34 @@ function NodeInspectorContent({
   onDeriveBranch?: () => void;
   onOpenRecycle?: () => void;
 }) {
+  const inspectorRef = useRef<HTMLElement>(null);
+  useLayoutEffect(() => {
+    const element = inspectorRef.current;
+    if (!element) return;
+    let frame = 0;
+    const measure = () => {
+      // A sticky panel may start below its sticky inset while the project
+      // heading is still visible. Reserve space from its actual screen top.
+      const top = Math.max(80, element.getBoundingClientRect().top);
+      element.style.setProperty("--project-inspector-space", `${Math.max(0, window.innerHeight - top - 16)}px`);
+    };
+    const schedule = () => {
+      window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(measure);
+    };
+    const observer = new ResizeObserver(schedule);
+    observer.observe(element);
+    if (element.parentElement) observer.observe(element.parentElement);
+    window.addEventListener("scroll", schedule, { passive: true });
+    window.addEventListener("resize", schedule);
+    measure();
+    return () => {
+      observer.disconnect();
+      window.cancelAnimationFrame(frame);
+      window.removeEventListener("scroll", schedule);
+      window.removeEventListener("resize", schedule);
+    };
+  }, []);
   const queryClient = useQueryClient();
   const contentDraft = useVersionedDraft(node.version, {
     title: node.title,
@@ -1540,6 +1568,7 @@ function NodeInspectorContent({
   const plannedHours = calculatePlannedHours(node);
   return (
     <aside
+      ref={inspectorRef}
       aria-label={`${node.title} 节点详情`}
       className="project-node-inspector"
     >

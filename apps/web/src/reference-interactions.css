@@ -206,6 +206,9 @@
 .fx-dialog .work-segment-batch { max-height: 26rem; overflow: auto; overscroll-behavior: contain; }
 .project-node-inspector-scroll { max-height: none !important; height: auto !important; overflow: visible !important; }
 .project-node-inspector { display: block !important; height: auto !important; max-height: calc(100dvh - 5.5rem); overflow-y: auto; overscroll-behavior: contain; }
+@media (min-width: 1171px) {
+  .project-node-inspector { max-height: min(52rem, var(--project-inspector-space, calc(100dvh - 5.5rem))); }
+}
 .project-node-inspector-head { position: sticky; top: 0; z-index: 2; background: var(--surface); }
 .project-assignment-list { max-height: none !important; overflow: visible !important; }
 .fx-dialog .project-team-panel { border: 0 !important; box-shadow: none !important; margin: 0; }

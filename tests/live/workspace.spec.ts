@@ -19,6 +19,10 @@ async function login(page: Page, email: string) {
 }
 
 test("real API, database and file bytes connect the employee and management workspaces", async ({ page: owner, browser }, testInfo) => {
+  // This scenario includes persisted business flows and 46 full-page route
+  // audits. Give slower WebKit rendering a bounded total budget; individual
+  // action and assertion timeouts remain unchanged.
+  test.setTimeout(180_000);
   const errors: string[] = [];
   const inspectErrors = (page: Page) => {
     page.on("pageerror", (error) => errors.push(error.message));
@@ -193,11 +197,13 @@ test("real API, database and file bytes connect the employee and management work
           await expect(page.getByRole("region", { name: "真实权限查询" })).toContainText("当前有效成员授权");
         }
         if (testInfo.project.use.isMobile && path === "/calendar") {
-          expect(await page.locator(".calendar-mini-days button").first().evaluate((button) => button.getBoundingClientRect().height)).toBeGreaterThanOrEqual(44);
+          await expect.poll(() => page.locator(".calendar-mini-days button").first().evaluate((button) => Math.round(button.getBoundingClientRect().height * 100) / 100)).toBeGreaterThanOrEqual(44);
         }
         if (path === "/projects") {
           for (const button of await page.locator(".project-join-button").all()) {
-            expect(await button.evaluate((element) => element.getBoundingClientRect().height)).toBeGreaterThanOrEqual(44);
+            // Wait for entry motion and round to a hundredth of a CSS pixel:
+            // Chromium may report a 44px box as 43.9998779296875 after transforms.
+            await expect.poll(() => button.evaluate((element) => Math.round(element.getBoundingClientRect().height * 100) / 100)).toBeGreaterThanOrEqual(44);
           }
         }
         if (role === "owner" && path === "/analytics") {
@@ -249,5 +255,5 @@ test("real API, database and file bytes connect the employee and management work
     await writeFile(testInfo.outputPath("rendered-controls.json"), JSON.stringify(inventory, null, 2));
     await testInfo.attach("rendered-controls", { path: testInfo.outputPath("rendered-controls.json"), contentType: "application/json" });
     expect(errors).toEqual([]);
-  } finally { await employeeContext.close(); }
+  } finally { await employeeContext.close().catch(() => undefined); }
 });
