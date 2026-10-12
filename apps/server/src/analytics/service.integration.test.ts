@@ -321,6 +321,15 @@ describe("analytics and project work visibility", () => {
       .toMatchObject({ netSeconds: 3_600 });
   });
 
+  it("filters older team activity before the limit and retains visibility boundaries", async () => {
+    const db = await createTestDatabase(); const seeded = await seedVisibilityScenario(db); const service = new AnalyticsService(db);
+    const filtered = await service.teamActivity(seeded.employeeActor, 1, { memberId: seeded.coworker.id, q: "协作者公开", from: "2026-09-04T00:00:00Z", to: "2026-09-05T00:00:00Z", project: "权限项目" });
+    expect(filtered.items).toHaveLength(1); expect(filtered.items[0]).toMatchObject({ content: "协作者公开记录", hasFullTiming: false, startAt: null, netSeconds: null });
+    expect((await service.teamActivity(seeded.employeeActor, 100, { q: "协作者私密记录" })).items).toEqual([]);
+    expect((await service.teamActivity(seeded.ownerActor, 100, { q: "协作者私密记录" })).items).toHaveLength(1);
+    expect((await service.teamActivity(seeded.ownerActor, 100, { q: "%" })).items).toEqual([]);
+  });
+
   it("redacts other members' node timing and respects their public-activity switch", async () => {
     const db = await createTestDatabase();
     const seeded = await seedVisibilityScenario(db);

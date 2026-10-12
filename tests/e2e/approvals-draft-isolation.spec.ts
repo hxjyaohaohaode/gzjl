@@ -1,3 +1,4 @@
+import { openApprovalCards } from "./workspace-flows.js";
 import { expect, test } from "@playwright/test";
 
 test("completing one approval preserves another request's open review note", async ({ page }) => {
@@ -23,9 +24,11 @@ test("completing one approval preserves another request's open review note", asy
     await route.fulfill({ json: { success: true } });
   });
   await page.goto("/approvals");
+  await openApprovalCards(page);
   await page.getByRole("button", { name: "查看工作与附件", exact: true }).nth(1).click();
   const note = page.getByRole("textbox", { name: "退回原因", exact: true });
   await note.fill("B 仍需要补充原始凭证，正在核对详细原因");
+  await openApprovalCards(page);
   await page.getByRole("button", { name: "批准", exact: true }).first().click();
   await expect.poll(() => Boolean(release)).toBe(true);
   await expect(note).toBeDisabled();

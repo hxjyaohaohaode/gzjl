@@ -126,7 +126,7 @@ test("personal reimbursement, work review and expense review fetch only their ow
   await page.getByRole("navigation", { name: "报销审批范围" }).getByRole("link", { name: "审批记录" }).click();
   await expect(page.getByRole("heading", { name: "报销审批记录", exact: true })).toBeVisible();
   await expect(page.getByRole("navigation", { name: "审批分类" }).getByRole("link", { name: "报销审批" })).toHaveAttribute("aria-current", "page");
-  expect(requests.find(({ pathname }) => pathname === "/api/reimbursements")?.searchParams.get("reviewedOnly")).toBe("true");
+  await expect.poll(() => requests.some(({ pathname, searchParams }) => pathname === "/api/reimbursements" && searchParams.get("reviewedOnly") === "true")).toBe(true);
   await page.locator(".reimbursement-history > summary").click();
   await expect(page.getByLabel("历史月份", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "申请报销", exact: true })).toHaveCount(0);

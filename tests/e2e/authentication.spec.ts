@@ -1,3 +1,4 @@
+import { openApprovalCards, openBackupTools, openWorkCards, wizardStep } from "./workspace-flows.js";
 import { expect, test, type Page } from "@playwright/test";
 
 test("reimbursements save evidence and submit without creating fictitious work", async ({ page }, testInfo) => {
@@ -188,6 +189,7 @@ async function mockAuthenticatedWorkspace(
   await page.route("**/api/work-sessions?**", (route) =>
     route.fulfill({ json: { items: [], nextCursor: null } }),
   );
+  await page.route("**/api/work-lifecycle/me", (route) => route.fulfill({ json: { period: { id: null, name: "验收周期", startsAt: "2026-09-01T00:00:00Z", endsAt: "2026-10-01T00:00:00Z", cutoffAt: null, timezone: "Asia/Shanghai" }, counts: {}, plans: [], activePlan: null, attention: [], attentionTruncated: false } }));
   await page.route("**/api/work-session-corrections/mine?**", (route) =>
     route.fulfill({ json: { items: [] } }),
   );
@@ -1268,8 +1270,9 @@ test("personal payroll renders reconciled totals, daily pay, period trend, and c
   await expect(page).not.toHaveURL(/\/login(?:[?#].*)?$/);
   await page.goto("/payroll");
   await expect(page.getByRole("heading", { name: "我的薪资" })).toBeVisible();
-  await expect(page.getByText("¥100.00 / 小时", { exact: true })).toBeVisible();
   await expect(page.getByText("本月实时预估", { exact: true })).toBeVisible();
+  await page.getByRole("navigation", { name: "个人薪资导航" }).getByRole("link", { name: "计算依据", exact: true }).click();
+  await expect(page.getByText("¥100.00 / 小时", { exact: true })).toBeVisible();
   await expect(page.getByText(/本周已记录工时 · 9月1日—9月6日（月界截断）/)).toBeVisible();
   await expect(page.getByText("周奖励工时（含预估）", { exact: true })).toBeVisible();
   await expect(page.getByText("2 项固定补贴", { exact: true })).toBeVisible();
@@ -1277,8 +1280,10 @@ test("personal payroll renders reconciled totals, daily pay, period trend, and c
   await expect(page.getByText(/待审核预估 5 小时 0 分/)).toBeVisible();
   await expect(page.getByText("本月实时预估怎样计算", { exact: true })).toBeVisible();
   await expect(page.getByText(/¥800.00 已批准工作计薪/)).toBeVisible();
+  await page.getByRole("navigation", { name: "个人薪资导航" }).getByRole("link", { name: "工时明细", exact: true }).click();
   await expect(page.getByText("每周工时", { exact: true })).toBeVisible();
   await expect(page.getByText("每日工时", { exact: true })).toBeVisible();
+  await page.getByRole("navigation", { name: "个人薪资导航" }).getByRole("link", { name: "趋势与预测", exact: true }).click();
   await expect(
     page.getByRole("img", {
       name: "本月每日薪资、工时、累计金额与未来预测",
@@ -1335,7 +1340,7 @@ test("payroll managers follow their own cited item and missing sources cannot se
   await expect(page.getByRole("heading", { name: "计薪明细", exact: true })).toHaveCount(0);
   await page.getByRole("button", { name: "查看当前可用薪资批次" }).click();
   await expect(page).toHaveURL(/\/payroll\/history$/);
-  await expect(page.getByText("本人已核对基础工时", { exact: true })).toBeVisible();
+  await expect(page.getByRole("paragraph").filter({ hasText: /^本人已核对基础工时$/ })).toBeVisible();
 });
 
 test("contact verification consumes a fragment capability without leaving it in the address bar", async ({
@@ -1815,11 +1820,15 @@ test("manual work recording persists primary and auxiliary project-node associat
     page.getByRole("button", { name: "移动端快速记录工作" }),
   ).toHaveCount(0);
   await page.getByRole("button", { name: "手工录入" }).click();
+  await wizardStep(page, 1, "work");
   await page.getByLabel("工作内容").fill("关联项目节点的补录");
+  await wizardStep(page, 3);
   await page.getByRole("option", { name: /实现项目画布/ }).click();
+  await wizardStep(page, 3, "work");
   await page
     .getByLabel("关联项目（可选）", { exact: true })
     .selectOption(project.id);
+  await wizardStep(page, 3, "work");
   await page
     .getByLabel("主项目节点", { exact: true })
     .selectOption("00000000-0000-4000-8000-000000000007");
@@ -1831,9 +1840,11 @@ test("manual work recording persists primary and auxiliary project-node associat
       () => document.documentElement.scrollWidth <= window.innerWidth + 1,
     ),
   ).toBe(true);
+  await wizardStep(page, 4);
   await expect(
     page.getByRole("button", { name: "保存真实工时草稿" }),
   ).toBeEnabled();
+  await wizardStep(page, 4);
   await page.getByRole("button", { name: "保存真实工时草稿" }).click();
 });
 
@@ -1894,12 +1905,14 @@ test("work progress review submission keeps failures actionable and mobile-safe"
   await page.getByRole("button", { name: "登录", exact: true }).click();
   await expect(page).not.toHaveURL(/\/login(?:[?#].*)?$/);
   await page.goto("/work");
-  await page.getByRole("button", { name: "提交审核" }).click();
+  await openWorkCards(page);
+  await page.getByRole("button", { name: "提交审核", exact: true }).click();
   await expect(page.getByText("这条工作进度尚未提交成功")).toBeVisible();
   await expect(page.getByText(/审核人可见的证据/)).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true);
-  await page.getByRole("button", { name: "提交审核" }).click();
-  await expect(page.getByText("待审核", { exact: true })).toBeVisible();
+  await openWorkCards(page);
+  await page.getByRole("button", { name: "提交审核", exact: true }).click();
+  await expect(page.locator(".work-record-entry > .fx-disclosure-head").getByText("待审核", { exact: true })).toBeVisible();
   await expect(page.getByText(/工作进度已提交审核/)).toBeVisible();
 });
 
@@ -1968,17 +1981,26 @@ test("one manual submission persists multiple completed work segments atomically
   await expect(page).not.toHaveURL(/\/login(?:[?#].*)?$/);
   await page.goto("/work");
   await page.getByRole("button", { name: "手工录入" }).click();
+  await wizardStep(page, 0, "work");
   await page.getByLabel("开始时间").fill("2026-09-03T08:00");
+  await wizardStep(page, 0, "work");
   await page.getByLabel("结束时间").fill("2026-09-03T12:00");
+  await wizardStep(page, 1, "work");
   await page.getByLabel("工作内容").fill("上午交付工作");
+  await wizardStep(page, 1, "work");
   await page.getByLabel("工作结果").fill("上午部分已完成");
+  await wizardStep(page, 2, "work");
   await page.getByLabel("本段文字证据").fill("上午交付清单与验收记录");
   await page.getByRole("button", { name: "添加一段" }).click();
   await page.getByLabel("开始", { exact: true }).fill("2026-09-03T13:00");
   await page.getByLabel("结束", { exact: true }).fill("2026-09-03T14:00");
+  await wizardStep(page, 2, "work");
   await page.getByLabel("本段工作内容").fill("下午联调工作");
+  await wizardStep(page, 2, "work");
   await page.getByLabel("本段结果（可选）").fill("联调通过");
+  await wizardStep(page, 2, "work");
   await page.getByLabel("本段文字证据").nth(1).fill("下午联调日志与通过结论");
+  await wizardStep(page, 4);
   await page.getByRole("button", { name: "保存真实工时草稿" }).click();
 
   await expect.poll(() => batchPayload?.entries.length ?? 0).toBe(2);
@@ -2110,7 +2132,8 @@ test("evidence uploads arbitrary file formats one by one and completes every sel
   await page.getByRole("button", { name: "登录", exact: true }).click();
   await expect(page).not.toHaveURL(/\/login(?:[?#].*)?$/);
   await page.goto("/work");
-  await page.getByRole("button", { name: "证据" }).click();
+  await openWorkCards(page);
+  await page.getByRole("button", { name: "证据", exact: true }).click();
   const evidencePicker = page.getByLabel("选择工作证据文件");
   await expect(evidencePicker).toHaveAttribute("accept", "*/*");
   await evidencePicker.setInputFiles([
@@ -2265,7 +2288,8 @@ test("the uploader can inspect rich file details and use direct preview or downl
   await page.getByRole("button", { name: "登录", exact: true }).click();
   await expect(page).not.toHaveURL(/\/login(?:[?#].*)?$/);
   await page.goto("/work");
-  await page.getByRole("button", { name: "证据" }).click();
+  await openWorkCards(page);
+  await page.getByRole("button", { name: "证据", exact: true }).click();
   await expect(page.getByText("现场说明.txt", { exact: true }).first()).toBeVisible();
   await expect(page.getByRole("link", { name: "预览" })).toHaveAttribute("href", `/api/attachments/${attachmentId}/open?mode=preview`);
   await expect(page.getByRole("link", { name: "下载" })).toHaveAttribute("href", `/api/attachments/${attachmentId}/open?mode=download`);
@@ -2350,7 +2374,8 @@ test("evidence keeps text references usable when private object storage is not c
   await page.getByRole("button", { name: "登录", exact: true }).click();
   await expect(page).not.toHaveURL(/\/login(?:[?#].*)?$/);
   await page.goto("/work");
-  await page.getByRole("button", { name: "证据" }).click();
+  await openWorkCards(page);
+  await page.getByRole("button", { name: "证据", exact: true }).click();
   await expect(
     page.getByText(/文件对象存储尚未配置.*暂时可添加链接或文字证据/),
   ).toBeVisible();
@@ -2382,13 +2407,17 @@ test("future plan uses the isolated cloud-plan endpoint", async ({ page }) => {
   await expect(page).not.toHaveURL(/\/login(?:[?#].*)?$/);
   await page.goto("/work");
   await page.getByRole("button", { name: "手工录入" }).click();
+  await wizardStep(page, 1, "work");
   await page.getByLabel("工作内容").fill("明天的跨端计划");
+  await wizardStep(page, 0, "work");
   await page
     .getByLabel("开始时间")
     .fill(plannedStart.toISOString().slice(0, 16));
+  await wizardStep(page, 0, "work");
   await page
     .getByLabel("结束时间")
     .fill(plannedEnd.toISOString().slice(0, 16));
+  await wizardStep(page, 4);
   await page.getByRole("button", { name: "保存云端计划" }).click();
 });
 
@@ -2434,6 +2463,7 @@ test("a completed cloud plan becomes fact only through the explicit realization 
   await expect(page).not.toHaveURL(/\/login(?:[?#].*)?$/);
   await page.goto("/work");
   await expect(page.getByText("1 个计划")).toBeVisible();
+  await openWorkCards(page);
   await page.getByRole("button", { name: "转为真实草稿" }).click();
 });
 
@@ -2996,6 +3026,7 @@ test("Owner can verify the saved AI provider and review a redacted health record
   await expect(page).not.toHaveURL(/\/login(?:[?#].*)?$/);
   await page.goto("/ai");
   await page.getByRole("button", { name: "组织 AI 配置" }).click();
+  await wizardStep(page, 3, "ai");
   await page.getByLabel("当前 Owner 密码").fill("Current-owner-password-123!");
   await page.getByRole("button", { name: "测试已保存配置" }).click();
 
@@ -3035,15 +3066,17 @@ test("AI report requests keep a stable five-minute range for cost-safe deduplica
   await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
   await page.getByRole("button", { name: "登录", exact: true }).click();
   await expect(page.getByRole("heading", { name: "林知夏，今天好" })).toBeVisible();
-  await page.goto("/ai");
+  await page.goto("/ai/compose");
   const generate = page.getByRole("button", {
     name: "生成所选洞察",
     exact: true,
   });
   await generate.click();
   await expect.poll(() => requests.length).toBe(1);
+  await page.goto("/ai/compose");
   await generate.click();
   await expect.poll(() => requests.length).toBe(2);
+  await page.goto("/ai/compose");
 
   expect(requests[1]).toEqual(requests[0]);
   const request = requests[0]!;
@@ -3091,7 +3124,7 @@ test("AI salary explanation is explicitly self-scoped and uses a bounded payroll
   await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
   await page.getByRole("button", { name: "登录", exact: true }).click();
   await expect(page.getByRole("heading", { name: "林知夏，今天好" })).toBeVisible();
-  await page.goto("/ai");
+  await page.goto("/ai/compose");
   await page.getByRole("button", { name: "解释我的薪资", exact: true }).click();
   await page.getByRole("button", { name: "生成所选洞察", exact: true }).click();
 
@@ -3118,7 +3151,7 @@ test("AI salary explanation is hidden when the account cannot view its own payro
   await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
   await page.getByRole("button", { name: "登录", exact: true }).click();
   await expect(page.getByRole("heading", { name: "林知夏，今天好" })).toBeVisible();
-  await page.goto("/ai");
+  await page.goto("/ai/compose");
 
   await expect(
     page.getByRole("button", { name: "解释我的薪资", exact: true }),
@@ -3185,7 +3218,7 @@ test("AI salary report exposes its authorized payroll provenance without exposin
   await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
   await page.getByRole("button", { name: "登录", exact: true }).click();
   await expect(page.getByRole("heading", { name: "林知夏，今天好" })).toBeVisible();
-  await page.goto("/ai");
+  await page.goto("/ai/reports");
 
   await expect(page.getByRole("heading", { name: "2026 年 9 月本人薪资解释" })).toBeVisible();
   await expect(page.getByText("工资事实 · 2026 年 9 月", { exact: true })).toBeVisible();
@@ -3273,7 +3306,7 @@ test("AI background jobs can be cancelled and deliberately retried without chang
   await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
   await page.getByRole("button", { name: "登录", exact: true }).click();
   await expect(page.getByRole("heading", { name: "林知夏，今天好" })).toBeVisible();
-  await page.goto("/ai");
+  await page.goto("/ai/reports");
   await page.getByRole("button", { name: "取消任务" }).click();
   await expect.poll(() => cancelRequests).toBe(1);
   await expect(page.getByRole("heading", { name: "任务已取消" })).toBeVisible();
@@ -3385,6 +3418,7 @@ test("project tree renders a pannable canvas with a list fallback", async ({
   await page.goto("/projects/00000000-0000-4000-8000-000000000004");
   await expect(page.getByText("实现项目画布")).toBeVisible();
   await expect(page.locator(".react-flow")).toBeVisible();
+  await page.getByRole("button", { name: "画布信息", exact: true }).click();
   await expect(page.getByText("完成 0 · 受阻 0", { exact: true })).toBeVisible();
   await expect(
     page.locator('.react-flow__node[aria-label*="个直接子节点"]').first(),
@@ -3556,7 +3590,7 @@ test("command palette only navigates through authorized workspace destinations",
   await page.keyboard.press("Control+K");
   await expect(page.getByRole("dialog", { name: "全局导航" })).toBeVisible();
   await page.getByLabel("搜索工作台").fill("日历");
-  await page.getByRole("button", { name: "日历 工作空间" }).click();
+  await page.getByRole("option", { name: "日历 工作空间" }).click();
   await expect(page.getByRole("heading", { name: "工作日历" })).toBeVisible();
 });
 
@@ -3571,8 +3605,8 @@ test("global search returns only server-authorized business entities", async ({
   await expect(page.getByRole("heading", { name: "林知夏，今天好" })).toBeVisible();
   await page.keyboard.press("Control+K");
   await page.getByLabel("搜索工作台").fill("实现");
-  const result = page.getByRole("button", {
-    name: /节点 实现项目画布 工作台正式版/,
+  const result = page.getByRole("option", {
+    name: /实现项目画布 节点 · 工作台正式版/,
   });
   await expect(result).toBeVisible();
   await result.click();
@@ -3737,7 +3771,9 @@ test("image evidence retries verification and submits work with mobile progress 
   await expect(page).not.toHaveURL(/\/login(?:[?#].*)?$/);
   await page.goto("/work");
   await page.getByRole("button", { name: "手工录入" }).click();
+  await wizardStep(page, 1, "work");
   await page.getByLabel("工作内容").fill("手机验收并上传图片");
+  await wizardStep(page, 3, "work");
   await page.getByLabel("关联项目（可选）", { exact: true }).selectOption(projectId);
   await page.getByLabel("关联 自动汇总阶段", { exact: true }).check();
   await expect(page.getByLabel("更新 自动汇总阶段 的进度")).toHaveCount(0);
@@ -3749,10 +3785,12 @@ test("image evidence retries verification and submits work with mobile progress 
   const slider = page.getByLabel("移动端验收任务完成度滑块");
   expect((await slider.boundingBox())!.height).toBeGreaterThanOrEqual(44);
   await page.locator('.work-direct-file input[type="file"]').setInputFiles({ name: "手机验收.png", mimeType: "image/png", buffer: Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6tOIAAAAASUVORK5CYII=", "base64") });
+  await wizardStep(page, 4);
   await page.getByRole("button", { name: "保存真实工时草稿" }).click();
   await expect(page.getByRole("button", { name: "重试未完成证据", exact: true })).toBeVisible();
   await page.getByRole("button", { name: "重试未完成证据", exact: true }).click();
   await expect(page.getByText("证据已全部保存并完成核验，可在对应工作记录中提交审核。", { exact: true })).toBeVisible();
+  await openWorkCards(page);
   await page.getByRole("button", { name: "提交审核", exact: true }).click();
   await expect.poll(() => submitted).toBe(true);
   expect({ created, intents, puts, verifies }).toEqual({ created: 1, intents: 1, puts: 1, verifies: 4 });
@@ -3815,6 +3853,7 @@ test("light semantic status palettes keep text readable on their own surfaces", 
 
   const contrasts = await page.evaluate(() => {
     const luminance = (hex: string) => {
+      if (hex.length === 4) hex = `#${[...hex.slice(1)].map((character) => character + character).join("")}`;
       const channels = [hex.slice(1, 3), hex.slice(3, 5), hex.slice(5, 7)].map(
         (value) => Number.parseInt(value, 16) / 255,
       );
@@ -4179,7 +4218,7 @@ test("organization keeps access role, org position, and professional identity as
   await expect(page.getByText("产品负责人", { exact: true })).toBeVisible();
   await expect(
     page
-      .locator(".organization-members-table")
+      .locator(".fx-member-board")
       .getByText("产品设计", { exact: true }),
   ).toBeVisible();
 });
@@ -4262,6 +4301,7 @@ test("an owner can white-list both contacts and copy a manual one-time invitatio
   await page.getByRole("button", { name: "登录", exact: true }).click();
   await expect(page).not.toHaveURL(/\/login(?:[?#].*)?$/);
   await page.goto("/organization");
+  await page.getByRole("button", { name: "目录与邀请", exact: true }).click();
   await page.getByText("添加成员并生成加入链接").click();
   await expect(
     page.getByRole("option", { name: "通过邮件自动投递（尚未配置）" }),
@@ -4269,7 +4309,7 @@ test("an owner can white-list both contacts and copy a manual one-time invitatio
   await expect(
     page.getByText("邮件和短信均未配置；默认手工链接可立即使用，不会尝试伪造投递。"),
   ).toBeVisible();
-  await page.getByPlaceholder("姓名").fill("新成员");
+  await page.getByLabel("邀请成员姓名", { exact: true }).fill("新成员");
   await page.getByRole("button", { name: "加入白名单并生成链接" }).click();
   await expect(
     page.getByText("请至少填写一个邮箱或手机号。两个都填也可以。"),
@@ -4379,9 +4419,10 @@ test("owner can see invitation activation state and withdraw a pending member", 
   await page.getByRole("tab", { name: /成员/ }).click();
   await expect(page.getByText("当前在线 · 2 个活跃端")).toBeVisible();
   await page
-    .locator(".organization-member-row")
+    .locator(".fx-member-card")
     .filter({ hasText: "待加入成员" })
     .click();
+  await page.getByRole("tablist", { name: "人员详情分区" }).getByRole("tab", { name: "账户管理" }).click();
   await expect(
     page
       .getByLabel("待加入成员 的成员详情")
@@ -4394,7 +4435,7 @@ test("owner can see invitation activation state and withdraw a pending member", 
     })
     .click();
   await expect(
-    page.locator(".organization-member-row").filter({ hasText: "待加入成员" }),
+    page.locator(".fx-member-card").filter({ hasText: "待加入成员" }),
   ).toHaveCount(0);
 });
 
@@ -4453,6 +4494,7 @@ test("white-list invitation never submits a required role select with no assigna
   await page.getByRole("button", { name: "登录", exact: true }).click();
   await expect(page).not.toHaveURL(/\/login(?:[?#].*)?$/);
   await page.goto("/organization");
+  await page.getByRole("button", { name: "目录与邀请", exact: true }).click();
   await page.getByText("添加成员并生成加入链接").click();
 
   await expect(page.getByLabel("初始访问角色")).toBeDisabled();
@@ -4632,6 +4674,7 @@ test("a manager reviews a pending professional identity request through the orga
   await page.getByRole("button", { name: "登录", exact: true }).click();
   await expect(page).not.toHaveURL(/\/login(?:[?#].*)?$/);
   await page.goto("/organization");
+  await page.getByRole("button", { name: "目录与邀请", exact: true }).click();
   await expect(page.getByText("待审身份申请", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "批准身份申请 Agent 开发" }).click();
 });
@@ -4782,9 +4825,10 @@ test("organization Owner can issue a manual reset link and start a dual-confirma
   await page.goto("/organization");
   await page.getByRole("tab", { name: /成员/ }).click();
   await page
-    .locator(".organization-member-row")
+    .locator(".fx-member-card")
     .filter({ hasText: "陈远航" })
     .click();
+  await page.getByRole("tablist", { name: "人员详情分区" }).getByRole("tab", { name: "账户管理" }).click();
   await expect(page.getByText("手工密码重置链接", { exact: true })).toBeVisible();
   await page
     .getByLabel("当前 Owner 密码（二次验证）")
@@ -4794,11 +4838,12 @@ test("organization Owner can issue a manual reset link and start a dual-confirma
   await expect(page.getByLabel("密码重置一次性链接")).toHaveValue(
     "https://app.example.test/reset-password#token=manual-reset-test-token",
   );
-  await page.getByRole("button", { name: "关闭成员详情" }).click();
+  await page.getByRole("button", { name: /^关闭.*人员详情与编辑$/ }).click();
   await page
-    .locator(".organization-member-row")
+    .locator(".fx-member-card")
     .filter({ hasText: "林知夏" })
     .click();
+  await page.getByRole("tablist", { name: "人员详情分区" }).getByRole("tab", { name: "账户管理" }).click();
   await page.getByLabel("新 Owner（组织级 Manager）").selectOption(managerId);
   await page
     .getByLabel("当前密码（发起转移二次验证）")
@@ -5096,12 +5141,12 @@ test("project workbench exposes versioned node editing instead of a visual-only 
   await page.getByText("实现项目画布", { exact: true }).first().click();
   await expect(page.getByText("节点详情", { exact: true })).toBeVisible();
   const inspector = page.getByRole("complementary", { name: "实现项目画布 节点详情" });
-  const inspectorBox = await inspector.boundingBox();
   const viewport = page.viewportSize();
-  expect(inspectorBox).not.toBeNull();
   expect(viewport).not.toBeNull();
-  expect(inspectorBox!.y + inspectorBox!.height).toBeLessThanOrEqual(viewport!.height + 1);
-  await expect(inspector.locator(".project-node-inspector-scroll")).toHaveCSS("overflow-y", "auto");
+  // Check the settled sheet bounds while retaining the strict one-pixel allowance.
+  await expect.poll(async () => { const box = await inspector.boundingBox(); return box ? box.y + box.height : Infinity; }).toBeLessThanOrEqual(viewport!.height + 1);
+  await expect(inspector).toHaveCSS("overflow-y", "auto");
+  await expect(inspector.locator(".project-node-inspector-scroll")).toHaveCSS("overflow-y", "visible");
   await expect(page.getByLabel("变更说明")).toHaveValue("更新项目节点");
   await expect(
     page.getByRole("button", { name: "保存节点版本" }),
@@ -5688,6 +5733,7 @@ test("project node schedule edits persist through the same versioned mutation", 
     .locator(".react-flow")
     .getByText("工作台正式版", { exact: true })
     .click();
+  await wizardStep(page, 0, "work");
   await page.getByLabel("开始时间").fill("2026-09-03T09:00");
   await page.getByLabel("截止时间").fill("2026-09-06T17:00");
   await page.getByRole("button", { name: "保存节点版本" }).click();
@@ -5781,7 +5827,7 @@ test("employees see shared-project last work activity without coworkers' duratio
   await expect(page.getByText("完成移动端流程核对")).toBeVisible();
   await expect(page.getByText(/最后工作.*09.*04.*13:00/).first()).toBeVisible();
   await expect(page.getByText(/2\s*小时/)).toHaveCount(0);
-  await page.getByRole("button", { name: /陈一.*完成移动端流程核对/ }).click();
+  await page.locator(".team-activity-summary").filter({ hasText: "完成移动端流程核对" }).click();
   await expect.poll(() => evidenceFetched).toBe(true);
   await expect(page.getByText("完整验收证据：移动端、平板端与桌面端均已逐项核对。", { exact: true })).toBeVisible();
 });
@@ -5861,6 +5907,7 @@ test("approvers can inspect full work details and authorized evidence before dec
   await page.getByRole("button", { name: "登录", exact: true }).click();
   await expect(page).not.toHaveURL(/\/login(?:[?#].*)?$/);
   await page.goto("/approvals");
+  await openApprovalCards(page);
   await page.getByRole("button", { name: "查看工作与附件" }).click();
   await expect(page.getByText("已形成最终版", { exact: true })).toBeVisible();
   await expect(page.getByRole("link", { name: "https://example.test/research/final" })).toBeVisible();
@@ -6076,8 +6123,11 @@ test("work entry updates selected nodes across projects without reselecting unre
   await expect(page).not.toHaveURL(/\/login(?:[?#].*)?$/);
   await page.goto("/work");
   await page.getByRole("button", { name: "手工录入" }).click();
+  await wizardStep(page, 1, "work");
   await page.getByLabel("工作内容").fill("同一时段推进两个项目");
+  await wizardStep(page, 2, "work");
   await page.getByLabel("本段文字证据").fill("项目甲代码交付记录及项目乙验收说明");
+  await wizardStep(page, 3, "work");
   await page.getByLabel("关联项目（可选）", { exact: true }).selectOption(a);
   await page.getByLabel("关联 项目甲交付", { exact: true }).check();
   await expect(page.getByLabel("主项目节点", { exact: true }).locator("option")).toHaveCount(2);
@@ -6091,6 +6141,7 @@ test("work entry updates selected nodes across projects without reselecting unre
   const progressTopAfter = await page.getByLabel("项目甲交付进度更新").evaluate((element) => element.getBoundingClientRect().top);
   expect(Math.abs(progressTopAfter - progressTopBefore)).toBeLessThanOrEqual(1);
   await expect(page.getByLabel("项目甲交付完成度", { exact: true })).toHaveValue("25");
+  await wizardStep(page, 3, "work");
   await page.getByLabel("关联项目（可选）", { exact: true }).selectOption(b);
   await expect.poll(() => secondTreeStarted).toBe(true);
   const selectedNodeTopBefore = await page.getByLabel("项目甲交付进度更新").evaluate((element) => element.getBoundingClientRect().top);
@@ -6106,10 +6157,12 @@ test("work entry updates selected nodes across projects without reselecting unre
   await expect(page.getByLabel("更新 项目乙验收 的进度")).not.toBeChecked();
   await page.getByLabel("更新 项目乙验收 的进度").check();
   await page.getByLabel("项目乙验收完成度", { exact: true }).fill("100");
+  await wizardStep(page, 3, "work");
   await page.getByLabel("主项目节点", { exact: true }).selectOption(second);
   await expect(page.getByLabel("项目甲交付完成度", { exact: true })).toHaveValue("25");
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true);
   await page.screenshot({ path: testInfo.outputPath("multi-project-progress.png"), fullPage: true });
+  await wizardStep(page, 4);
   await page.getByRole("button", { name: "保存真实工时草稿" }).click();
   await expect.poll(() => submitted).toMatchObject({ primaryProjectNodeId: second, projectNodeIds: [first, second], projectProgressUpdates: [{ projectNodeId: first, progress: 25 }, { projectNodeId: second, progress: 100 }] });
   await expect(page.getByText("已保存 1 段工作。", { exact: true })).toBeVisible();
@@ -6145,17 +6198,27 @@ test("Owner saves and tests a new provider with editable generation settings", a
   await expect(page).not.toHaveURL(/\/login(?:[?#].*)?$/);
   await page.goto("/ai");
   await page.getByRole("button", { name: "组织 AI 配置" }).click();
+  await wizardStep(page, 0, "ai");
   await page.getByLabel("AI Base URL").fill("https://new.example/v1");
+  await wizardStep(page, 0, "ai");
   await page.getByLabel("模型标识").fill("vendor/reasoning-model");
+  await wizardStep(page, 0, "ai");
   await page.getByLabel("API Key", { exact: true }).fill("new-test-secret-key");
+  await wizardStep(page, 1, "ai");
   await page.getByLabel("请求超时（秒）").fill("150");
   await page.getByLabel("最大尝试次数").fill("4");
+  await wizardStep(page, 1, "ai");
   await page.getByLabel("最大输出 Token").fill("8000");
   await page.getByLabel("温度（Temperature，可选）").fill("");
+  await wizardStep(page, 1, "ai");
   await page.getByLabel("Top P（可选）").fill("0.8");
+  await wizardStep(page, 1, "ai");
   await page.getByLabel("输出 Token 参数").selectOption("max_completion_tokens");
+  await wizardStep(page, 1, "ai");
   await page.getByLabel("响应格式").selectOption("json_object");
+  await wizardStep(page, 3, "ai");
   await page.getByLabel("当前 Owner 密码").fill("Current-owner-password-123!");
+  await wizardStep(page, 3, "ai");
   await page.getByRole("button", { name: "保存并测试新配置" }).click();
   await expect(page.getByText("连接成功", { exact: true })).toBeVisible();
   expect(sequence).toEqual(["save", "check"]);
@@ -6165,8 +6228,11 @@ test("Owner saves and tests a new provider with editable generation settings", a
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true);
   await page.screenshot({ path: testInfo.outputPath("configurable-ai.png"), fullPage: true });
   rejectNextCheck = true;
+  await wizardStep(page, 0, "ai");
   await page.getByLabel("AI Base URL").fill("https://third.example/v1");
+  await wizardStep(page, 3, "ai");
   await page.getByLabel("当前 Owner 密码").fill("Current-owner-password-123!");
+  await wizardStep(page, 3, "ai");
   await page.getByRole("button", { name: "保存并测试新配置" }).click();
   await expect(page.getByRole("status").filter({ hasText: "配置已保存，连接测试未完成" })).toBeVisible();
   await expect(page.getByLabel("AI Base URL")).toHaveValue("https://third.example/v1");
@@ -6290,11 +6356,11 @@ test("resilience: global search traps keyboard focus and restores its opener", a
   const opener = page.getByRole("button", { name: /搜索工作台/ });
   await opener.click();
   const dialog = page.getByRole("dialog", { name: "全局导航" });
-  await expect(page.getByRole("textbox", { name: "搜索工作台" })).toBeFocused();
+  await expect(page.getByRole("combobox", { name: "搜索工作台" })).toBeFocused();
   await page.keyboard.press("Shift+Tab");
   expect(await dialog.evaluate((element) => element.contains(document.activeElement))).toBe(true);
   await page.keyboard.press("Tab");
-  await expect(page.getByRole("textbox", { name: "搜索工作台" })).toBeFocused();
+  await expect(page.getByRole("combobox", { name: "搜索工作台" })).toBeFocused();
   await page.keyboard.press("Escape");
   await expect(dialog).toHaveCount(0);
   // On mobile Escape also closes navigation, so focus must return to a visible control.
@@ -6460,12 +6526,15 @@ test("resilience: local work prefills are isolated across account switches", asy
   await mockAuthenticatedWorkspace(page);
   await loginForResilience(page, "/work");
   await page.getByRole("button", { name: "手工录入", exact: true }).click();
+  await wizardStep(page, 1, "work");
   await page.getByLabel(/^工作内容/).fill("只属于第一账号的本机草稿");
+  await openBackupTools(page);
   await page.getByRole("button", { name: "本机保存预填写", exact: true }).click();
   const original = await page.evaluate(async () => (await fetch("/api/me")).json());
   await page.route("**/api/me", (route) => route.fulfill({ json: { ...original, user: { ...original.user, membershipId: "00000000-0000-4000-8000-000000000777" } } }));
   await page.reload();
   await page.getByRole("button", { name: "手工录入", exact: true }).click();
+  await openBackupTools(page);
   await page.getByRole("button", { name: "恢复预填写", exact: true }).click();
   await expect(page.getByLabel(/^工作内容/)).toHaveValue("");
   expect(await page.evaluate(() => localStorage.getItem("workbench:manual-work-prefill:v2:00000000-0000-4000-8000-000000000002"))).toContain("只属于第一账号的本机草稿");
@@ -6591,14 +6660,15 @@ test("resilience: a late AI report creation does not replace the conversation op
     await pending;
     return route.fulfill({ status: 202, json: { job: { id: "late-report" } } });
   });
-  await loginForResilience(page, "/ai");
+  await loginForResilience(page, "/ai/compose");
   await page.getByRole("button", { name: "生成所选洞察", exact: true }).click();
   await expect.poll(() => sent).toBe(true);
+  await page.getByRole("navigation", { name: "AI 工作区导航" }).getByRole("link", { name: "对话", exact: true }).click();
   await page.getByRole("button", { name: "新建", exact: true }).click();
   const conversationUrl = page.url();
   await page.getByRole("textbox", { name: "向 AI 提问", exact: true }).fill("新对话中的草稿");
   release();
-  await expect(page.getByRole("button", { name: "生成所选洞察", exact: true })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "发送", exact: true })).toBeEnabled();
   await expect(page).toHaveURL(conversationUrl);
   await expect(page.getByRole("textbox", { name: "向 AI 提问", exact: true })).toHaveValue("新对话中的草稿");
 });
@@ -6612,14 +6682,19 @@ test("resilience: work dates remain editable when cleared and new segments use o
   await page.route("**/api/me", (route) => route.fulfill({ json: { ...original, user: { ...original.user, timezone: "Pacific/Honolulu" } } }));
   await page.reload();
   await page.getByRole("button", { name: "手工录入", exact: true }).click();
-  const content = page.getByRole("textbox", { name: /^工作内容/ });
+  await wizardStep(page, 1);
+  const content = page.getByLabel("工作内容", { exact: true });
   await content.fill("日期修改时保留的工作说明");
+  await wizardStep(page, 0, "work");
   await page.getByLabel("结束时间", { exact: true }).fill("");
   await expect(content).toHaveValue("日期修改时保留的工作说明");
   await expect(page.getByText("请填写有效的结束时间；不完整或在组织时区中不存在的时间不会被当作计划或真实工时。", { exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "添加一段", exact: true })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "添加一段", exact: true, includeHidden: true })).toBeDisabled();
+  await wizardStep(page, 0, "work");
   await page.getByLabel("开始时间", { exact: true }).fill("2026-09-21T10:00");
+  await wizardStep(page, 0, "work");
   await page.getByLabel("结束时间", { exact: true }).fill("2026-09-21T11:00");
+  await wizardStep(page, 2);
   await page.getByRole("button", { name: "添加一段", exact: true }).click();
   await expect(page.getByLabel("开始", { exact: true })).toHaveValue("2026-09-21T11:00");
   await expect(page.getByLabel("结束", { exact: true })).toHaveValue("2026-09-21T12:00");
@@ -6643,16 +6718,20 @@ test("resilience: pending work saves lock the submitted editor and failures pres
   });
   await loginForResilience(page, "/work");
   await page.getByRole("button", { name: "手工录入", exact: true }).click();
-  const content = page.getByRole("textbox", { name: /^工作内容/ });
+  await wizardStep(page, 1);
+  const content = page.getByLabel("工作内容", { exact: true });
   await content.fill("保存失败也必须保留的计划草稿");
+  await wizardStep(page, 0, "work");
   await page.getByLabel("开始时间", { exact: true }).fill("2026-10-01T09:00");
+  await wizardStep(page, 0, "work");
   await page.getByLabel("结束时间", { exact: true }).fill("2026-10-01T10:00");
+  await wizardStep(page, 4);
   await page.getByRole("button", { name: "保存云端计划", exact: true }).click();
   await expect.poll(() => sent).toBe(true);
   await expect(content).toBeDisabled();
-  await expect(page.getByRole("button", { name: "收起录入", exact: true })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "关闭补录一段真实工作", exact: true })).toBeDisabled();
   release();
-  await expect(page.getByRole("alert")).toContainText("计划保存暂时不可用");
+  await expect(page.getByRole("dialog", { name: "补录一段真实工作" }).getByRole("alert")).toContainText("计划保存暂时不可用");
   await expect(content).toBeEnabled();
   await expect(content).toHaveValue("保存失败也必须保留的计划草稿");
 });

@@ -12,7 +12,7 @@ export function useDialogFocus(ref: RefObject<HTMLElement | null>, enabled: bool
     // known opener must retain that target explicitly.
     const previous = returnFocus?.current ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
     const controls = () => [...dialog.querySelectorAll<HTMLElement>(focusableSelector)]
-      .filter((element) => element.getClientRects().length > 0 && !element.closest("[inert]"));
+      .filter((element) => element.tabIndex >= 0 && element.getClientRects().length > 0 && !element.closest("[inert]"));
     if (!dialog.contains(document.activeElement)) (controls()[0] ?? dialog).focus({ preventScroll: true });
     const handleKey = (event: KeyboardEvent) => {
       if (event.key !== "Tab") return;

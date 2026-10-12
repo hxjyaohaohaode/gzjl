@@ -1,4 +1,4 @@
-import { and, desc, eq, gt, inArray, isNull, lt, or, type SQL } from "drizzle-orm";
+import { and, desc, eq, gt, gte, ilike, inArray, isNull, lt, or, type SQL } from "drizzle-orm";
 import type { Database } from "@workbench/db";
 import {
   organizations,
@@ -624,7 +624,12 @@ export class AnalyticsService {
     };
   }
 
-  async teamActivity(actor: AnalyticsActor, limit: number) {
+  async teamActivity(actor: AnalyticsActor, limit: number, filters: { from?: string | undefined; to?: string | undefined; memberId?: string | undefined; project?: string | undefined; q?: string | undefined } = {}) {
+    const pattern = filters.q ? `%${filters.q.replace(/[\\%_]/g, "\\$&")}%` : null;
+    const activityConditions = [filters.from ? gte(workSessions.endAt, new Date(filters.from)) : undefined, filters.to ? lt(workSessions.endAt, new Date(filters.to)) : undefined,
+      filters.memberId ? eq(workSessions.membershipId, filters.memberId) : undefined,
+      filters.project === "__unlinked" ? isNull(projects.name) : filters.project ? eq(projects.name, filters.project) : undefined,
+      pattern ? or(ilike(workSessions.content, pattern), ilike(workSessions.result, pattern), ilike(users.displayName, pattern), ilike(projects.name, pattern)) : undefined];
     const canViewOrganizationWork = actor.grants.some(
       (grant) =>
         grant.permission === "work.view_full_scope" &&
@@ -748,6 +753,7 @@ export class AnalyticsService {
               eq(workSessions.organizationId, actor.organizationId),
               eq(workSessions.recordKind, "fact"),
               isNull(workSessions.deletedAt),
+              ...activityConditions,
             ),
           )
           .orderBy(desc(workSessions.endAt), desc(workSessions.id))
@@ -799,6 +805,7 @@ export class AnalyticsService {
                 isNull(projects.deletedAt),
                 eq(orgMemberships.status, "active"),
                 isNull(orgMemberships.leftAt),
+                ...activityConditions,
               ),
             )
             .orderBy(desc(workSessions.endAt), desc(workSessions.id))

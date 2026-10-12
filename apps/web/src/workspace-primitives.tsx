@@ -38,6 +38,7 @@ export function Field({
   label: string;
   children: ReactNode;
   hint?: string;
+  wizardStep?: number;
 }) {
   const hintId = useId();
   const control = isValidElement<HTMLAttributes<HTMLElement>>(children) && typeof children.type === "string" && ["input", "select", "textarea"].includes(children.type)

@@ -41,7 +41,7 @@ const summaryQuery = z
     (input) => new Date(input.to).getTime() - new Date(input.from).getTime() <= 366 * 86_400_000,
     { message: "分析区间不能超过 366 天" },
   );
-const activityQuery = z.object({ limit: z.coerce.number().int().min(1).max(100).default(30) });
+const activityQuery = z.object({ limit: z.coerce.number().int().min(1).max(100).default(30), from: z.iso.datetime({ offset: true }).optional(), to: z.iso.datetime({ offset: true }).optional(), memberId: z.uuid().optional(), project: z.string().max(160).optional(), q: z.string().trim().max(200).optional() }).refine((value) => !value.from || !value.to || Date.parse(value.to) > Date.parse(value.from), "结束时间须晚于开始时间");
 
 export async function registerAnalyticsRoutes(
   app: FastifyInstance,
@@ -67,7 +67,7 @@ export async function registerAnalyticsRoutes(
     );
   });
   app.get("/api/team-activity", { preHandler: authenticate }, async (request) => {
-    const { limit } = activityQuery.parse(request.query);
-    return service.teamActivity(request.auth!, limit);
+    const { limit, ...filters } = activityQuery.parse(request.query);
+    return service.teamActivity(request.auth!, limit, filters);
   });
 }

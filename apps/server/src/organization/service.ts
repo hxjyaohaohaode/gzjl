@@ -189,6 +189,20 @@ export class OrganizationService {
     });
   }
 
+  async permissionOverview(actor: OrganizationActor) {
+    await this.ensureSystemAccessRoles(actor.organizationId);
+    const bindings = await this.db.select({
+      roleId: accessRoles.id,
+      permission: permissionDefinitions.code,
+      description: permissionDefinitions.description,
+    }).from(rolePermissions)
+      .innerJoin(accessRoles, eq(accessRoles.id, rolePermissions.roleId))
+      .innerJoin(permissionDefinitions, eq(permissionDefinitions.code, rolePermissions.permissionCode))
+      .where(eq(accessRoles.organizationId, actor.organizationId))
+      .orderBy(asc(accessRoles.id), asc(permissionDefinitions.code));
+    return { organizationId: actor.organizationId, bindings };
+  }
+
   async overview(actor: OrganizationActor) {
     await this.ensureSystemAccessRoles(actor.organizationId);
     const [organization] = await this.db

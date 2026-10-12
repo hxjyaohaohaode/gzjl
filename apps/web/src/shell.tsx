@@ -1,4 +1,10 @@
 import { AiFactAnswer } from "./lifecycle-workbench.js";
+import { workspacePage } from "./workspace-pages.js";
+import { WorkspaceTransition } from "./workspace-transition.js";
+import { workspaceRouteFamily } from "./workspace-route-family.js";
+import { CollectionPager, SmoothReveal } from "./reference-primitives.js";
+import { pageSlice, shiftVisualDay } from "./work-visualization-model.js";
+import { getOrganizationTimezone, zonedInputToDate } from "./timezone.js";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowUpRight,
@@ -31,7 +37,7 @@ import {
 import type { LucideIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
-import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
+import { NavLink, useLocation, useNavigate } from "react-router-dom";
 import { Button, cn } from "@workbench/ui";
 
 import {
@@ -43,13 +49,14 @@ import type { RealtimeSyncStatus } from "./realtime.js";
 import { AccentPicker } from "./accent-picker.js";
 import { readableForeground, sanitizeAccent } from "./color.js";
 import { endCurrentSession } from "./session.js";
-import { readPreference, writePreference } from "./browser-preferences.js";
+import { readPreference, readRecentPaths, writePreference } from "./browser-preferences.js";
 import { useDialogFocus } from "./dialog-focus.js";
 import { WorkspaceErrorBoundary } from "./error-boundary.js";
-import { getOrganizationTimezone } from "./timezone.js";
 import { hasOrganizationGrant } from "./api.js";
 import { MotionSettings, WorkspaceOrientation } from "./interaction-system.js";
 import { reducedMotion } from "./motion-preference.js";
+import { CommandPalette } from "./command-palette.js";
+import { useAdaptiveTopbar } from "./use-adaptive-topbar.js";
 
 interface NavigationItem {
   label: string;
@@ -70,21 +77,6 @@ interface NotificationItem {
   actionUrl: string | null;
   readAt: string | null;
   createdAt: string;
-}
-
-interface GlobalSearchResult {
-  id: string;
-  kind:
-    | "work_session"
-    | "project"
-    | "project_node"
-    | "member"
-    | "attachment"
-    | "ai_report";
-  title: string;
-  subtitle: string | null;
-  href: string;
-  occurredAt: string | null;
 }
 
 interface PendingOwnershipTransfer {
@@ -346,6 +338,14 @@ const navigation: NavigationItem[] = [
     ownerOnly: true,
   },
   {
+    label: "AI 模型配置",
+    shortLabel: "模型配置",
+    to: "/ai/settings",
+    icon: Bot,
+    section: "management",
+    ownerOnly: true,
+  },
+  {
     label: "组织与人员",
     shortLabel: "组织",
     to: "/organization",
@@ -399,166 +399,6 @@ const sectionNames: Record<NavigationItem["section"], string> = {
   personal: "个人事务",
 };
 
-function formatHeaderDate(): string {
-  return new Intl.DateTimeFormat("zh-CN", {
-    timeZone: getOrganizationTimezone(),
-    month: "long",
-    day: "numeric",
-    weekday: "short",
-  }).format(new Date());
-}
-
-function CommandPalette({
-  items,
-  onClose,
-}: {
-  items: NavigationItem[];
-  onClose: () => void;
-}) {
-  const [query, setQuery] = useState("");
-  const dialogRef = useRef<HTMLDivElement>(null);
-  useDialogFocus(dialogRef, true);
-  const [settledQuery, setSettledQuery] = useState("");
-  const navigate = useNavigate();
-  const normalizedQuery = query.trim();
-  const matches = items.filter((item) => item.label.includes(normalizedQuery));
-  useEffect(() => {
-    const timer = window.setTimeout(() => setSettledQuery(normalizedQuery), 220);
-    return () => window.clearTimeout(timer);
-  }, [normalizedQuery]);
-  const search = useQuery({
-    queryKey: ["global-search", settledQuery],
-    queryFn: ({ signal }) =>
-      api<{ items: GlobalSearchResult[] }>(
-        `/api/search?q=${encodeURIComponent(settledQuery)}&limit=5`,
-        { signal },
-      ),
-    enabled: settledQuery.length >= 2,
-    staleTime: 15_000,
-  });
-  const resultKindLabel: Record<GlobalSearchResult["kind"], string> = {
-    work_session: "工作",
-    project: "项目",
-    project_node: "节点",
-    member: "成员",
-    attachment: "附件",
-    ai_report: "AI",
-  };
-  const open = (href: string) => {
-    navigate(href);
-    onClose();
-  };
-  return (
-    <div
-      aria-label="全局导航"
-      aria-modal="true"
-      className="fixed inset-0 z-[70] grid place-items-start bg-[#151735]/35 p-4 pt-[10vh] backdrop-blur-sm"
-      role="dialog"
-      ref={dialogRef}
-      tabIndex={-1}
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget) onClose();
-      }}
-    >
-      <div className="app-command-palette w-full max-w-xl overflow-hidden rounded-[22px] border border-[var(--border)] bg-[var(--surface-raised)] shadow-[var(--shadow-float)]">
-        <div className="flex items-center gap-3 border-b border-[var(--border)] px-4">
-          <Search className="text-[var(--text-subtle)]" size={19} />
-          <input
-            aria-label="搜索工作台"
-            className="h-14 min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-[var(--text-subtle)]"
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder="搜索工作、项目、成员、附件或报告…"
-            value={query}
-          />
-          <Button
-            aria-label="关闭搜索"
-            onClick={onClose}
-            size="compact"
-            variant="ghost"
-          >
-            <X size={16} />
-          </Button>
-        </div>
-        <div className="max-h-[min(64vh,520px)] overflow-y-auto p-2">
-          <p className="px-3 py-2 text-[11px] font-bold tracking-[0.12em] text-[var(--text-subtle)] uppercase">
-            快速前往
-          </p>
-          {matches.length ? (
-            matches.map((item) => {
-              const Icon = item.icon;
-              return (
-                <button
-                  className="flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left text-sm font-semibold transition hover:bg-[var(--surface-subtle)]"
-                  key={item.to}
-                  onClick={() => {
-                    open(item.to);
-                  }}
-                  type="button"
-                >
-                  <span className="grid size-8 place-items-center rounded-lg bg-[var(--surface-subtle)] text-[var(--accent-strong)]">
-                    <Icon size={16} />
-                  </span>
-                  <span className="flex-1">{item.label}</span>
-                  <span className="text-xs font-normal text-[var(--text-subtle)]">
-                    {sectionNames[item.section]}
-                  </span>
-                </button>
-              );
-            })
-          ) : normalizedQuery.length < 2 ? (
-            <p className="px-3 py-8 text-center text-sm text-[var(--text-muted)]">
-              没有匹配的页面。
-            </p>
-          ) : null}
-          {normalizedQuery.length >= 2 ? (
-            <div className="mt-1 border-t border-[color-mix(in_srgb,var(--text)_5%,transparent)] pt-2">
-              <p className="px-3 py-2 text-[11px] font-bold tracking-[0.12em] text-[var(--text-subtle)] uppercase">
-                业务结果
-              </p>
-              {search.isPending || settledQuery !== normalizedQuery ? (
-                <p className="px-3 py-6 text-center text-sm text-[var(--text-muted)]">
-                  搜索中…
-                </p>
-              ) : search.isError ? (
-                <div className="px-3 py-6 text-center text-sm text-[var(--danger)]" role="alert">
-                  搜索暂时不可用，请重试。
-                  <Button className="ml-2" disabled={search.isFetching} onClick={() => void search.refetch()} variant="secondary" size="compact">重新搜索</Button>
-                </div>
-              ) : search.data?.items.length ? (
-                search.data.items.map((item) => (
-                  <button
-                    className="flex w-full items-start gap-3 rounded-xl px-3 py-3 text-left transition hover:bg-[var(--surface-subtle)]"
-                    key={`${item.kind}:${item.id}`}
-                    onClick={() => open(item.href)}
-                    type="button"
-                  >
-                    <span className="mt-0.5 min-w-10 rounded-full bg-[var(--surface-subtle)] px-2 py-1 text-center text-[10px] font-bold text-[var(--text-muted)]">
-                      {resultKindLabel[item.kind]}
-                    </span>
-                    <span className="min-w-0 flex-1">
-                      <span className="block truncate text-sm font-bold">
-                        {item.title}
-                      </span>
-                      {item.subtitle ? (
-                        <span className="mt-0.5 block truncate text-xs text-[var(--text-muted)]">
-                          {item.subtitle}
-                        </span>
-                      ) : null}
-                    </span>
-                  </button>
-                ))
-              ) : (
-                <p className="px-3 py-6 text-center text-sm text-[var(--text-muted)]">
-                  没有可见的匹配结果。
-                </p>
-              )}
-            </div>
-          ) : null}
-        </div>
-      </div>
-    </div>
-  );
-}
 
 const syncStatusPresentation: Record<
   RealtimeSyncStatus,
@@ -605,6 +445,11 @@ export function AppShell({
   });
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
+  const [notificationQuery, setNotificationQuery] = useState("");
+  const [notificationFrom, setNotificationFrom] = useState("");
+  const [notificationTo, setNotificationTo] = useState("");
+  const [notificationRead, setNotificationRead] = useState("");
+  const [notificationPage, setNotificationPage] = useState(1);
   const [commandOpen, setCommandOpen] = useState(false);
   const [contextOpen, setContextOpen] = useState(false);
   const openCommand = useCallback(() => {
@@ -627,17 +472,21 @@ export function AppShell({
       ? storedTheme
       : "light";
   });
+  const [density, setDensity] = useState<"comfortable" | "compact">(() =>
+    readPreference("workbench-density") === "compact" ? "compact" : "comfortable",
+  );
   const [accent, setAccent] = useState(() => {
     const storedAccent = readPreference("workbench-accent");
     // The first workbench release persisted its built-in green as if it were a
     // custom user choice. Migrate only that legacy default; real custom colors stay intact.
     return storedAccent?.toLowerCase() === "#1f765c"
-      ? "#5b5ce2"
+      ? sanitizeAccent(null)
       : sanitizeAccent(storedAccent);
   });
   const selectedAccent = sanitizeAccent(accent);
   const queryClient = useQueryClient();
   const location = useLocation();
+  const topbar = useAdaptiveTopbar(location.pathname, settingsOpen || notificationsOpen || commandOpen || contextOpen || sidebarOpen);
   const navigate = useNavigate();
   const utilityMenuRef = useRef<HTMLDivElement>(null);
   const sidebarTouchStartX = useRef<number | null>(null);
@@ -689,6 +538,16 @@ export function AppShell({
     queryFn: () => api<{ items: NotificationItem[] }>("/api/notifications"),
     refetchInterval: 30_000,
   });
+  const notificationParams = new URLSearchParams();
+  if (notificationQuery.trim()) notificationParams.set("q", notificationQuery.trim());
+  if (notificationRead) notificationParams.set("read", notificationRead);
+  if (notificationFrom) notificationParams.set("from", zonedInputToDate(`${notificationFrom}T00:00`, getOrganizationTimezone()).toISOString());
+  if (notificationTo) notificationParams.set("to", zonedInputToDate(`${shiftVisualDay(notificationTo, 1)}T00:00`, getOrganizationTimezone()).toISOString());
+  const notificationSearch = notificationParams.toString();
+  const notificationRangeInvalid = Boolean(notificationFrom && notificationTo && notificationFrom > notificationTo);
+  const filteredNotifications = useQuery({ queryKey: ["notifications", notificationSearch], queryFn: () => api<{ items: NotificationItem[] }>(`/api/notifications?${notificationSearch}`), enabled: notificationsOpen && Boolean(notificationSearch) && !notificationRangeInvalid });
+  const notificationResults = notificationSearch ? filteredNotifications : notifications;
+  const notificationItems = notificationRangeInvalid ? [] : notificationResults.data?.items ?? [];
   const pendingOwnershipTransfer = useQuery({
     queryKey: ["pending-ownership-transfer"],
     queryFn: () =>
@@ -715,8 +574,7 @@ export function AppShell({
         item.job.taskType === "assistant_chat" &&
         item.job.scope.conversationId === pageCopilot.conversationId,
     )
-    .reverse()
-    .slice(-6);
+    .reverse();
   const copilotUpdateKey = copilotItems
     .map((item) => `${item.job.id}:${item.job.status}:${Boolean(item.report)}`)
     .join("|");
@@ -776,6 +634,17 @@ export function AppShell({
     writePreference("workbench-theme", theme);
   }, [theme]);
   useEffect(() => {
+    document.documentElement.dataset.density = density;
+    writePreference("workbench-density", density);
+    return () => { delete document.documentElement.dataset.density; };
+  }, [density]);
+  useEffect(() => {
+    const page = visibleNavigation.filter((item) => item.to === "/" ? location.pathname === "/" : location.pathname === item.to || location.pathname.startsWith(`${item.to}/`)).sort((a, b) => b.to.length - a.to.length)[0];
+    if (!page) return;
+    const next = [page.to, ...readRecentPaths(me.user.membershipId).filter((path) => path !== page.to)].slice(0, 5);
+    writePreference(`workbench-recent:${me.user.membershipId}`, JSON.stringify(next));
+  }, [location.pathname, me.user.membershipId, visibleNavigation]);
+  useEffect(() => {
     writePreference(
       "workbench-sidebar-collapsed",
       String(sidebarCollapsed),
@@ -823,6 +692,7 @@ export function AppShell({
   }, []);
   useEffect(() => {
     const listener = (event: KeyboardEvent) => {
+      if (document.querySelector('[data-workspace-dialog="true"]')) return;
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
         event.preventDefault();
         openCommand();
@@ -885,6 +755,9 @@ export function AppShell({
       {commandOpen ? (
         <CommandPalette
           items={visibleNavigation}
+          membershipId={me.user.membershipId}
+          currentPath={location.pathname}
+          onAppearance={() => setSettingsOpen(true)}
           onClose={() => setCommandOpen(false)}
         />
       ) : null}
@@ -1015,13 +888,15 @@ export function AppShell({
           </div>
           <Button
             className="mt-1.5 w-full justify-start text-[#aab3cc] hover:bg-white/8 hover:text-white"
+            aria-label="退出登录"
+            title="退出登录"
             disabled={logout.isPending}
             onClick={() => logout.mutate()}
             size="compact"
             variant="ghost"
           >
             <LogOut size={15} />
-            {logout.isPending ? "正在退出…" : "退出登录"}
+            <span className="app-logout-label">{logout.isPending ? "正在退出…" : "退出登录"}</span>
           </Button>
         </div>
         {!sidebarCollapsed ? (
@@ -1091,7 +966,8 @@ export function AppShell({
           sidebarCollapsed && "lg:pl-[76px]",
         )}
       >
-        <header className="app-topbar sticky top-0 z-20 flex h-[76px] items-center gap-3 border-b border-[var(--border)] px-4 backdrop-blur-xl md:px-7">
+        {topbar.hidden && <div className="app-topbar-reveal" onPointerEnter={topbar.reveal} aria-hidden="true" />}
+        <header className={cn("app-topbar sticky top-0 z-20 flex h-[76px] items-center gap-3 border-b border-[var(--border)] px-4 backdrop-blur-xl md:px-7", topbar.hidden && "is-auto-hidden")}>
           <Button
             aria-label="打开导航"
             className="lg:hidden"
@@ -1114,15 +990,17 @@ export function AppShell({
               <PanelLeftClose size={18} />
             )}
           </Button>
-          <div className="hidden items-center gap-2 text-xs font-medium text-[var(--text-muted)] md:flex">
+          <div className="app-breadcrumb hidden items-center gap-2 text-xs font-medium text-[var(--text-muted)] md:flex" aria-label="当前位置">
             <span className="grid size-7 place-items-center rounded-lg bg-[var(--surface-subtle)] text-[var(--accent-strong)]">
               <LayoutGrid size={15} />
             </span>
-            <span>{formatHeaderDate()}</span>
+            <span>{sectionNames[visibleNavigation.filter((item) => location.pathname === item.to || (item.to !== "/" && location.pathname.startsWith(`${item.to}/`))).sort((a, b) => b.to.length - a.to.length)[0]?.section ?? "workspace"]}</span>
+            <span aria-hidden="true" className="text-[var(--text-subtle)]">/</span>
+            <strong className="text-[var(--text)]">{workspacePage(location.pathname).title}</strong>
           </div>
           <button
             className="app-topbar-search hidden h-10 max-w-md flex-1 items-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--surface-raised)] px-3 text-left text-xs text-[var(--text-muted)] transition md:flex"
-            onClick={() => setCommandOpen(true)}
+            onClick={openCommand}
             type="button"
           >
             <Search size={16} />
@@ -1227,7 +1105,7 @@ export function AppShell({
               <Settings size={18} />
             </Button>
             {notificationsOpen ? (
-              <div className="app-utility-popover absolute right-0 top-12 z-50 max-h-[min(70vh,560px)] w-[min(92vw,380px)] overflow-y-auto rounded-[18px] border border-[var(--border)] bg-[var(--surface-raised)] p-3 shadow-[var(--shadow-float)]">
+              <div className="app-utility-popover fx-notification-center absolute right-0 top-12 z-50 w-[min(92vw,400px)] rounded-[18px] border border-[var(--border)] bg-[var(--surface-raised)] p-3 shadow-[var(--shadow-float)]">
                 <div className="flex items-center justify-between gap-3 px-1 pb-2">
                   <p className="font-bold">通知中心</p>
                   <div className="flex items-center gap-2">
@@ -1247,21 +1125,29 @@ export function AppShell({
                     ) : null}
                   </div>
                 </div>
+                <div className="fx-notification-filters" aria-label="通知筛选">
+                  <input type="search" aria-label="搜索通知内容" placeholder="搜索标题或通知内容" maxLength={200} value={notificationQuery} onChange={(event) => { setNotificationQuery(event.target.value); setNotificationPage(1); }} />
+                  <select aria-label="通知已读状态" value={notificationRead} onChange={(event) => { setNotificationRead(event.target.value); setNotificationPage(1); }}><option value="">全部状态</option><option value="unread">未读</option><option value="read">已读</option></select>
+                  <label>从<input type="date" aria-label="通知开始日期" max={notificationTo || undefined} value={notificationFrom} onChange={(event) => { setNotificationFrom(event.target.value); setNotificationPage(1); }} /></label>
+                  <label>至<input type="date" aria-label="通知结束日期" min={notificationFrom || undefined} value={notificationTo} onChange={(event) => { setNotificationTo(event.target.value); setNotificationPage(1); }} /></label>
+                  {notificationSearch && <button type="button" onClick={() => { setNotificationQuery(""); setNotificationFrom(""); setNotificationTo(""); setNotificationRead(""); setNotificationPage(1); }}>清除筛选</button>}
+                </div>
+                {notificationRangeInvalid && <p role="alert" className="fx-filter-error">结束日期不能早于开始日期。</p>}
                 {updateNotification.error ? <p className="p-3 text-sm text-[var(--danger)]" role="alert">通知状态未能更新：{updateNotification.error.message} 请重试该操作。</p> : null}
                 {notifications.error ? <div className="p-3 text-sm text-[var(--danger)]" role="alert">
                   <p>{notifications.error.message}{notifications.data ? " 下方保留上次读取的通知。" : ""}</p>
                   <Button className="mt-2" disabled={notifications.isFetching} onClick={() => void notifications.refetch()} variant="secondary" size="compact">重新加载通知</Button>
                 </div> : null}
-                {notifications.isPending ? (
+                {notificationResults.isPending && !notificationRangeInvalid ? (
                   <p className="p-3 text-sm text-[var(--text-muted)]" role="status">
                     正在读取通知…
                   </p>
-                ) : notifications.data?.items.length ? (
-                  <div className="space-y-1">
-                    {notifications.data.items.map((item) => (
+                ) : notificationItems.length ? (
+                  <div className="fx-notification-list space-y-1">
+                    {pageSlice(notificationItems, notificationPage, 6).map((item) => (
                       <div
                         className={cn(
-                          "group relative w-full rounded-xl p-3 pr-20 text-left transition hover:bg-[var(--surface-subtle)]",
+                          "fx-notification-item group relative w-full rounded-xl p-3 text-left transition hover:bg-[var(--surface-subtle)]",
                           !item.readAt && "bg-[var(--accent-soft)]",
                         )}
                         key={item.id}
@@ -1288,11 +1174,11 @@ export function AppShell({
                                   : "bg-[var(--accent)]",
                             )}
                           />
-                          <span className="min-w-0">
+                          <span className="min-w-0 flex-1">
                             <span className="block text-sm font-semibold">
                               {item.title}
                             </span>
-                            <span className="mt-1 block text-xs leading-5 text-[var(--text-muted)]">
+                            <span className="fx-notification-copy mt-1 block text-xs leading-5 text-[var(--text-muted)]">
                               {item.body}
                             </span>
                             <span className="mt-1 block text-[11px] text-[var(--text-subtle)]">
@@ -1305,8 +1191,9 @@ export function AppShell({
                             </span>
                           </span>
                         </button>
+                        {item.body.length > 80 && <details className="fx-notification-detail"><summary>展开通知内容</summary><p>{item.body}</p></details>}
                         <Button
-                          className="absolute right-2 top-2 opacity-80 group-hover:opacity-100"
+                          className="fx-notification-read mt-1 opacity-80 group-hover:opacity-100"
                           disabled={updateNotification.isPending}
                           onClick={() => {
                             updateNotification.mutate({ id: item.id, state: item.readAt ? "unread" : "read" });
@@ -1320,11 +1207,14 @@ export function AppShell({
                       </div>
                     ))}
                   </div>
-                ) : !notifications.error ? (
+                ) : !notificationResults.error ? (
                   <p className="p-3 text-sm text-[var(--text-muted)]">
-                    暂无通知。
+                    {notificationSearch ? "没有符合筛选条件的通知。" : "暂无通知。"}
                   </p>
                 ) : null}
+                {notificationResults.error && notificationSearch && <p role="alert" className="fx-filter-error">{notificationResults.error.message}</p>}
+                <CollectionPager total={notificationItems.length} page={notificationPage} size={6} onChange={setNotificationPage} label="通知分页" />
+                <p className="fx-notification-hint">按组织时区筛选，最多展示最近 100 条匹配通知。</p>
               </div>
             ) : null}
             {settingsOpen ? (
@@ -1349,6 +1239,14 @@ export function AppShell({
                         : value === "light"
                           ? "浅色"
                           : "深色"}
+                    </Button>
+                  ))}
+                </div>
+                <p className="mt-4 text-xs font-semibold text-[var(--text-muted)]">信息密度</p>
+                <div className="mt-2 grid grid-cols-2 gap-2" aria-label="信息密度">
+                  {(["comfortable", "compact"] as const).map((value) => (
+                    <Button key={value} aria-pressed={density === value} onClick={() => setDensity(value)} size="compact" variant={density === value ? "primary" : "secondary"}>
+                      {value === "comfortable" ? "舒适" : "紧凑"}
                     </Button>
                   ))}
                 </div>
@@ -1380,7 +1278,7 @@ export function AppShell({
             <p>{logout.error.message}</p>
             <Button className="mt-2" disabled={logout.isPending} onClick={() => logout.mutate()} variant="secondary" size="compact">重试退出</Button>
           </div> : null}
-          <WorkspaceErrorBoundary key={location.pathname}><Outlet /></WorkspaceErrorBoundary>
+          <WorkspaceTransition render={(outlet) => <WorkspaceErrorBoundary key={workspaceRouteFamily(location.pathname)}>{outlet}</WorkspaceErrorBoundary>} />
         </main>
       </div>
       {contextOpen ? (
@@ -1418,7 +1316,7 @@ export function AppShell({
               <X size={16} />
             </Button>
           </div>
-          <div className="mt-5 flex min-h-[calc(100%-4.5rem)] flex-col">
+          <div className="fx-copilot-body mt-5 flex flex-col">
             <div className="flex items-center justify-between gap-3">
               <span className="text-xs text-[var(--text-muted)]">
                 仅使用当前授权事实
@@ -1443,7 +1341,7 @@ export function AppShell({
             </div>
             <div
               aria-live="polite"
-              className="mt-4 max-h-[44vh] flex-1 space-y-3 overflow-y-auto pr-1"
+              className="fx-copilot-transcript mt-4 flex-1 space-y-3 overflow-y-auto pr-1"
               ref={contextScrollRef}
             >
               {copilotReports.isPending ? (
@@ -1457,7 +1355,7 @@ export function AppShell({
                       {item.job.scope.question || "页面分析"}
                     </div>
                     <div className="max-w-[94%] rounded-2xl rounded-bl-md bg-[var(--surface-subtle)] px-3 py-2.5 text-sm leading-6">
-                      {(item.report ? <AiFactAnswer reportId={item.report.id} text={item.report.summary} /> : null) ??
+                      {(item.report ? <AiFactAnswer reportId={item.report.id} text={item.report.summary} conversationId={pageCopilot.conversationId} scope={contextScope} /> : null) ??
                         (item.job.status === "failed"
                           ? item.job.errorSummary || "本次回答生成失败。"
                           : item.job.status === "cancelled"
@@ -1493,18 +1391,19 @@ export function AppShell({
                 </div>
               )}
             </div>
-            <div className="mt-4 flex flex-wrap gap-2">
+            <SmoothReveal show={!contextQuestion} className="fx-ai-actions mt-4" label="页面快捷提问">
               {pageCopilot.suggestions.map((suggestion) => (
                 <button
                   className="rounded-lg bg-[var(--surface-subtle)] px-2.5 py-2 text-left text-xs font-semibold transition hover:bg-[var(--accent-soft)]"
+                  disabled={sendCopilot.isPending}
                   key={suggestion}
-                  onClick={() => setContextQuestion(suggestion)}
+                  onClick={() => sendCopilot.mutate({ question: suggestion, conversationId: pageCopilot.conversationId })}
                   type="button"
                 >
                   {suggestion}
                 </button>
               ))}
-            </div>
+            </SmoothReveal>
             <form
               className="mt-3"
               onSubmit={(event) => {
@@ -1517,6 +1416,7 @@ export function AppShell({
                 className="min-h-24 w-full resize-y rounded-xl bg-[var(--surface-subtle)] px-3 py-3 text-sm leading-6 outline-none transition focus:ring-2 focus:ring-[var(--accent)]"
                 maxLength={2_000}
                 onChange={(event) => setContextQuestion(event.target.value)}
+                onKeyDown={(event) => { if (event.key === "Enter" && (event.ctrlKey || event.metaKey) && contextQuestion.trim().length >= 2 && !sendCopilot.isPending) { event.preventDefault(); sendCopilot.mutate({ question: contextQuestion, conversationId: pageCopilot.conversationId }); } }}
                 placeholder="询问当前页面的进展、异常或下一步"
                 value={contextQuestion}
               />
@@ -1549,6 +1449,7 @@ export function AppShell({
                     ? { entity: pageCopilot.entityId }
                     : {}),
                 });
+                params.set("scope", canUseTeamCopilot ? contextScope : "self");
                 navigate(`/ai?${params.toString()}`);
                 setContextOpen(false);
               }}

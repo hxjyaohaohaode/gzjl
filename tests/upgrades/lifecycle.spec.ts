@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
 import type ExcelJSModule from "../../apps/server/node_modules/exceljs";
+import { openApprovalCards, openWorkCards } from "../e2e/workspace-flows.js";
 
 const requireServer = createRequire(new URL("../../apps/server/package.json", import.meta.url));
 const ExcelJS = requireServer("exceljs") as typeof ExcelJSModule;
@@ -47,11 +48,13 @@ test("long content, evidence queue, restoration, contextual approval and exact h
     const { session } = await call(member.request, "POST", "/api/work-sessions", input);
     await member.goto(`/work?record=${session.id}&version=${session.version}`);
     await expect(member.getByRole("button", { name: "编辑定位到的草稿" })).toBeVisible();
+    await openWorkCards(member);
     await member.locator(`#work-record-${session.id}`).getByRole("button", { name: "归档误填草稿" }).click({ trial: true });
     await call(member.request, "POST", `/api/work-sessions/${session.id}/archive-action`, { action: "archive", expectedVersion: session.version });
     await member.goto("/work"); await member.getByText("误填恢复 · 已归档草稿与计划", { exact: true }).click();
     await member.getByRole("button", { name: "恢复为草稿" }).click();
     await expect(member.locator(`#work-record-${session.id}`)).toBeVisible();
+    await openWorkCards(member);
     const current = (await call(member.request, "GET", "/api/work-sessions?limit=100")).items.find((r: { id: string }) => r.id === session.id);
     const panel = member.locator(`#work-record-${session.id}`);
     await panel.getByText("证据", { exact: true }).click();
@@ -59,7 +62,7 @@ test("long content, evidence queue, restoration, contextual approval and exact h
     await expect.poll(async () => (await call(member.request, "GET", `/api/work-sessions/${session.id}/attachments`)).items.filter((a: { status: string }) => a.status === "available").length).toBe(2);
     for (let i = 0; i < 12; i++) await call(member.request, "POST", `/api/work-sessions/${session.id}/attachments/reference`, { kind: "text", textContent: `证据 ${i}：` + "详细事实与验收依据。".repeat(90), visibility: "management_only" });
     await call(member.request, "POST", `/api/work-sessions/${session.id}/submit`, { expectedVersion: current.version });
-    await owner.goto("/approvals"); await owner.getByRole("button", { name: "查看工作与附件" }).click();
+    await owner.goto("/approvals"); await openApprovalCards(owner); await owner.getByRole("button", { name: "查看工作与附件" }).click();
     await expect(owner.getByText("审核依据与历次退回原因", { exact: true })).toBeVisible();
     await expect(owner.getByText("提交人：同名成员与多附件长文本验收", { exact: true })).toBeVisible();
     await expect(owner.getByText("图片证据.png", { exact: true }).first()).toBeVisible();
@@ -92,6 +95,7 @@ test("long content, evidence queue, restoration, contextual approval and exact h
     expect((await member.request.get(`/api/payroll-runs/${pendingRunId}/report.xlsx`)).status()).toBe(403);
     await owner.reload(); await expect(owner.getByRole("heading", { name: "老板核对：每人薪资总览 + 本周期工作明细" })).toBeVisible();
     await owner.goto("/approvals");
+    await openApprovalCards(owner);
     await owner.getByRole("button", { name: "批准", exact: true }).click();
     await expect.poll(async () => (await call(owner.request, "GET", `/api/work-facts/${session.id}`)).session.approvalStatus).toBe("approved");
 

@@ -1,3 +1,4 @@
+import { openBackupTools, wizardStep } from "./workspace-flows.js";
 import { expect, test, type Page } from "@playwright/test";
 
 const recoveryKey = "workbench:editor-recovery:v1:member";
@@ -45,10 +46,14 @@ async function delayedWorkspace(page: Page, failEvidence = false) {
     await page.getByRole("link", { name: "工作记录", exact: true }).click();
   }
   await page.getByRole("button", { name: "手工录入", exact: true }).click();
+  await wizardStep(page, 1, "work");
   await page.getByLabel(/^工作内容/).fill("缓慢提交的 A");
+  await wizardStep(page, 2, "work");
   await page.getByLabel("本段文字证据", { exact: true }).fill("A 的文字证据");
+  await openBackupTools(page);
   await page.getByRole("button", { name: "本机保存预填写", exact: true }).click();
   await expect.poll(() => page.evaluate((key) => sessionStorage.getItem(key), recoveryKey)).toContain("缓慢提交的 A");
+  await wizardStep(page, 4);
   await page.getByRole("button", { name: "保存真实工时草稿", exact: true }).click();
   await expect.poll(() => posted).toBe(true);
   return { release, completed: () => completed };
@@ -58,10 +63,14 @@ test("a late save cannot clear a newer editor's automatic recovery or explicit l
   const submission = await delayedWorkspace(page, true);
   await page.goBack();
   await expect(page).toHaveURL(/\/calendar$/);
+  await expect(page.getByRole("heading", { name: "工作日历", exact: true })).toBeVisible();
   await page.goForward();
   await expect(page.getByLabel(/^工作内容/)).toHaveValue("缓慢提交的 A");
+  await wizardStep(page, 1, "work");
   await page.getByLabel(/^工作内容/).fill("后来编辑的 C 必须保留");
+  await wizardStep(page, 2, "work");
   await page.getByLabel("本段文字证据", { exact: true }).fill("C 的独立证据");
+  await openBackupTools(page);
   await page.getByRole("button", { name: "本机保存预填写", exact: true }).click();
   await expect.poll(() => page.evaluate((key) => sessionStorage.getItem(key), recoveryKey)).toContain("后来编辑的 C 必须保留");
   submission.release();
@@ -80,6 +89,7 @@ test("a save completed while away retires only its submitted backup before retur
   const submission = await delayedWorkspace(page);
   await page.goBack();
   await expect(page).toHaveURL(/\/calendar$/);
+  await expect(page.getByRole("heading", { name: "工作日历", exact: true })).toBeVisible();
   submission.release();
   await expect.poll(submission.completed).toBe(true);
   await expect.poll(() => page.evaluate((key) => sessionStorage.getItem(key), recoveryKey)).toBeNull();
@@ -95,6 +105,7 @@ test("a reopened unchanged draft is retired on late success and cannot be restor
   const submission = await delayedWorkspace(page);
   await page.goBack();
   await expect(page).toHaveURL(/\/calendar$/);
+  await expect(page.getByRole("heading", { name: "工作日历", exact: true })).toBeVisible();
   await page.goForward();
   await expect(page.getByLabel(/^工作内容/)).toHaveValue("缓慢提交的 A");
   submission.release();

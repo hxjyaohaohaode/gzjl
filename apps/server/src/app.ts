@@ -65,12 +65,14 @@ export interface BuildAppOptions {
   config: ServerConfig;
   readiness: ReadinessProbe;
   database?: Database;
+  aiProviderFetch?: typeof fetch;
 }
 
 export async function buildApp({
   config,
   readiness,
   database,
+  aiProviderFetch,
 }: BuildAppOptions): Promise<FastifyInstance> {
   const app = Fastify({
     logger:
@@ -313,7 +315,7 @@ export async function buildApp({
       authService,
       authenticate,
     );
-    const aiConfigurationService = new AiConfigurationService(database, config);
+    const aiConfigurationService = new AiConfigurationService(database, config, aiProviderFetch);
     await registerAiRoutes(
       app,
       new AiService(

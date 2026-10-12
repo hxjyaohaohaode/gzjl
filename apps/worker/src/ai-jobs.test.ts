@@ -23,7 +23,7 @@ async function setup() {
   const [org] = await db.insert(organizations).values({ name: "AI Worker 测试" }).returning();
   const [user] = await db.insert(users).values({ displayName: "测试成员" }).returning();
   const [member] = await db.insert(orgMemberships).values({ organizationId: org!.id, userId: user!.id, status: "active" }).returning();
-  await db.insert(organizationAiSettings).values({ organizationId: org!.id, enabled: true, baseUrl: "https://new-provider.example/v1", model: "vendor/new-model", apiKeyCiphertext: encryptSecret("current-provider-key", config.AI_CONFIG_ENCRYPTION_KEY), maxOutputTokens: 8000, generationOptions: { maxAttempts: 2, tokenLimitParameter: "max_completion_tokens" } });
+  await db.insert(organizationAiSettings).values({ organizationId: org!.id, enabled: true, baseUrl: "https://new-provider.example/v1", model: "vendor/new-model", apiKeyCiphertext: encryptSecret("current-provider-key", config.AI_CONFIG_ENCRYPTION_KEY), maxOutputTokens: 8000, generationOptions: { maxAttempts: 2, tokenLimitParameter: "max_completion_tokens", extraBody: { reasoning_effort: "high", enable_thinking: false } } });
   const [job] = await db.insert(aiJobs).values({ organizationId: org!.id, requestedBy: member!.id, scope: {}, taskType: "work_qa", provider: "openai_compatible", model: "old-provider-model", promptTemplateVersion: "test", inputHash: crypto.randomUUID(), sourceSummary: { sources: [] }, maxAttempts: 1, maxOutputTokens: 1200 }).returning();
   return { db, job: job!, readJob: async () => (await db.select().from(aiJobs).where(eq(aiJobs.id, job!.id)))[0]! };
 }
@@ -49,7 +49,7 @@ it("preserves a completed paid report if notification preferences fail", async (
 it("uses the entire current provider after a switch and claims a job only once", async () => {
   const { db, job, readJob } = await setup();
   const fetcher = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
-    expect(JSON.parse(String(init?.body))).toMatchObject({ model: "vendor/new-model", max_completion_tokens: 8000 });
+    expect(JSON.parse(String(init?.body))).toMatchObject({ model: "vendor/new-model", max_completion_tokens: 8000, reasoning_effort: "high", enable_thinking: false });
     expect(JSON.parse(String(init?.body))).not.toHaveProperty("temperature");
     expect(init?.headers).toMatchObject({ authorization: "Bearer current-provider-key" });
     return completion();

@@ -1,5 +1,6 @@
 import { expect, test, type Page, type APIRequestContext } from "@playwright/test";
 import { writeFile } from "node:fs/promises";
+import { openApprovalCards, openWorkCards, wizardStep } from "../e2e/workspace-flows.js";
 
 const password = "Acceptance-Only-Password-2026!";
 async function call(client: APIRequestContext, method: string, path: string, data?: unknown) {
@@ -56,7 +57,12 @@ test("real API, database and file bytes connect the employee and management work
     await call(employee.request, "POST", "/api/projects/" + secondProject.project.id + "/members/self", {});
     await employee.goto("/work");
     await employee.getByRole("button", { name: "手工录入" }).click();
+    await wizardStep(employee, 1);
     await employee.getByLabel("工作内容").fill(`真实验收交付${suffix}`);
+    await wizardStep(employee, 2);
+    await employee.locator('.work-direct-file input[type="file"]').setInputFiles({ name: "真实字节.png", mimeType: "image/png", buffer: Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6tOIAAAAASUVORK5CYII=", "base64") });
+    await expect(employee.getByRole("img", { name: "待上传图片：真实字节.png" })).toBeVisible();
+    await wizardStep(employee, 3);
     await employee.getByLabel("关联项目（可选）", { exact: true }).selectOption(projectId);
     await employee.getByLabel("关联 手机和桌面真实交付任务", { exact: true }).check();
     await employee.getByLabel("更新 手机和桌面真实交付任务 的进度").check();
@@ -66,8 +72,7 @@ test("real API, database and file bytes connect the employee and management work
     await employee.getByLabel("关联 跨项目同步验收", { exact: true }).check();
     await employee.getByLabel("更新 跨项目同步验收 的进度").check();
     await employee.getByLabel("跨项目同步验收完成度", { exact: true }).fill("50");
-    await employee.locator('.work-direct-file input[type="file"]').setInputFiles({ name: "真实字节.png", mimeType: "image/png", buffer: Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6tOIAAAAASUVORK5CYII=", "base64") });
-    await expect(employee.getByRole("img", { name: "待上传图片：真实字节.png" })).toBeVisible();
+    await wizardStep(employee, 4);
     expect(await employee.locator("form").filter({ has: employee.getByRole("button", { name: "保存真实工时草稿" }) }).locator("input, textarea, select").evaluateAll((fields) => fields.filter((field) => !(field as HTMLInputElement).checkValidity()).map((field) => ({ html: field.outerHTML, error: (field as HTMLInputElement).validationMessage })))).toEqual([]);
     await employee.getByRole("button", { name: "保存真实工时草稿" }).click();
     await expect(employee.getByText("已保存 1 段工作。", { exact: true })).toBeVisible();
@@ -80,9 +85,11 @@ test("real API, database and file bytes connect the employee and management work
     const secondTree = await call(owner.request, "GET", "/api/projects/" + secondProject.project.id + "/tree");
     expect(Number(secondTree.nodes.find((item: { id: string }) => item.id === secondNode.id).progress)).toBe(50);
     expect(record.projectLinks).toHaveLength(2);
+    await openWorkCards(employee);
     await employee.getByRole("button", { name: "提交审核", exact: true }).click();
     await expect.poll(async () => (await call(owner.request, "GET", "/api/approvals")).items.some((item: { session: { id: string } }) => item.session.id === record.id)).toBe(true);
     await owner.goto("/approvals");
+    await openApprovalCards(owner);
     await owner.getByRole("button", { name: "查看工作与附件" }).click();
     await expect(owner.getByText("真实字节.png", { exact: true }).first()).toBeVisible();
     const downloaded = await owner.request.get(`/api/attachments/${proof.items[0].id}/open?mode=download`);
@@ -169,13 +176,22 @@ test("real API, database and file bytes connect the employee and management work
 
     const inventory: unknown[] = [];
     for (const [role, page, paths] of [
-      ["owner", owner, ["/", "/work", "/calendar", "/projects", `/projects/${projectId}`, "/team", "/analytics", "/payroll", "/payroll/history", "/payroll-management", "/payroll-management/plans", "/payroll-management/periods", "/payroll-management/settings", "/reimbursements", "/organization/work-policy", "/ai", "/approvals", "/approvals/reimbursements", "/organization", "/security", "/notification-preferences", "/imports"]],
-      ["employee", employee, ["/", "/work", "/calendar", "/projects", `/projects/${projectId}`, "/team", "/analytics", "/payroll", "/payroll/history", "/reimbursements", "/ai", "/security", "/notification-preferences"]],
+      ["owner", owner, ["/", "/work", "/calendar", "/projects", `/projects/${projectId}`, "/team", "/analytics", "/payroll", "/payroll/breakdown", "/payroll/hours", "/payroll/trends", "/payroll/history", "/payroll-management", "/payroll-management/plans", "/payroll-management/periods", "/payroll-management/settings", "/reimbursements", "/organization/work-policy", "/ai", "/ai/reports", "/ai/compose", "/ai/settings", "/approvals", "/approvals/reimbursements", "/organization", "/security", "/notification-preferences", "/imports"]],
+      ["employee", employee, ["/", "/work", "/calendar", "/projects", `/projects/${projectId}`, "/team", "/analytics", "/payroll", "/payroll/breakdown", "/payroll/hours", "/payroll/trends", "/payroll/history", "/reimbursements", "/ai", "/ai/reports", "/ai/compose", "/security", "/notification-preferences"]],
     ] as const) {
       for (const path of paths) {
         await page.goto(path);
         await expect(page.locator("#main-content")).toBeVisible();
         await expect(page.locator("main .animate-spin")).toHaveCount(0);
+        if (role === "owner" && path === "/organization") {
+          const response = page.waitForResponse((item) => new URL(item.url()).pathname === "/api/organization/permission-overview");
+          await page.getByRole("tab", { name: "权限全景", exact: true }).click();
+          const permissions = await response;
+          expect(permissions.ok()).toBe(true);
+          expect((await permissions.json()).bindings.some((binding: { permission: string }) => binding.permission === "work.review")).toBe(true);
+          await page.getByRole("button", { name: "谁能审核工时？", exact: true }).click();
+          await expect(page.getByRole("region", { name: "真实权限查询" })).toContainText("当前有效成员授权");
+        }
         if (testInfo.project.use.isMobile && path === "/calendar") {
           expect(await page.locator(".calendar-mini-days button").first().evaluate((button) => button.getBoundingClientRect().height)).toBeGreaterThanOrEqual(44);
         }

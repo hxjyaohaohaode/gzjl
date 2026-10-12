@@ -11,9 +11,15 @@ const pages: Record<string, WorkspacePage> = {
   "/projects": { title: "项目", area: "协作", purpose: "从项目进入节点、工作线和交付进度，查看关联工作依据。" },
   "/team": { title: "团队动态", area: "协作", purpose: "查看有权限的工作动态，了解同项目成员的推进情况。" },
   "/analytics": { title: "数据分析", area: "分析与洞察", purpose: "用同一组筛选联动图表与明细，核对投入、进展和趋势。" },
-  "/ai": { title: "AI 工作洞察", area: "分析与洞察", purpose: "基于授权工作事实生成总结与解释，从引用回看依据。" },
+  "/ai": { title: "AI 对话", area: "分析与洞察", purpose: "基于当前授权事实提问，沿引用核对工作依据。" },
+  "/ai/reports": { title: "工作洞察报告", area: "分析与洞察", purpose: "回看报告历史、校对草稿并追溯事实来源。", parent: { to: "/ai", label: "AI 对话" } },
+  "/ai/compose": { title: "新建工作分析", area: "分析与洞察", purpose: "选择分析类型与授权范围，生成可核对的报告。", parent: { to: "/ai", label: "AI 对话" } },
+  "/ai/settings": { title: "AI 模型配置", area: "管理工作", purpose: "自行填写模型和连接参数，保存后测试组织 AI 服务。", parent: { to: "/ai", label: "AI 工作洞察" } },
   "/payroll": { title: "本月薪资", area: "个人事务", purpose: "查看本人本月工资预估，区分已批准工时、待审影响和预测。" },
   "/payroll/history": { title: "历史工资单", area: "个人事务", purpose: "核对周期工资单、计算组成与收款状态。", parent: { to: "/payroll", label: "我的薪资" } },
+  "/payroll/breakdown": { title: "薪资计算依据", area: "个人事务", purpose: "核对计薪方式、奖励、补贴与报销组成。", parent: { to: "/payroll", label: "我的薪资" } },
+  "/payroll/hours": { title: "计薪工时明细", area: "个人事务", purpose: "逐周与逐日核对已批准、待审核工时。", parent: { to: "/payroll", label: "我的薪资" } },
+  "/payroll/trends": { title: "薪资趋势与预测", area: "个人事务", purpose: "区分已发生事实与未来预测，查看预测区间和依据。", parent: { to: "/payroll", label: "我的薪资" } },
   "/reimbursements": { title: "我的报销", area: "个人事务", purpose: "填写申请、补充凭证，跟踪本人报销的审批与结算进度。" },
   "/approvals": { title: "工时审批", area: "管理工作", purpose: "先核对异常和证据，再批准记录或注明退回原因。" },
   "/approvals/reimbursements": { title: "报销审批", area: "管理工作", purpose: "核对其他成员的申请与凭证，将批准金额归入开放周期。" },
@@ -31,6 +37,7 @@ const pages: Record<string, WorkspacePage> = {
 };
 export function workspacePage(pathname: string): WorkspacePage {
   if (pages[pathname]) return pages[pathname];
+  if (pathname.startsWith("/ai/reports/")) return pages["/ai/reports"]!;
   if (pathname.startsWith("/projects/")) return { title: "项目工作区", area: "协作", purpose: "沿节点查看进度、协作者、版本与工作依据。", parent: { to: "/projects", label: "项目" } };
   if (pathname.startsWith("/payroll-management/runs/")) return { title: "薪资交接", area: "管理工作", purpose: "核对本批金额和待处理事项，下载明细或确认正式交接。", parent: { to: "/payroll-management/periods", label: "周期结算" } };
   return { title: "工作台", area: "工作空间", purpose: "" };

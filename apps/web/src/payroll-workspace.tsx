@@ -1,5 +1,5 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { Link, Navigate, Outlet, useLocation, useNavigate, useParams } from "react-router-dom";
+import { Link, Navigate, useOutlet, useLocation, useNavigate, useParams } from "react-router-dom";
 import { Card, CardContent } from "@workbench/ui";
 import { api, hasGrant, hasOrganizationGrant, type Me } from "./api.js";
 import { ErrorMessage, PageHeader } from "./workspace-primitives.js";
@@ -8,6 +8,7 @@ import { PayrollHandoffPanel } from "./lifecycle-workbench.js";
 import { ReimbursementPanel } from "./reimbursement-panel.js";
 import { WorkPolicyPanel } from "./submission-policy.js";
 import { ApprovalNavigation, WorkspaceNavigation } from "./workspace-navigation.js";
+import { RegionTransition } from "./workspace-transition.js";
 
 export function AccessUnavailable() {
   return <Card><CardContent><h1 className="text-xl font-bold">暂无此页面的访问权限</h1>
@@ -18,6 +19,7 @@ export function AccessUnavailable() {
 
 export function PersonalPayrollWorkspace({ me }: { me: Me }) {
   const location = useLocation();
+  const outlet = useOutlet();
   const search = new URLSearchParams(location.search);
   const handoff = search.get("handoff");
   if (location.hash.startsWith("#reimbursement-")) return <Navigate replace to={`/reimbursements${location.hash}`} />;
@@ -31,14 +33,18 @@ export function PersonalPayrollWorkspace({ me }: { me: Me }) {
     <PageHeader title="我的薪资" actions={<Link className="workspace-text-link" to="/reimbursements">我的报销 →</Link>} />
     <WorkspaceNavigation label="个人薪资导航" items={[
       { to: "/payroll", label: "本月薪资" },
+      { to: "/payroll/breakdown", label: "计算依据" },
+      { to: "/payroll/hours", label: "工时明细" },
+      { to: "/payroll/trends", label: "趋势与预测" },
       { to: "/payroll/history", label: "历史工资单" },
     ]} />
-    <Outlet />
+    <RegionTransition changeKey={location.pathname}>{outlet}</RegionTransition>
   </>;
 }
 
 export function PayrollManagementWorkspace({ me }: { me: Me }) {
   const { pathname } = useLocation();
+  const outlet = useOutlet();
   const handoff = pathname.startsWith("/payroll-management/runs/");
   const canConfigure = hasOrganizationGrant(me, "payroll.configure");
   if (!(handoff ? hasOrganizationGrant(me, "payroll.settle") : canConfigure)) return <AccessUnavailable />;
@@ -50,7 +56,7 @@ export function PayrollManagementWorkspace({ me }: { me: Me }) {
       { to: "/payroll-management/periods", label: "周期结算" },
       { to: "/payroll-management/settings", label: "结算设置" },
     ]} />}
-    <Outlet />
+    <RegionTransition changeKey={pathname}>{outlet}</RegionTransition>
   </>;
 }
 
@@ -78,17 +84,22 @@ export function PayrollHandoffPage({ me }: { me: Me }) {
   </>;
 }
 
+export function ApprovalWorkspace({ me }: { me: Me }) {
+  const { pathname } = useLocation();
+  const outlet = useOutlet();
+  if (!hasGrant(me, "work.review") && !hasOrganizationGrant(me, "payroll.settle")) return <AccessUnavailable />;
+  return <><PageHeader title="审批" /><ApprovalNavigation me={me} /><RegionTransition changeKey={pathname.startsWith("/approvals/reimbursements") ? "reimbursements" : "work"}>{outlet}</RegionTransition></>;
+}
+
 export function ReimbursementsPage({ me, reviewOnly = false, reviewHistory = false }: { me: Me; reviewOnly?: boolean; reviewHistory?: boolean }) {
   if (!(reviewOnly ? hasOrganizationGrant(me, "payroll.settle") : hasGrant(me, "payroll.view_own"))) return <AccessUnavailable />;
   return <>
-    <PageHeader title={reviewOnly ? "审批" : "我的报销"}
-      actions={!reviewOnly ? <Link className="workspace-text-link" to="/payroll">查看我的薪资 →</Link> : undefined} />
-    {reviewOnly && <ApprovalNavigation me={me} />}
+    {!reviewOnly && <PageHeader title="我的报销" actions={<Link className="workspace-text-link" to="/payroll">查看我的薪资 →</Link>} />}
     {reviewOnly && <WorkspaceNavigation label="报销审批范围" items={[
       { to: "/approvals/reimbursements", label: "待审批" },
       { to: "/approvals/reimbursements/history", label: "审批记录" },
     ]} />}
-    <ReimbursementPanel key={reviewHistory ? "review-history" : reviewOnly ? "review" : "own"} reviewOnly={reviewOnly} reviewHistory={reviewHistory} />
+    <RegionTransition changeKey={reviewHistory ? "history" : reviewOnly ? "review" : "own"}><ReimbursementPanel key={reviewHistory ? "review-history" : reviewOnly ? "review" : "own"} reviewOnly={reviewOnly} reviewHistory={reviewHistory} /></RegionTransition>
   </>;
 }
 
