@@ -1,6 +1,6 @@
 import { AnimatePresence, motion, useIsPresent, type HTMLMotionProps } from "motion/react";
 import { ArrowUpRight, ChevronLeft, Pause, Play, RotateCcw, Search } from "lucide-react";
-import { forwardRef, useEffect, useId, useMemo, useState, useSyncExternalStore, type CSSProperties, type ReactNode } from "react";
+import { forwardRef, useEffect, useId, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { Link } from "react-router-dom";
 import { Button } from "@workbench/ui";
@@ -88,6 +88,7 @@ export function WorkHeatmap({ records, lastDay = visualDate(new Date(), getOrgan
   const timezone = getOrganizationTimezone();
   const cells = useMemo(() => workHeatCells(records, lastDay, timezone), [records, lastDay, timezone]);
   const [active, setActive] = useState<number | null>(null);
+  const keyboardControl = useRef(false);
   const [fixed, setFixed] = useState<number | null>(null);
   const [dayDetail, setDayDetail] = useState<string | null>(null);
   const [mode, setMode] = useState<"heat" | "trend">("heat");
@@ -103,14 +104,16 @@ export function WorkHeatmap({ records, lastDay = visualDate(new Date(), getOrgan
   });
   return <section className="fx-chart-surface fx-heat-surface" aria-label={title}>
     <header className="fx-surface-heading"><div><h2>{title}</h2><p>近 7 天 · 记录覆盖的小时，计划不计入热力</p></div><div className="fx-segmented" aria-label="热力图视图">{(["heat", "trend"] as const).map((value) => <button type="button" aria-pressed={mode === value} key={value} onClick={() => setMode(value)}>{value === "heat" ? "热力" : "趋势"}</button>)}</div></header>
-    {mode === "trend" ? <PulseTrend points={points} label="当日开始记录的净工时" onSelect={setDayDetail} /> : <div className="fx-heat-scroll"><div className="fx-heat" role="grid" aria-label="日期与小时工作热力" onPointerLeave={() => { setActive(null); setTooltip(null); }}>
+    {mode === "trend" ? <PulseTrend points={points} label="当日开始记录的净工时" onSelect={setDayDetail} /> : <div className="fx-heat-scroll"><div className="fx-heat" role="grid" aria-label="日期与小时工作热力" onPointerLeave={() => { if (!keyboardControl.current) setActive(null); setTooltip(null); }} onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) keyboardControl.current = false; }}>
       <div className="fx-heat-hours" aria-hidden="true"><span />{Array.from({ length: 24 }, (_, hour) => <span className={selected?.hour === hour ? "is-cross" : ""} key={hour}>{hour % 3 === 0 ? String(hour).padStart(2, "0") : ""}</span>)}</div>
       {Array.from({ length: 7 }, (_, row) => <div className="fx-heat-row" role="row" key={row}><button className="fx-heat-day" type="button" onClick={() => setDayDetail(cells[row * 24]!.date)} aria-label={`查看 ${cells[row * 24]!.date} 全天记录`}>{cells[row * 24]!.date.slice(5)}<small>{new Intl.DateTimeFormat("zh-CN", { weekday: "short" }).format(new Date(`${cells[row * 24]!.date}T12:00:00`))}</small></button>
         {cells.slice(row * 24, (row + 1) * 24).map((cell, column) => <button key={cell.hour} type="button" role="gridcell" className={`fx-heat-cell level-${cell.level}${selected && (selected.date === cell.date || selected.hour === cell.hour) ? " is-cross" : ""}${fixed === row * 24 + column ? " is-fixed" : ""}`}
           style={{ "--cell-delay": `${(row + column) * 24}ms` } as CSSProperties} data-cell-index={row * 24 + column} tabIndex={(active ?? fixed ?? 0) === row * 24 + column ? 0 : -1}
           aria-label={`${cell.date} ${String(cell.hour).padStart(2, "0")}:00，${cell.count} 条工作记录覆盖`} aria-selected={fixed === row * 24 + column}
-          onPointerEnter={(event) => { setActive(row * 24 + column); if (event.pointerType === "mouse") { const box = event.currentTarget.getBoundingClientRect(); setTooltip({ index: row * 24 + column, x: Math.max(8, Math.min(window.innerWidth - 278, box.left - 100)), y: Math.max(8, Math.min(window.innerHeight - 180, box.bottom + 10)) }); } }} onFocus={() => setActive(row * 24 + column)} onClick={() => setFixed((value) => value === row * 24 + column ? null : row * 24 + column)}
-          onKeyDown={(event) => { const moves: Record<string, number> = { ArrowLeft: -1, ArrowRight: 1, ArrowUp: -24, ArrowDown: 24 }; const delta = moves[event.key]; if (delta !== undefined) { event.preventDefault(); const next = Math.max(0, Math.min(167, row * 24 + column + delta)); event.currentTarget.closest(".fx-heat")?.querySelector<HTMLButtonElement>(`[data-cell-index="${next}"]`)?.focus(); } if (event.key === "Escape") setFixed(null); }} />)}
+          onPointerEnter={(event) => { if (keyboardControl.current) return; setActive(row * 24 + column); if (event.pointerType === "mouse") { const box = event.currentTarget.getBoundingClientRect(); setTooltip({ index: row * 24 + column, x: Math.max(8, Math.min(window.innerWidth - 278, box.left - 100)), y: Math.max(8, Math.min(window.innerHeight - 180, box.bottom + 10)) }); } }}
+          onPointerMove={(event) => { if (keyboardControl.current && (event.movementX || event.movementY)) { keyboardControl.current = false; setActive(row * 24 + column); } }}
+          onPointerDown={() => { keyboardControl.current = false; setActive(row * 24 + column); }} onFocus={() => setActive(row * 24 + column)} onClick={() => setFixed((value) => value === row * 24 + column ? null : row * 24 + column)}
+          onKeyDown={(event) => { keyboardControl.current = true; setActive(row * 24 + column); setTooltip(null); const moves: Record<string, number> = { ArrowLeft: -1, ArrowRight: 1, ArrowUp: -24, ArrowDown: 24 }; const delta = moves[event.key]; if (delta !== undefined) { event.preventDefault(); const next = Math.max(0, Math.min(167, row * 24 + column + delta)); event.currentTarget.closest(".fx-heat")?.querySelector<HTMLButtonElement>(`[data-cell-index="${next}"]`)?.focus(); } if (event.key === "Escape") setFixed(null); }} />)}
       </div>)}
     </div></div>}
     <div className="fx-heat-detail"><div className="fx-heat-readout" aria-live="polite"><div><strong>{selected ? `${selected.date} · ${String(selected.hour).padStart(2, "0")}:00` : "暂无工作事实"}</strong><span>{selected?.count ?? 0} 条记录覆盖此时段 · 全天覆盖 {selectedDayRows.length} 条工作 · {selectedDayRows.filter((row) => row.result?.trim()).length} 条填写结果</span><span>悬停或方向键预览 · 点击固定 · 查看全天记录</span></div><button type="button" onClick={() => setDayDetail(selected?.date ?? lastDay)}>查看全天<ArrowUpRight size={14} /></button></div>

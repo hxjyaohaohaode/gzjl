@@ -40,11 +40,16 @@ test("heatmap supports keyboard focus, fixed readouts and full day drilldown wit
   await cell.click(); await expect(cell).toHaveAttribute("aria-selected", "true");
   await cell.press("ArrowRight");
   await expect(grid.getByRole("gridcell", { name: /2026-10-12 10:00，0 条/ })).toBeFocused();
+  // Leaving the grid with the pointer must not erase its keyboard selection.
+  await page.mouse.move(0, 0);
   await grid.getByRole("gridcell", { name: /2026-10-12 10:00，0 条/ }).press("Escape");
   await expect(heatSurface.locator(".fx-heat-detail .fx-chart-empty")).toBeVisible();
   const emptySize = await heatSurface.boundingBox();
   expect(Math.abs(originalSize!.height - emptySize!.height)).toBeLessThanOrEqual(1);
   expect(Math.abs(originalSize!.width - emptySize!.width)).toBeLessThanOrEqual(1);
+  // Real pointer movement resumes hover preview after keyboard navigation.
+  await cell.hover();
+  await expect(heatSurface.locator(".fx-heat-records li")).toHaveCount(3);
   await page.getByRole("button", { name: "查看全天", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "2026-10-12 · 全天工作记录" });
   await expect(dialog.locator(".fx-day-record")).toHaveCount(13);
