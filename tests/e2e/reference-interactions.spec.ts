@@ -114,14 +114,18 @@ test("permission panorama queries current assignments and excludes expired or in
   await expect(page.getByRole("searchbox", { name: "权限全景查询" })).toHaveValue("");
 });
 
-test("AI shortcuts send directly, hide while typing and report routes preserve the cited identity", async ({ page }) => {
+test("AI shortcuts send directly, stay available while typing and report routes preserve the cited identity", async ({ page }) => {
   await workspace(page); let submitted: Record<string,unknown> | null = null;
   await page.route("**/api/ai/reports", async (route) => {
     if (route.request().method() !== "POST") return route.fallback();
     submitted = route.request().postDataJSON(); await route.fulfill({ status: 202, json: { job: { id: "job" } } });
   });
   await page.goto("/ai"); const input = page.getByRole("textbox", { name: "向 AI 提问" });
-  await input.fill("先整理一段新问题"); await expect(page.getByRole("button", { name: "总结今日", exact: true })).toHaveCount(0);
+  const shortcut = page.getByRole("button", { name: "总结今日", exact: true });
+  await expect(shortcut).toBeVisible();
+  const composerHeight = await input.evaluate((element) => element.closest("form")!.clientHeight);
+  await input.fill("先整理一段新问题"); await expect(shortcut).toBeVisible();
+  expect(await input.evaluate((element) => element.closest("form")!.clientHeight)).toBe(composerHeight);
   await input.fill(""); await page.getByRole("button", { name: "总结今日", exact: true }).click();
   await expect.poll(() => submitted).toMatchObject({ taskType: "assistant_chat", scope: "self", question: expect.stringContaining("总结今日") });
   await page.getByRole("navigation", { name: "AI 工作区导航" }).getByRole("link", { name: "报告历史" }).click();
