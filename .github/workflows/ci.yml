@@ -5,6 +5,9 @@ on:
   pull_request:
   push:
     branches: [main]
+    # Verify the exact release commit before a protected, direct push to main.
+    # workflow_dispatch checks do not satisfy GitHub's required status checks.
+    tags: [verify-main-*]
 
 permissions:
   contents: read

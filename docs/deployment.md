@@ -6,7 +6,7 @@
 
 `main` 是唯一长期保留的远端分支。按当前项目要求，修复基于最新 `origin/main` 完成，并直接快进推送到 `main`，不再为本项目的发布新建分支。仓库将 GitHub Actions 的 `verify` 设置为 main 必须通过的检查，管理员也受保护；不通过关闭保护、强推或伪造状态发布。
 
-新提交尚无远端检查时，使用指向该提交的临时验证标签，并对标签显式运行 `ci.yml`。完整检查通过后，核实待推送提交与已验证 SHA 一致、仍包含最新 main，再执行 `git push origin HEAD:main`。这会直接触发 main 的 push 检查。最后删除临时验证标签，并在确认文件改动已保留后清理历史临时分支。若 main 在验证期间前进，应重新整合并验证新的提交。
+新提交尚无远端检查时，使用指向该提交、名称以 `verify-main-` 开头的临时验证标签，并推送该标签。`ci.yml` 会由标签的 `push` 事件自动触发。不要用 `workflow_dispatch` 代替这一门禁：手动触发的检查即使成功，也不满足 GitHub 的必需检查来源要求（见 [GitHub 官方说明](https://docs.github.com/en/pull-requests/how-tos/merge-and-close-pull-requests/troubleshooting-required-status-checks#checks-from-some-workflow-jobs-are-not-evaluated)）。完整检查通过后，核实待推送提交与已验证 SHA 一致、仍包含最新 main，再执行 `git push origin HEAD:main`。这会直接触发 main 的 push 检查。最后删除临时验证标签，并在确认文件改动已保留后清理历史临时分支。若 main 在验证期间前进，应重新整合并验证新的提交。
 
 CI 先完成规范、类型、单元与集成测试并构建一次，再由独立任务执行三组浏览器分片及五组真实 API/数据库验收。浏览器任务使用与依赖版本一致的官方 Playwright 镜像，省去每次运行时安装系统依赖；每台机器仍保留单个浏览器工作进程。最终 `verify` 只有在所有任务成功时才通过。
 
