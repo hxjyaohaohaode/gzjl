@@ -8681,7 +8681,7 @@ body,
   .app-main :is(button, [role=button], summary) { touch-action: manipulation; }
   .app-main :is(input, select, textarea) { font-size: 16px; }
   .app-main [data-ui=card-header] { align-items: flex-start; flex-wrap: wrap; gap: .75rem; }
-  .app-main [data-ui=card-header] > div { min-width: 0; flex: 1 1 12rem; }
+  .app-main [data-ui=card-header] > div { min-width: 0; flex: 1 1 auto; }
   .app-main :is(.work-progress-reporter, .project-workbench, .organization-workbench, .calendar-workbench) { min-width: 0; max-width: 100%; }
   .handoff-confirmation { padding: .7rem; }
   .fact-neighbors, .fact-history { max-height: 55dvh; }

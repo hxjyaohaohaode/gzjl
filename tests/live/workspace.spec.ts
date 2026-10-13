@@ -1,6 +1,7 @@
 import { expect, test, type Page, type APIRequestContext } from "@playwright/test";
 import { writeFile } from "node:fs/promises";
 import { openApprovalCards, openWorkCards, wizardStep } from "../e2e/workspace-flows.js";
+import { workspaceRouteFamily } from "../../apps/web/src/workspace-route-family.js";
 
 const password = "Acceptance-Only-Password-2026!";
 async function call(client: APIRequestContext, method: string, path: string, data?: unknown) {
@@ -18,11 +19,27 @@ async function login(page: Page, email: string) {
   await expect(page).toHaveURL("http://127.0.0.1:3100/");
 }
 
+async function visitWorkspaceRoute(page: Page, path: string) {
+  if (new URL(page.url()).pathname === path) return;
+  const frame = await page.locator(".app-shell").elementHandle();
+  const contentLink = page.locator(`main a[href="${path}"]:visible`).first();
+  if (await contentLink.count()) {
+    await contentLink.click();
+  } else {
+    if (page.viewportSize()!.width < 1024) await page.getByRole("button", { name: "打开导航", exact: true }).click();
+    await page.locator(`.app-sidebar a[href="${path}"]`).click();
+  }
+  await expect(page).toHaveURL(`http://127.0.0.1:3100${path}`);
+  await expect(page.locator("#main-content .fx-page-content:not([inert])")).toHaveAttribute("data-workspace", workspaceRouteFamily(path));
+  await expect(page.locator("#main-content .fx-page-content[inert], #main-content .fx-region-host > [inert]")).toHaveCount(0);
+  expect(await frame!.evaluate((element) => element.isConnected), `${path} preserves the application frame`).toBe(true);
+}
+
 test("real API, database and file bytes connect the employee and management workspaces", async ({ page: owner, browser }, testInfo) => {
-  // This scenario includes persisted business flows and 46 full-page route
-  // audits. Give slower WebKit rendering a bounded total budget; individual
+  // This scenario includes persisted business flows and 46 route audits through
+  // real navigation and its entrance/exit motion. Give WebKit a bounded total budget; individual
   // action and assertion timeouts remain unchanged.
-  test.setTimeout(180_000);
+  test.setTimeout(240_000);
   const errors: string[] = [];
   const inspectErrors = (page: Page) => {
     page.on("pageerror", (error) => errors.push(error.message));
@@ -184,7 +201,12 @@ test("real API, database and file bytes connect the employee and management work
       ["employee", employee, ["/", "/work", "/calendar", "/projects", `/projects/${projectId}`, "/team", "/analytics", "/payroll", "/payroll/breakdown", "/payroll/hours", "/payroll/trends", "/payroll/history", "/reimbursements", "/ai", "/ai/reports", "/ai/compose", "/security", "/notification-preferences"]],
     ] as const) {
       for (const path of paths) {
-        await page.goto(path);
+        // Audit the same client-side navigation users perform, including the
+        // mobile drawer. Replacing a document while its realtime refetch starts
+        // makes WebKit misreport cancelled same-origin requests as CORS errors:
+        // https://github.com/microsoft/playwright/issues/43120
+        // Direct links and reloads remain exercised by the business flows above.
+        await visitWorkspaceRoute(page, path);
         await expect(page.locator("#main-content")).toBeVisible();
         await expect(page.locator("main .animate-spin")).toHaveCount(0);
         if (role === "owner" && path === "/organization") {
@@ -249,7 +271,7 @@ test("real API, database and file bytes connect the employee and management work
         expect(controls.filter((control) => ["INPUT", "SELECT", "TEXTAREA"].includes(control.tag) && !control.text), `${role} ${path} unnamed form fields`).toEqual([]);
         expect(controls.filter((control) => control.type !== "hidden" && (control.tag !== "A" || control.href) && !control.interactionId), `${role} ${path} controls missing interaction registration`).toEqual([]);
         inventory.push({ role, path, controls });
-        await page.screenshot({ path: testInfo.outputPath(`${role}-${path.replaceAll("/", "_") || "home"}.png`), fullPage: true });
+        await page.screenshot({ path: testInfo.outputPath(`${role}-${path.replaceAll("/", "_") || "home"}.png`), fullPage: true, animations: "disabled" });
       }
     }
     await writeFile(testInfo.outputPath("rendered-controls.json"), JSON.stringify(inventory, null, 2));

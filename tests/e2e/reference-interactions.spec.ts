@@ -193,13 +193,19 @@ test("notification filters use organization-day boundaries and long messages nev
   expect(await panel.evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
 });
 
-test("team filters update the collection without replacing its frame and swimlane readouts show actual work", async ({ page }) => {
+test("team filters update the collection without replacing its frame and swimlane readouts show actual work", async ({ page }, testInfo) => {
   await workspace(page);
   const teamRecords = records.map((item,index) => ({ ...item, membershipId: memberId, displayName: "可见协作者", activityAt: item.endAt, hasFullTiming: true, projectName: index % 2 ? "接口项目" : "视觉项目" }));
   const members = [{ membershipId: memberId, displayName: "可见协作者", avatarUrl: null, positionTitle: "开发", professionalIdentities: [], projectNames: ["接口项目", "视觉项目"], lastActivity: teamRecords[0] }];
   let params: URLSearchParams | undefined;
   await page.route("**/api/team-activity**", (route) => { params = new URL(route.request().url()).searchParams; return route.fulfill({ json: { scope: "organization", members, items: teamRecords.filter((item) => (!params?.get("project") || item.projectName === params.get("project")) && (!params?.get("q") || item.content.includes(params.get("q")!))) } }); });
   await page.goto("/team"); await expect(page.locator(".team-activity-item")).toHaveCount(8);
+  for (const label of ["团队动态开始日期", "团队动态结束日期"]) {
+    const fieldHeight = await page.getByLabel(label).evaluate((element) => element.getBoundingClientRect().height);
+    expect(fieldHeight).toBeGreaterThanOrEqual(38);
+    expect(fieldHeight).toBeLessThanOrEqual(56);
+  }
+  await page.screenshot({ path: testInfo.outputPath("team-filter-layout.png") });
   const feedDimensions = await page.locator(".team-activity-feed").evaluate((element) => ({ feed: element.getBoundingClientRect().width, container: element.parentElement!.getBoundingClientRect().width, list: element.querySelector(".fx-team-feed-list")!.getBoundingClientRect().width }));
   expect(Math.abs(feedDimensions.feed - feedDimensions.container)).toBeLessThanOrEqual(1);
   expect(Math.abs(feedDimensions.feed - feedDimensions.list)).toBeLessThanOrEqual(1);

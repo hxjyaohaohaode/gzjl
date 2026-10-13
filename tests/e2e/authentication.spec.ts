@@ -1439,7 +1439,7 @@ test("initial Owner setup submits an optional E.164 phone as pending alongside t
 
 test("account security creates a pending phone binding through the authenticated channel", async ({
   page,
-}) => {
+}, testInfo) => {
   await mockAuthenticatedWorkspace(page);
   await page.route("**/api/auth/credentials", async (route) => {
     if (route.request().method() === "GET") {
@@ -1491,6 +1491,16 @@ test("account security creates a pending phone binding through the authenticated
   await expect(page).not.toHaveURL(/\/login(?:[?#].*)?$/);
   await page.goto("/security");
   await expect(page.getByRole("heading", { name: "账户安全" })).toBeVisible();
+  if (page.viewportSize()!.width < 640) {
+    const identityHeader = page.locator('[data-ui="card-header"]').filter({ has: page.getByRole("heading", { name: "我的专业身份", exact: true }) });
+    const emptyGap = await identityHeader.evaluate((element) => {
+      const text = element.querySelector("div > p:last-child")!.getBoundingClientRect();
+      const badge = element.querySelector('[data-ui="badge"]')!.getBoundingClientRect();
+      return badge.top - text.bottom;
+    });
+    expect(emptyGap).toBeLessThanOrEqual(16);
+  }
+  await page.screenshot({ path: testInfo.outputPath("security-layout.png"), fullPage: true });
   await page.getByLabel("新联系方式类型").selectOption("phone");
   await page.getByLabel("新手机号").fill("+8613812345678");
   await page

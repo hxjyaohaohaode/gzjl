@@ -173,8 +173,8 @@
 .fx-disclosure-detail > div { padding: 0 1rem 1rem; }
 .fx-record-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: .75rem; }
 .fx-record-filters { display: flex; align-items: center; flex-wrap: wrap; gap: .6rem; margin-bottom: 1rem; }
-.fx-record-filters input { flex: 1 1 12rem; min-width: 0; }
-.fx-record-filters select { flex: 0 1 10rem; }
+.fx-record-filters > input { flex: 1 1 12rem; min-width: 0; }
+.fx-record-filters > select { flex: 0 1 10rem; }
 .fx-record-filters :is(input,select) { border: 1px solid var(--border); border-radius: 10px; background: var(--surface-tint); min-height: 38px; padding: .5rem .7rem; font-size: .77rem; }
 .work-list-layout { display: grid; grid-template-columns: minmax(16rem,.34fr) minmax(0,1fr); gap: 1.1rem; align-items: start; }
 .work-timer-card { align-self: start; }
