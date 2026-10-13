@@ -961,6 +961,7 @@ test("Owner payroll keeps settlement controls visible when one live estimate has
   await page.getByLabel("邮箱或手机号").fill("owner@example.test");
   await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
   await page.getByRole("button", { name: "登录", exact: true }).click();
+  await expect(page).not.toHaveURL(/\/login(?:[?#].*)?$/);
   await page.goto("/payroll-management");
   await expect(page.getByText("部分成员的实时薪资预估暂不可用")).toBeVisible();
   await expect(page.getByText(/00000000-0000-4000-8000-000000000456/)).toBeVisible();
@@ -3434,6 +3435,7 @@ test("many long work updates never force the mobile workspace into desktop width
   await page.getByLabel("邮箱或手机号").fill("owner@example.test");
   await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
   await page.getByRole("button", { name: "登录", exact: true }).click();
+  await expect(page).not.toHaveURL(/\/login(?:[?#].*)?$/);
 
   for (const route of ["/work", `/projects/${projectId}`]) {
     await page.goto(route);
