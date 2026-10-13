@@ -1,9 +1,10 @@
 import { reducedMotion } from "./motion-preference.js";
-import { CompactDisclosure, CollectionPager, SmoothReveal, StepForm, WorkspaceDialog } from "./reference-primitives.js";
+import { CompactDisclosure, CollectionPager, StepForm, WorkspaceDialog } from "./reference-primitives.js";
 import { pageSlice, shiftVisualDay } from "./work-visualization-model.js";
 import { HomePulse, PersonalWorkHeatmap, WorkspacePaths } from "./workspace-insights.js";
 import { WorkSwimlane } from "./reference-charts.js";
 import { RegionTransition } from "./workspace-transition.js";
+import { AiChatViewport } from "./ai-chat-viewport.js";
 import { AnimatePresence, motion } from "motion/react";
 import { HistoricalRangePicker, type HistoricalRange } from "./history-range.js";
 import { isSalaryMonth, previousSalaryMonth, salaryMonthForm, salaryPeriodMatchesMonth, suggestedPeriodCutoff } from "./payroll-month.js";
@@ -5181,6 +5182,14 @@ export function WorkPage() {
             : ("fact" as const),
         input: segment.input,
       }));
+      // A fast save can finish before the 400ms recovery debounce. Persist the
+      // exact submitted snapshot first, so success can retire it without leaving
+      // an older draft behind. Later edits still have a different snapshot and
+      // cannot be deleted by this request's completion.
+      latestEditorBackup.current = newEntryBackup;
+      const backupSaved = flushWorkEditorBackup(membershipId, newEntryBackup, ownsEditorBackup.current);
+      if (backupSaved === true) ownsEditorBackup.current = true;
+      if (backupSaved === false) setBackupUnavailable(true);
       const sessions =
         entries.length > 1
           ? (
@@ -11682,7 +11691,7 @@ function AiSettingsPanel({ onClose }: { onClose: () => void }) {
       </Card>
     );
   }
-  if (settings.isError) {
+  if (settings.isError && !settings.data) {
     return (
       <Card className="ai-settings-card">
         <CardContent className="p-5">
@@ -11695,25 +11704,15 @@ function AiSettingsPanel({ onClose }: { onClose: () => void }) {
               关闭
             </Button>
           </div>
-          <ErrorMessage error={settings.error} />
+          <ErrorMessage error={settings.error} onRetry={() => void settings.refetch()} retrying={settings.isFetching} />
         </CardContent>
       </Card>
     );
   }
   const current = settings.data!;
-  const settingsKey = [
-    current.source,
-    current.enabled,
-    current.baseUrl,
-    current.model,
-    current.hasApiKey,
-    current.encryptionReady,
-    current.dailyRequestLimit,
-    current.monthlyRequestLimit,
-    current.maxOutputTokens,
-    JSON.stringify(current.generationOptions),
-  ].join("|");
-  return <AiSettingsEditor current={current} key={settingsKey} onClose={onClose} saveMessage={saveMessage} onSaved={setSaveMessage} />;
+  // A background refresh must not remount the editor mid-save, erase an Owner's
+  // in-progress input, or discard the result of the subsequent connection test.
+  return <><ErrorMessage error={settings.error} onRetry={() => void settings.refetch()} retrying={settings.isFetching} /><AiSettingsEditor current={current} onClose={onClose} saveMessage={saveMessage} onSaved={setSaveMessage} /></>;
 }
 
 function AiSettingsEditor({
@@ -11944,7 +11943,7 @@ function AiSettingsEditor({
               value={form.apiKey}
             />
           </Field>
-          <div className="ai-configuration-section md:col-span-2"><h3>生成与兼容参数</h3><p>可选参数留空时使用供应商默认值；按实际模型能力配置。</p></div>
+          <div className="ai-configuration-section md:col-span-2" data-wizard-step={1}><h3>生成与兼容参数</h3><p>可选参数留空时使用供应商默认值；按实际模型能力配置。</p></div>
           <Field wizardStep={1} hint="限制单份报告长度，直接控制输出成本。" label="最大输出 Token">
             <input
               className={fieldClass}
@@ -12331,9 +12330,9 @@ export function AiPage({ me, view = "chat" }: { me: Me; view?: "chat" | "reports
               {canAnalyzeTeam ? <option value="team">团队范围</option> : null}
             </select>
             {me.user.isOwner ? (
-              <Button onClick={() => navigate("/ai/settings")} variant="secondary">
+              <Button aria-label="组织 AI 配置" className="ai-config-shortcut" onClick={() => navigate("/ai/settings")} variant="secondary">
                 <Settings2 size={16} />
-                组织 AI 配置
+                <span>组织 AI 配置</span>
               </Button>
             ) : null}
           </>
@@ -12415,7 +12414,7 @@ export function AiPage({ me, view = "chat" }: { me: Me; view?: "chat" | "reports
             </Card>
 </aside>}
           <section className="min-w-0">
-            {view === "chat" && (            <Card className="ai-chat-card">
+            {view === "chat" && (<AiChatViewport><Card className="ai-chat-card">
               <CardHeader>
                 <div>
                   <p className="app-page-kicker">基于当前授权事实</p>
@@ -12426,9 +12425,8 @@ export function AiPage({ me, view = "chat" }: { me: Me; view?: "chat" | "reports
                 </Badge>
               </CardHeader>
               <CardContent>
-                {chatItems.length ? (
-                  <div className="ai-chat-transcript space-y-4 pr-1" aria-live="polite" ref={chatScrollRef}>
-                    {chatItems.map((item) => (
+                  <div className="ai-chat-transcript space-y-4 pr-1" aria-label="对话内容" role="region" aria-live="polite" ref={chatScrollRef}>
+                {chatItems.length ? chatItems.map((item) => (
                       <div className="space-y-2" key={item.job.id}>
                         <div className="ml-auto max-w-[88%] rounded-2xl rounded-br-md bg-[var(--accent)] px-4 py-3 text-sm leading-6 text-[var(--accent-foreground)]">
                           {item.job.scope.question || "工作分析"}
@@ -12439,58 +12437,68 @@ export function AiPage({ me, view = "chat" }: { me: Me; view?: "chat" | "reports
                               ? item.job.errorSummary || "本次回答生成失败，可以重试。"
                               : item.job.status === "cancelled"
                                 ? "本次对话已取消。"
-                                : "正在结合最新工时、成员和项目状态生成回答…")}
+                                : item.job.status === "queued"
+                                  ? "已进入队列，正在等待生成…"
+                                  : "正在结合授权工作事实生成回答…")}
                           {!item.report && ["queued", "running"].includes(item.job.status) ? (
-                            <div className="mt-2">
+                            <div className="ai-chat-job-status">
+                              <span className="ai-chat-pending-mark" aria-hidden="true" />
+                              <span>可离开此页，回答会自动保存。</span>
                               <Button disabled={cancel.isPending} onClick={() => cancel.mutate(item.job.id)} size="compact" variant="secondary">取消</Button>
                             </div>
                           ) : null}
                           {!item.report && ["failed", "cancelled"].includes(item.job.status) ? (
-                            <div className="mt-2">
+                            <div className="mt-2 flex flex-wrap items-center gap-3">
                               <Button disabled={retry.isPending} onClick={() => retry.mutate(item.job.id)} size="compact" variant="secondary">
                                 <RotateCcw size={14} />重试
                               </Button>
+                              {me.user.isOwner && item.job.status === "failed" ? <Link className="text-xs text-[var(--accent-strong)] underline underline-offset-4" to="/ai/settings">检查模型配置</Link> : null}
                             </div>
                           ) : null}
                         </div>
                       </div>
-                    ))}
-                  </div>
-                ) : (
-                  <div className="fx-chat-introduction py-6 text-center text-sm text-[var(--text-muted)]">
-                    可以询问工作进展、项目阻塞、成员状态或下一步安排。
+                    )) : (
+                  <div className="fx-chat-introduction">
+                    <span className="ai-chat-welcome-icon" aria-hidden="true"><Sparkles size={24} /></span>
+                    <h3>从一件具体的工作开始</h3>
+                    <p>梳理进展、找到阻塞，或一起安排下一步。</p>
                   </div>
                 )}
+                  </div>
                 <form
-                  className="mt-4 flex flex-col gap-3"
+                  className="ai-chat-compose"
                   onSubmit={(event) => {
                     event.preventDefault();
                     if (question.trim().length >= 2 && !sendChat.isPending) sendChat.mutate({ question, conversationId });
                   }}
                 >
-                  <SmoothReveal show={!question} className="fx-ai-actions" label="快捷提问">
+                  <div className="fx-ai-actions" aria-label="快捷提问">
                     {aiTaskPresets.filter((preset) => (!preset.teamOnly || (canAnalyzeTeam && scope === "team")) && (!preset.ownerOnly || me.user.isOwner) && (!preset.selfOnly || scope === "self") && (!preset.requiresOwnPayroll || canViewOwnPayroll)).map((preset) =>
                       <button type="button" key={preset.type} disabled={sendChat.isPending} onClick={() => sendChat.mutate({ question: `${preset.label}：${preset.description}`, conversationId, rangeDays: preset.rangeDays })}>{preset.label}</button>)}
-                  </SmoothReveal>
+                  </div>
+                  <div className="ai-chat-input-surface">
                   <textarea
                     aria-label="向 AI 提问"
-                    className={`${textAreaClass} min-h-28 resize-y`}
+                    className={textAreaClass}
+                    rows={3}
                     maxLength={2_000}
                     onChange={(event) => setQuestion(event.target.value)}
                     onKeyDown={(event) => { if (event.key === "Enter" && (event.ctrlKey || event.metaKey) && question.trim().length >= 2 && !sendChat.isPending) { event.preventDefault(); sendChat.mutate({ question, conversationId }); } }}
                     placeholder={scope === "team" ? "例如：哪些项目当前受阻，分别需要谁处理？" : "例如：总结我本周的投入、成果和待处理事项。"}
                     value={question}
                   />
-                  <div className="flex items-center justify-end gap-3">
+                  <div className="ai-chat-compose-footer">
+                    <span>Ctrl / ⌘ + Enter 发送</span>
                     <Button disabled={question.trim().length < 2 || sendChat.isPending} type="submit">
                       <ArrowUpRight size={16} />
                       {sendChat.isPending ? "正在发送…" : "发送"}
                     </Button>
                   </div>
-                  <ErrorMessage error={sendChat.error} />
+                  </div>
+                  <ErrorMessage error={sendChat.error ?? cancel.error ?? retry.error} />
                 </form>
               </CardContent>
-            </Card>
+            </Card></AiChatViewport>
 )}
             {view === "compose" && (            <Card className="ai-compose-card mt-5">
               <CardContent>

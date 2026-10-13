@@ -5,6 +5,9 @@ import live from "./playwright.live.config.js";
 // deliberately exhaust the real login rate limit of the same localhost IP.
 export default defineConfig({
   ...live,
+  // Focused engine regressions share only this isolated runtime. The regular
+  // live suite already uses its ten permitted logins across five viewports.
+  testMatch: ["**/*.spec.ts", "**/*.engines.ts"],
   outputDir: "test-results/engines",
   use: { baseURL: "http://127.0.0.1:3100", timezoneId: "Asia/Shanghai", actionTimeout: 15_000, navigationTimeout: 30_000, trace: "retain-on-failure", screenshot: "only-on-failure" },
   projects: [

@@ -1,11 +1,10 @@
-import { and, asc, eq, gt, or } from "drizzle-orm";
 import type { FastifyInstance } from "fastify";
 import type { Database } from "@workbench/db";
-import { outboxEvents } from "@workbench/db/schema";
 
 import { sessionCookieName } from "../auth/routes.js";
 import type { AuthService } from "../auth/service.js";
 import type { ServerConfig } from "../config.js";
+import { readRealtimeChanges } from "./cursor.js";
 
 export async function registerRealtimeRoutes(
   app: FastifyInstance,
@@ -45,37 +44,21 @@ export async function registerRealtimeRoutes(
         return;
       }
       let cursor = {
-        createdAt: new Date(),
+        createdAt: new Date().toISOString(),
         id: "00000000-0000-0000-0000-000000000000",
       };
       let polling = false;
       socket.send(
         JSON.stringify({
           type: "realtime.ready",
-          occurredAt: cursor.createdAt.toISOString(),
+          occurredAt: cursor.createdAt,
         }),
       );
       pollTimer = setInterval(() => {
         if (polling) return;
         polling = true;
         void (async () => {
-          const events = await db
-            .select()
-            .from(outboxEvents)
-            .where(
-              and(
-                eq(outboxEvents.organizationId, auth.organizationId),
-                or(
-                  gt(outboxEvents.createdAt, cursor.createdAt),
-                  and(
-                    eq(outboxEvents.createdAt, cursor.createdAt),
-                    gt(outboxEvents.id, cursor.id),
-                  ),
-                ),
-              ),
-            )
-            .orderBy(asc(outboxEvents.createdAt), asc(outboxEvents.id))
-            .limit(100);
+          const events = await readRealtimeChanges(db, auth.organizationId, cursor);
           if (events.length > 0 && socket.readyState === 1) {
             // The socket is an organization-level invalidation channel, not a
             // second data API. A burst of database events is represented by a
@@ -85,7 +68,7 @@ export async function registerRealtimeRoutes(
             socket.send(
               JSON.stringify({
                 type: "organization.data.changed",
-                occurredAt: latest.createdAt.toISOString(),
+                occurredAt: new Date(latest.createdAt).toISOString(),
               }),
             );
             cursor = { createdAt: latest.createdAt, id: latest.id };

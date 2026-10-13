@@ -88,6 +88,7 @@ export default function AnalyticsChart({
   const [expanded, setExpanded] = useState(false);
   const [fullscreenPending, setFullscreenPending] = useState(false);
   const [feedback, setFeedback] = useState("");
+  const [dataExpanded, setDataExpanded] = useState(false);
   const fullscreen = isFullscreen || expanded;
   useDialogFocus(frame, fullscreen, fullscreenButton);
   const dataRows = chartDataRows(option);
@@ -282,8 +283,10 @@ export default function AnalyticsChart({
       </div>
       <div aria-label={ariaLabel} className="analytics-chart-canvas" ref={container} role="img" />
       {feedback ? <p className="chart-feedback" role="status">{feedback}</p> : null}
-      <details className="chart-data-table">
-        <summary>{`查看${ariaLabel}数据`}</summary>
+      <details className="chart-data-table" open={dataExpanded} onToggle={(event) => setDataExpanded(event.currentTarget.open)}>
+        {/* One explicit activation path for mouse, touch and keyboard. Keeping
+            the state in React also retains it when the chart portal moves. */}
+        <summary onClick={(event) => { event.preventDefault(); setDataExpanded((value) => !value); }}>{`查看${ariaLabel}数据`}</summary>
         <p className="chart-feedback">表格保留当前筛选范围内的完整数据；图例和缩放只调整图形显示。</p>
         <div className="chart-data-scroll" tabIndex={0} role="region" aria-label={`${ariaLabel}数据表`}>
           <table><caption className="sr-only">{ariaLabel}，缺失值以破折号表示</caption>

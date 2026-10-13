@@ -3229,6 +3229,44 @@ test("AI salary report exposes its authorized payroll provenance without exposin
   await expect(page.getByText("00000000-0000-4000-8000-000000000094")).toHaveCount(0);
 });
 
+test("AI conversation keeps the composer visible and its height stable as history grows", async ({ page }, testInfo) => {
+  await mockAuthenticatedWorkspace(page);
+  let populated = false;
+  await page.route("**/api/ai/reports", (route) => route.fulfill({ json: { items: populated ? Array.from({ length: 16 }, (_, i) => ({
+    job: { id: `layout-${i}`, taskType: "assistant_chat", status: "failed", errorSummary: "连接超时，请检查 Base URL、网络或提高请求超时。", queuedAt: new Date().toISOString(), scope: { conversationId: "primary", question: `第 ${i + 1} 个工作问题：${"需要保留完整工作说明及后续处理事项。".repeat(12)}` } }, report: null,
+  })) : [] } }));
+  await page.goto("/login");
+  await page.getByLabel("邮箱或手机号").fill("owner@example.test");
+  await page.getByLabel("密码").fill("ChangeMe-OnlyForLocalDev-123!");
+  await page.getByRole("button", { name: "登录", exact: true }).click();
+  await expect(page).not.toHaveURL(/\/login(?:[?#].*)?$/);
+  await page.goto("/ai");
+  const geometry = () => page.locator(".ai-chat-viewport").evaluate((element) => {
+    const composer = element.querySelector("form")!.getBoundingClientRect();
+    const transcript = element.querySelector(".ai-chat-transcript")!;
+    return { height: element.clientHeight, bottom: composer.bottom, viewport: window.innerHeight, scrollHeight: transcript.scrollHeight, visibleHeight: transcript.clientHeight, pageWidth: document.documentElement.scrollWidth, viewportWidth: window.innerWidth };
+  });
+  await expect(page.getByRole("heading", { name: "从一件具体的工作开始" })).toBeVisible();
+  await expect.poll(async () => (await geometry()).bottom).toBeLessThanOrEqual(page.viewportSize()!.height);
+  await page.locator(".fx-page-content").evaluate(async (element) => { await Promise.all(element.getAnimations({ subtree: true }).filter((animation) => animation.effect?.getTiming().iterations !== Infinity).map((animation) => animation.finished.catch(() => undefined))); });
+  const empty = await geometry();
+  await page.screenshot({ path: testInfo.outputPath("ai-chat-empty.png"), fullPage: true });
+  await page.getByLabel("向 AI 提问", { exact: true }).fill("继续校对本周工作");
+  expect((await geometry()).height).toBe(empty.height);
+  populated = true;
+  await page.getByRole("navigation", { name: "AI 工作区导航" }).getByRole("link", { name: "报告历史", exact: true }).click();
+  await page.getByRole("navigation", { name: "AI 工作区导航" }).getByRole("link", { name: "对话", exact: true }).click();
+  await page.evaluate(() => { window.dispatchEvent(new Event("offline")); window.dispatchEvent(new Event("online")); });
+  await expect(page.getByRole("button", { name: "重试", exact: true })).toHaveCount(16);
+  await expect.poll(async () => (await geometry()).bottom).toBeLessThanOrEqual(page.viewportSize()!.height);
+  const full = await geometry();
+  expect(Math.abs(full.height - empty.height)).toBeLessThanOrEqual(2);
+  expect(full.scrollHeight).toBeGreaterThan(full.visibleHeight);
+  expect(full.pageWidth).toBeLessThanOrEqual(full.viewportWidth);
+  await expect(page.getByLabel("向 AI 提问", { exact: true })).toHaveValue("继续校对本周工作");
+  await page.screenshot({ path: testInfo.outputPath("ai-chat-history.png"), fullPage: true });
+});
+
 test("AI workspace sends a persistent fact-scoped conversation turn", async ({ page }) => {
   await mockAuthenticatedWorkspace(page);
   let request: Record<string, unknown> | null = null;

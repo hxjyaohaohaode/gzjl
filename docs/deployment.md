@@ -2,13 +2,17 @@
 
 仓库根目录的 `render.yaml` 会一次创建 PostgreSQL、Web API/PWA 和 Worker。Web 在启动前自动执行 `pnpm db:migrate`，并以 `../web/dist`（相对 `apps/server`）托管已构建的 PWA；健康检查为 `/healthz`。配置遵循 [Render Blueprint specification](https://render.com/docs/blueprint-spec)。
 
-## 自动合并与持续部署
+## main 直接推送与持续部署
 
-`main` 是唯一长期保留的远端分支。仓库开启自动合并和合并后删除来源分支，并将 GitHub Actions 的 `verify` 设置为 main 必须通过的检查。仓库所有者在本仓库提交、目标为 main 的非草稿 PR，通过完整 CI 后由 `auto-merge.yml` 合并；它只使用通过检查的确切提交，不执行 PR 中的代码，也不绕过分支保护。外部来源、草稿和检查后又被更新的提交不会自动合并。
+`main` 是唯一长期保留的远端分支。按当前项目要求，修复基于最新 `origin/main` 完成，并直接快进推送到 `main`，不再为本项目的发布新建分支。仓库将 GitHub Actions 的 `verify` 设置为 main 必须通过的检查，管理员也受保护；不通过关闭保护、强推或伪造状态发布。
+
+新提交尚无远端检查时，使用指向该提交的临时验证标签，并对标签显式运行 `ci.yml`。完整检查通过后，核实待推送提交与已验证 SHA 一致、仍包含最新 main，再执行 `git push origin HEAD:main`。这会直接触发 main 的 push 检查。最后删除临时验证标签，并在确认文件改动已保留后清理历史临时分支。若 main 在验证期间前进，应重新整合并验证新的提交。
 
 CI 先完成规范、类型、单元与集成测试并构建一次，再由独立任务执行三组浏览器分片及五组真实 API/数据库验收。浏览器任务使用与依赖版本一致的官方 Playwright 镜像，省去每次运行时安装系统依赖；每台机器仍保留单个浏览器工作进程。最终 `verify` 只有在所有任务成功时才通过。
 
-GitHub Actions 使用内置令牌合并时不会触发 push 工作流，因此自动合并流程显式触发 main 的 CI。main 检查全部通过后，Render 的 Web 与 Worker 按 `autoDeployTrigger: checksPass` 自动部署；Web 先执行迁移，并通过健康检查后上线。新版本 Playwright 必须同步修改 `package.json`、锁文件及 CI 镜像版本。
+main 检查全部通过后，Render 的 Web 与 Worker 按 `autoDeployTrigger: checksPass` 自动部署；Web 先执行迁移，并通过健康检查后上线。完成后需核实两项服务的实际部署提交，以及 `/healthz`、`/readyz` 和页面资源，不能只依据某次旧检查成功判断当前发布。新版本 Playwright 必须同步修改 `package.json`、锁文件及 CI 镜像版本。
+
+历史 `auto-merge.yml` 仅兼容已有的、由仓库所有者创建且以 main 为目标的非草稿 PR。它不参与上述直接推送流程；反向将 main 合入临时分支不会更新生产 main。
 
 ## 第一次创建只需四步
 

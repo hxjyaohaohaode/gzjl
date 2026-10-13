@@ -4,7 +4,7 @@ import { expect, test, type Page } from "@playwright/test";
 const recoveryKey = "workbench:editor-recovery:v1:member";
 const prefillKey = "workbench:manual-work-prefill:v2:member";
 
-async function delayedWorkspace(page: Page, failEvidence = false) {
+async function delayedWorkspace(page: Page, failEvidence = false, beforeSubmit?: () => Promise<void>) {
   let release!: () => void;
   let posted = false;
   let completed = false;
@@ -53,6 +53,7 @@ async function delayedWorkspace(page: Page, failEvidence = false) {
   await openBackupTools(page);
   await page.getByRole("button", { name: "本机保存预填写", exact: true }).click();
   await expect.poll(() => page.evaluate((key) => sessionStorage.getItem(key), recoveryKey)).toContain("缓慢提交的 A");
+  await beforeSubmit?.();
   await wizardStep(page, 4);
   await page.getByRole("button", { name: "保存真实工时草稿", exact: true }).click();
   await expect.poll(() => posted).toBe(true);
@@ -125,5 +126,26 @@ test("an ordinary successful save clears automatic recovery while retaining expl
   await page.reload();
   await expect(page.getByRole("button", { name: "手工录入", exact: true })).toBeVisible();
   expect(await page.evaluate((key) => sessionStorage.getItem(key), recoveryKey)).toBeNull();
+  expect(await page.evaluate((key) => localStorage.getItem(key), prefillKey)).toContain("缓慢提交的 A");
+});
+
+test("saving before the recovery debounce flushes cannot resurrect an older draft", async ({ page }) => {
+  const submission = await delayedWorkspace(page, false, async () => {
+    // Reproduce a submit while the previous persisted snapshot is still older
+    // than the current input. Delay only the recovery debounce, not UI motion
+    // or requests, so the race does not depend on the runner's CPU speed.
+    await page.evaluate(() => {
+      const schedule = window.setTimeout.bind(window);
+      window.setTimeout = (handler, timeout, ...args) => schedule(handler, timeout === 400 ? 60_000 : timeout, ...args);
+    });
+    await page.getByLabel("本段文字证据", { exact: true }).fill("提交前刚刚修改的证据");
+  });
+  await expect.poll(() => page.evaluate((key) => sessionStorage.getItem(key), recoveryKey)).toContain("提交前刚刚修改的证据");
+  submission.release();
+  await expect(page.getByText("已保存 1 段工作。", { exact: true })).toBeVisible();
+  await expect.poll(() => page.evaluate((key) => sessionStorage.getItem(key), recoveryKey)).toBeNull();
+  await page.reload();
+  await expect(page.getByRole("button", { name: "开始计时", exact: true })).toBeEnabled();
+  await expect(page.getByRole("dialog", { name: "补录一段真实工作" })).toHaveCount(0);
   expect(await page.evaluate((key) => localStorage.getItem(key), prefillKey)).toContain("缓慢提交的 A");
 });

@@ -120,6 +120,49 @@ test("AI settings save arbitrary models and extensions, freeze requests and clea
   await page.screenshot({ path: testInfo.outputPath("ai-settings-viewport.png") });
 });
 
+test("AI configuration survives background refreshes during save and connection testing", async ({ page }) => {
+  await workspace(page);
+  let current = structuredClone(settings);
+  let releaseProbe!: () => void;
+  let probeStarted = false;
+  let failReads = false;
+  let reads = 0;
+  await page.route("**/api/ai/settings", async (route) => {
+    if (route.request().method() === "PUT") {
+      const input = route.request().postDataJSON();
+      current = { ...current, model: input.model, generationOptions: input.generationOptions };
+      return route.fulfill({ json: current });
+    }
+    reads += 1;
+    return failReads ? route.fulfill({ status: 429, headers: { "retry-after": "60" }, json: { message: "Rate limit exceeded, retry in 60 seconds" } }) : route.fulfill({ json: current });
+  });
+  await page.route("**/api/ai/settings/check", async (route) => {
+    probeStarted = true;
+    await new Promise<void>((resolve) => { releaseProbe = resolve; });
+    return route.fulfill({ json: { check: { status: "succeeded" } } });
+  });
+  await page.goto("/ai/settings");
+  await page.getByLabel("模型标识", { exact: true }).fill("vendor/new-model");
+  await wizardStep(page, 3, "ai");
+  await page.getByLabel("当前 Owner 密码", { exact: true }).fill("test-owner-password");
+  await page.getByRole("button", { name: "保存并测试新配置", exact: true }).click();
+  await expect.poll(() => probeStarted).toBe(true);
+  const before = reads;
+  await page.evaluate(() => { window.dispatchEvent(new Event("offline")); window.dispatchEvent(new Event("online")); });
+  await expect.poll(() => reads).toBeGreaterThan(before);
+  // The settings response now includes the saved model, while its probe is
+  // still pending. Re-keying this editor would lose the pending mutation.
+  await expect(page.getByRole("button", { name: "关闭配置" })).toBeDisabled();
+  releaseProbe();
+  await expect(page.getByRole("status").filter({ hasText: "配置已保存，连接测试成功" })).toBeVisible();
+  await wizardStep(page, 0, "ai");
+  await page.getByLabel("模型标识", { exact: true }).fill("keep-unsaved-model");
+  failReads = true;
+  await page.evaluate(() => { window.dispatchEvent(new Event("offline")); window.dispatchEvent(new Event("online")); });
+  await expect(page.getByRole("alert").filter({ hasText: "60 秒后重试" })).toBeVisible();
+  await expect(page.getByLabel("模型标识", { exact: true })).toHaveValue("keep-unsaved-model");
+});
+
 test("invalid or private extensions cannot be saved and non-owners cannot access config", async ({ page }) => {
   await workspace(page);
   await page.goto("/ai/settings");

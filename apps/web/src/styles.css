@@ -1429,10 +1429,13 @@ input[type="file"]::file-selector-button {
   transition: opacity 150ms ease;
 }
 
-.analytics-chart-frame:hover .analytics-chart-tools,
 .analytics-chart-tools:focus-within,
 .analytics-chart-frame:fullscreen .analytics-chart-tools {
   opacity: 1;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .analytics-chart-frame:hover .analytics-chart-tools { opacity: 1; }
 }
 
 .analytics-chart-tool {
@@ -1449,11 +1452,18 @@ input[type="file"]::file-selector-button {
   transition: color 150ms ease, background-color 150ms ease, transform 150ms ease;
 }
 
-.analytics-chart-tool:hover,
 .analytics-chart-tool:focus-visible {
   background: var(--surface-subtle);
   color: var(--text);
   transform: translateY(-1px);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .analytics-chart-tool:hover {
+    background: var(--surface-subtle);
+    color: var(--text);
+    transform: translateY(-1px);
+  }
 }
 
 .analytics-chart-frame:fullscreen {

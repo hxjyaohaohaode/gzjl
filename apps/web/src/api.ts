@@ -9,9 +9,9 @@ function retryDelay(response: Response | null, attempt: number): number {
   const retryAfter = response?.headers.get("retry-after");
   if (retryAfter) {
     const seconds = Number(retryAfter);
-    if (Number.isFinite(seconds)) return Math.min(10_000, Math.max(0, seconds * 1_000));
+    if (Number.isFinite(seconds)) return Math.max(0, seconds * 1_000);
     const at = Date.parse(retryAfter);
-    if (Number.isFinite(at)) return Math.min(10_000, Math.max(0, at - Date.now()));
+    if (Number.isFinite(at)) return Math.max(0, at - Date.now());
   }
   const base = [500, 1_500, 3_500][attempt] ?? 5_000;
   return base + Math.floor(Math.random() * 350);
@@ -43,8 +43,12 @@ async function fetchReadWithRecovery(
       if (!RETRYABLE_READ_STATUSES.has(response.status) || attempt === 2) {
         return response;
       }
+      const delay = retryDelay(response, attempt);
+      // Long cooldowns need a deliberate later retry. Never shorten Retry-After
+      // and turn a temporary 429 into the server's repeated-request ban.
+      if (delay > 10_000) return response;
       await response.body?.cancel().catch(() => undefined);
-      await sleep(retryDelay(response, attempt), init.signal);
+      await sleep(delay, init.signal);
     } catch (error) {
       if (init.signal?.aborted) throw error;
       lastNetworkError = error;
@@ -131,8 +135,10 @@ export async function api<T>(
           : response.status === 409 ? "数据已发生变化，请刷新后核对再操作。"
             : response.status === 429 ? "请求较多，请稍候再试。"
               : "服务暂时不可用，请稍后重试。";
-      throw new ApiError(response.status, typeof problem.error === "string" ? problem.error : "request_failed",
-        typeof problem.message === "string" ? problem.message : fallback, problem.issues);
+      const message = typeof problem.message === "string" && /^Rate limit exceeded/i.test(problem.message)
+        ? `请求较多，请在 ${Math.max(1, Math.ceil(Number(response.headers.get("retry-after")) || 60))} 秒后重试。`
+        : typeof problem.message === "string" ? problem.message : fallback;
+      throw new ApiError(response.status, typeof problem.error === "string" ? problem.error : "request_failed", message, problem.issues);
     }
     return payload as T;
   } catch (error) {

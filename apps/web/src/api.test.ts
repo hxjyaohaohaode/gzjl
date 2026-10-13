@@ -118,6 +118,13 @@ describe("API transport recovery", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it("respects a long rate-limit cooldown without retrying early", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ message: "Rate limit exceeded, retry in 60 seconds" }), { status: 429, headers: { "retry-after": "60" } }));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(api("/api/example")).rejects.toMatchObject({ status: 429, message: "请求较多，请在 60 秒后重试。" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("never repeats a mutation whose response may have been lost", async () => {
     const fetchMock = vi
       .fn<typeof fetch>()
