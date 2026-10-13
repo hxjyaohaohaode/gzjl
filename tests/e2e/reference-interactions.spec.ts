@@ -204,6 +204,10 @@ test("team filters update the collection without replacing its frame and swimlan
     const fieldHeight = await page.getByLabel(label).evaluate((element) => element.getBoundingClientRect().height);
     expect(fieldHeight).toBeGreaterThanOrEqual(38);
     expect(fieldHeight).toBeLessThanOrEqual(56);
+    if (page.viewportSize()!.width < 768) {
+      const gap = await page.getByLabel(label).evaluate((element) => element.parentElement!.getBoundingClientRect().width - element.getBoundingClientRect().width);
+      expect(Math.abs(gap)).toBeLessThanOrEqual(1);
+    }
   }
   await page.screenshot({ path: testInfo.outputPath("team-filter-layout.png") });
   const feedDimensions = await page.locator(".team-activity-feed").evaluate((element) => ({ feed: element.getBoundingClientRect().width, container: element.parentElement!.getBoundingClientRect().width, list: element.querySelector(".fx-team-feed-list")!.getBoundingClientRect().width }));
