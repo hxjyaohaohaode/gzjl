@@ -4,6 +4,7 @@ import { hasGrant, hasOrganizationGrant, type Me } from "./api.js";
 import { useId } from "react";
 import { motion } from "motion/react";
 import { useMotionPreference } from "./motion-preference.js";
+import { canAdminBackfill } from "@workbench/shared";
 
 export function WorkspaceNavigation({ label, items }: {
   label: string;
@@ -22,6 +23,7 @@ export function WorkspaceNavigation({ label, items }: {
 export function ApprovalNavigation({ me }: { me: Me }) {
   return <WorkspaceNavigation label="审批分类" items={[
     ...(hasGrant(me, "work.review") ? [{ to: "/approvals", label: "工时审批" }] : []),
+    ...(canAdminBackfill(me.permissions) ? [{ to: "/approvals/backfill", label: "管理员补录" }] : []),
     ...(hasOrganizationGrant(me, "payroll.settle") ? [{ to: "/approvals/reimbursements", label: "报销审批", end: false }] : []),
   ]} />;
 }

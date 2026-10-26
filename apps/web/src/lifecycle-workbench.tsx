@@ -43,7 +43,7 @@ export interface WorkFactContextData {
   submitter?: { membershipId: string; displayName: string; status: string };
   memberWorkState?: { counts: Record<string, number>; activeTimers: string[] };
   session: { id: string; version: number; content: string; result: string; blockers: string; nextStep: string; startAt: string; endAt: string; approvalStatus: string };
-  evidenceSummary: { total: number; verified: number };
+  evidenceSummary: { total: number; verified: number; exempt?: boolean };
   reasons: string[];
   links: Array<{ projectId: string; nodeId: string; title: string; version: number; progress: string; status: string; reportedProgress: string | null }>;
   neighbors: Array<{ id: string; content: string; startAt: string; endAt: string; approvalStatus: string }>;
@@ -58,9 +58,9 @@ export function WorkFactContext({ id, expectedVersion, children }: { id: string;
   const data = query.data;
   return <section className="work-fact-context" aria-label="记录核对与修复路径">
     {data.submitter ? <div className="review-member-state"><strong>提交人：{data.submitter.displayName}</strong><small>成员唯一编号：{data.submitter.membershipId} · {data.submitter.status === "active" ? "在组织中" : "成员状态：" + data.submitter.status}</small>{data.memberWorkState ? <><p>当前计时状态：{data.memberWorkState.activeTimers.length ? data.memberWorkState.activeTimers.map((t) => ({ running: "工作计时中", paused: "已暂停", on_break: "休息中" })[t]).join("、") : "无进行中的可见计时"}</p><p>记录所属月（当前权限可见）：{Object.entries(data.memberWorkState.counts).map(([state, count]) => `${workStateLabels[state] ?? state} ${count} 条`).join("；") || "无记录"}</p></> : null}</div> : null}
-    <div className="flex flex-wrap gap-2"><Badge>{workStateLabels[data.session.approvalStatus] ?? data.session.approvalStatus}</Badge><Badge>当前 v{data.session.version}</Badge><Badge>已核验证据 {data.evidenceSummary.verified}/{data.evidenceSummary.total}</Badge></div>
+    <div className="flex flex-wrap gap-2"><Badge>{workStateLabels[data.session.approvalStatus] ?? data.session.approvalStatus}</Badge><Badge>当前 v{data.session.version}</Badge><Badge>{data.evidenceSummary.exempt ? "管理员补录 · 免证据" : `已核验证据 ${data.evidenceSummary.verified}/${data.evidenceSummary.total}`}</Badge></div>
     {expectedVersion && String(data.session.version) !== expectedVersion ? <p className="lifecycle-warning" role="alert">引用的是 v{expectedVersion}，当前已是 v{data.session.version}，请重新核对结论与记录历史。</p> : null}
-    {data.reasons.length ? <ul className="readiness-reasons">{data.reasons.map((r) => <li key={r}>{r}</li>)}</ul> : <p className="lifecycle-caption">当前证据条件已满足。审核决定仍由授权审核人依据事实作出。</p>}
+    {data.reasons.length ? <ul className="readiness-reasons">{data.reasons.map((r) => <li key={r}>{r}</li>)}</ul> : <p className="lifecycle-caption">{data.evidenceSummary.exempt ? "此记录由管理员补录并确认，无需补交证据。" : "当前证据条件已满足。审核决定仍由授权审核人依据事实作出。"}</p>}
     <dl className="fact-description"><div><dt>工作内容</dt><dd>{data.session.content}</dd></div><div><dt>结果</dt><dd>{data.session.result || "尚未填写"}</dd></div><div><dt>阻塞</dt><dd>{data.session.blockers || "尚未填写"}</dd></div><div><dt>下一步 / 待决定事项</dt><dd>{data.session.nextStep || "尚未填写"}</dd></div></dl>
     {data.links.length ? <div className="fact-project-links">{data.links.map((n) => <Link key={n.nodeId} to={`/projects/${n.projectId}?node=${n.nodeId}`}>{n.title} · 当前 {n.progress}% · v{n.version}{n.reportedProgress !== null ? ` · 本条报告 ${n.reportedProgress}%` : ""}</Link>)}</div> : null}
     <details><summary>相邻与重叠时段（前后一天，最多 100 条）</summary><ul className="fact-neighbors">{data.neighbors.map((n) => <li key={n.id}><Link to={`/work?record=${n.id}`}>{n.content}</Link><p>{dateLabel(n.startAt)} – {dateLabel(n.endAt)} · {workStateLabels[n.approvalStatus]}</p>{new Date(n.startAt) < new Date(data.session.endAt) && new Date(n.endAt) > new Date(data.session.startAt) ? <Badge tone="warning">时段重叠，需核对实际有效工作时间</Badge> : null}</li>)}{!data.neighbors.length ? <li>当前范围内没有相邻时段。</li> : null}</ul></details>

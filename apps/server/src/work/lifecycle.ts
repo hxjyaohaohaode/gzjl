@@ -79,10 +79,16 @@ export class WorkLifecycleService {
     const reasons: string[] = [];
     if (session.approvalStatus === "not_requested") reasons.push("尚未提交，草稿不会进入批准薪资依据。核对内容和证据后提交审核。");
     if (session.approvalStatus === "returned") reasons.push("记录已退回，请按历史退回原因修改并重新提交。");
-    if (!evidence.some((e) => e.status === "available" && e.visibility !== "private")) reasons.push("缺少审核人可见的已核验证据，请添加文字、链接，或上传并核验文件。");
+    const [backfill] = await this.db.select({ id: approvalActions.id }).from(approvalRequests)
+      .innerJoin(approvalActions, eq(approvalActions.approvalRequestId, approvalRequests.id)).where(and(
+        eq(approvalRequests.organizationId, actor.organizationId), eq(approvalRequests.entityType, "work_session"), eq(approvalRequests.entityId, id),
+        eq(approvalActions.action, "management_corrected"), sql`${approvalActions.metadata}->>'administrativeBackfill' = 'true'`,
+      )).limit(1);
+    const evidenceExempt = Boolean(backfill);
+    if (!evidenceExempt && !evidence.some((e) => e.status === "available" && e.visibility !== "private")) reasons.push("缺少审核人可见的已核验证据，请添加文字、链接，或上传并核验文件。");
     if (session.endAt > new Date()) reasons.push("结束时间尚未到，请核对时区和时间；未来工作应保存为计划。");
     if (Array.isArray(session.anomalyFlags) && session.anomalyFlags.length) reasons.push("存在时间或工作异常，审批人需要核对具体原因。");
-    return { submitter: row.submitter, memberWorkState: { month, counts: Object.fromEntries(memberCounts.map((c) => [c.status, c.count])), activeTimers: currentTimers.map((t) => t.status) }, session: { ...session, breaks, projectLinks }, ownRecord: session.membershipId === actor.membershipId, versions, evidenceSummary: { total: evidence.length, verified: evidence.filter((e) => e.status === "available").length }, history, links, neighbors, reasons };
+    return { submitter: row.submitter, memberWorkState: { month, counts: Object.fromEntries(memberCounts.map((c) => [c.status, c.count])), activeTimers: currentTimers.map((t) => t.status) }, session: { ...session, breaks, projectLinks }, ownRecord: session.membershipId === actor.membershipId, versions, evidenceSummary: { total: evidence.length, verified: evidence.filter((e) => e.status === "available").length, exempt: evidenceExempt }, history, links, neighbors, reasons };
   }
 }
 

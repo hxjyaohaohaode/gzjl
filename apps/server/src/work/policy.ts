@@ -23,7 +23,7 @@ export async function assertWorkSubmissionWindow(db: PolicyDatabase, organizatio
     const cutoff = policy.manualEntryLookbackDays === 0
       ? new Intl.DateTimeFormat("en-CA", { timeZone: policy.timezone, year: "numeric", month: "2-digit", day: "2-digit" }).format(startAt) !== new Intl.DateTimeFormat("en-CA", { timeZone: policy.timezone, year: "numeric", month: "2-digit", day: "2-digit" }).format(now)
       : startAt < new Date(now.getTime() - policy.manualEntryLookbackDays * 86_400_000);
-    if (cutoff) throw new WorkSubmissionPolicyError(`手工补录仅允许追溯 ${policy.manualEntryLookbackDays} 天（老板设置；0 表示仅当天）；更早记录需要提交更正申请，不能直接补录。`);
+    if (cutoff) throw new WorkSubmissionPolicyError(`手工补录仅允许追溯 ${policy.manualEntryLookbackDays} 天（老板设置；0 表示仅当天）；更早的遗漏工时请联系管理员通过“管理员补录”处理。`);
   }
   const deadline = workSubmissionDeadline(policy, startAt, policy.timezone);
   if (deadline && now >= deadline) throw new WorkSubmissionPolicyError(`该记录所属月份的提交截止时间已过（${deadline.toLocaleString("zh-CN", { timeZone: policy.timezone })}，${policy.timezone}），不能补录、恢复或提交该月历史工时。请联系老板处理有留痕的更正。`);

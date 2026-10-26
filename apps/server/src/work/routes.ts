@@ -1,8 +1,8 @@
 import type { FastifyInstance, preHandlerHookHandler } from "fastify";
 import { z } from "zod";
-import { createWorkSessionSchema } from "@workbench/shared";
+import { adminWorkBackfillSchema, createWorkSessionSchema } from "@workbench/shared";
 
-import { requirePermission } from "../auth/authorization.js";
+import { requireAnyScopedPermission, requirePermission } from "../auth/authorization.js";
 import {
   WorkSessionConflictError,
   WorkSessionEvidenceRequiredError,
@@ -64,6 +64,26 @@ export async function registerWorkRoutes(
     scopeKind: "self",
     scopeId: request.auth?.membershipId ?? null,
   }));
+
+  app.get("/api/work-sessions/admin-backfill/members", {
+    preHandler: [authenticate, requireAnyScopedPermission("work.review")],
+  }, async (request) => ({ items: await service.listBackfillMembers(request.auth!) }));
+
+  app.post("/api/work-sessions/admin-backfill", {
+    preHandler: [app.csrfProtection, authenticate, requireAnyScopedPermission("work.review")],
+  }, async (request, reply) => {
+    const input = adminWorkBackfillSchema.parse(request.body);
+    try {
+      const sessions = await service.createAdminBackfill(request.auth!, input, { requestId: request.id,
+        ...(request.headers["user-agent"] ? { userAgent: request.headers["user-agent"] } : {}),
+      });
+      return reply.code(201).send({ sessions });
+    } catch (error) {
+      if (error instanceof WorkSessionValidationError) return reply.code(400).send({ error: "invalid_admin_backfill", message: error.message });
+      if (error instanceof WorkSessionConflictError) return reply.code(409).send({ error: "admin_backfill_conflict", message: error.message });
+      throw error;
+    }
+  });
 
   app.post("/api/work-sessions/:sessionId/archive-action", { preHandler: [app.csrfProtection, authenticate, ownPermission] }, async (request, reply) => {
     const { sessionId } = submitParamsSchema.parse(request.params);

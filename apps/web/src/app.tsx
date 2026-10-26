@@ -43,6 +43,7 @@ import {
 import { AccessUnavailable, ApprovalWorkspace, PersonalPayrollWorkspace, PayrollHandoffPage, PayrollManagementWorkspace, ReimbursementsPage, WorkPolicyPage } from "./payroll-workspace.js";
 import { hasGrant } from "./api.js";
 import { hasOrganizationGrant } from "./api.js";
+import { AdminWorkBackfillPage } from "./admin-work-backfill.js";
 
 async function getMe({ signal }: { signal: AbortSignal }): Promise<Me | null> {
   try {
@@ -223,6 +224,7 @@ export function App() {
         <Route path="ai/compose" element={<AiPage me={me!} view="compose" />} />
         <Route path="ai/settings" element={me?.user.isOwner ? <AiConfigurationPage /> : <AccessUnavailable />} />
         <Route path="approvals" element={<ApprovalWorkspace me={me!} />}>
+          <Route path="backfill" element={<AdminWorkBackfillPage me={me!} />} />
           <Route index element={me && hasGrant(me, "work.review") ? <ApprovalsPage /> : me && hasOrganizationGrant(me, "payroll.settle") ? <Navigate replace to="/approvals/reimbursements" /> : <AccessUnavailable />} />
           <Route path="reimbursements" element={<ReimbursementsPage me={me!} reviewOnly />} />
           <Route path="reimbursements/history" element={<ReimbursementsPage me={me!} reviewOnly reviewHistory />} />

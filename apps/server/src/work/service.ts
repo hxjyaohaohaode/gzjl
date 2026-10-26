@@ -1,5 +1,5 @@
 import { assertWorkSubmissionWindow, WorkSubmissionPolicyError } from "./policy.js";
-import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lt, ne, or } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lt, ne, or, sql } from "drizzle-orm";
 import type { Database } from "@workbench/db";
 import {
   attachmentLinks,
@@ -14,6 +14,8 @@ import {
   projectNodes,
   projects,
   orgMemberships,
+  orgUnits,
+  users,
   outboxEvents,
   payPeriods,
   workBreaks,
@@ -23,7 +25,11 @@ import {
 } from "@workbench/db/schema";
 import {
   calculateWorkDuration,
+  adminWorkBackfillSchema,
+  canAdminBackfill,
   createWorkSessionSchema,
+  type AdminWorkBackfillInput,
+  type PermissionGrant,
   type CreateWorkSessionInput,
   workDurationAnomalyFlags,
 } from "@workbench/shared";
@@ -61,9 +67,28 @@ export class WorkSessionEvidenceRequiredError extends Error {
   }
 }
 
+export class WorkBackfillPermissionError extends Error {
+  readonly statusCode = 403;
+  constructor() { super("只能由有组织或部门工时审核权限的管理员为授权范围内的其他在职员工补录。"); }
+}
+
 export interface WorkActor {
   organizationId: string;
   membershipId: string;
+}
+
+type WorkBackfillActor = WorkActor & { grants: readonly PermissionGrant[] };
+
+function backfillMemberScope(actor: WorkBackfillActor) {
+  if (!canAdminBackfill(actor.grants)) throw new WorkBackfillPermissionError();
+  const reviewGrants = actor.grants.filter((grant) => grant.permission === "work.review");
+  const units = reviewGrants.filter((grant) => grant.scopeKind === "org_unit" && grant.scopeId).map((grant) => grant.scopeId!);
+  return and(
+    eq(orgMemberships.organizationId, actor.organizationId),
+    eq(orgMemberships.status, "active"),
+    ne(orgMemberships.id, actor.membershipId),
+    reviewGrants.some((grant) => grant.scopeKind === "organization") ? undefined : units.length ? inArray(orgMemberships.orgUnitId, units) : sql`false`,
+  );
 }
 
 export interface ImportedWorkSessionInput {
@@ -169,6 +194,51 @@ async function assertManualLookback(db: WorkExecutor, actor: WorkActor, startAt:
 
 export class WorkSessionService {
   constructor(private readonly db: Database) {}
+
+  async listBackfillMembers(actor: WorkBackfillActor) {
+    return this.db.select({ membershipId: orgMemberships.id, displayName: users.displayName, orgUnitName: orgUnits.name })
+      .from(orgMemberships).innerJoin(users, eq(users.id, orgMemberships.userId))
+      .leftJoin(orgUnits, eq(orgUnits.id, orgMemberships.orgUnitId))
+      .where(backfillMemberScope(actor)).orderBy(asc(users.displayName), asc(orgMemberships.id));
+  }
+
+  async createAdminBackfill(actor: WorkBackfillActor, rawInput: AdminWorkBackfillInput,
+    requestMeta: { requestId?: string; userAgent?: string } = {}) {
+    const scope = backfillMemberScope(actor);
+    const input = adminWorkBackfillSchema.parse(rawInput);
+    const startAt = new Date(input.startAt), endAt = new Date(input.endAt);
+    if (endAt > new Date()) throw new WorkSessionValidationError("只能补录已经结束的工作。");
+    return this.db.transaction(async (tx) => {
+      await lockPayrollInputs(tx, actor.organizationId);
+      // Lock membership rows before checking their current status and department.
+      const members = await tx.select({ id: orgMemberships.id }).from(orgMemberships)
+        .where(and(scope, inArray(orgMemberships.id, input.membershipIds)))
+        .orderBy(asc(orgMemberships.id)).for("update");
+      if (members.length !== input.membershipIds.length) throw new WorkBackfillPermissionError();
+      const [closedPeriod] = await tx.select({ id: payPeriods.id }).from(payPeriods).where(and(
+        eq(payPeriods.organizationId, actor.organizationId), inArray(payPeriods.status, ["locked", "settled"]),
+        lt(payPeriods.startsAt, endAt), gt(payPeriods.endsAt, startAt),
+      )).limit(1);
+      if (closedPeriod) throw new WorkSessionConflictError("该时段涉及已锁定或已结算的薪资周期，请先按结算更正流程处理，不能直接补录。");
+      const record = createWorkSessionSchema.parse({ startAt: input.startAt, endAt: input.endAt,
+        timezone: input.timezone, content: input.content, source: "manual" });
+      const sessions = [];
+      for (const member of members) {
+        try {
+          sessions.push(await this.createManualWithExecutor(tx, { ...actor, membershipId: member.id }, record,
+            requestMeta, { administrativeActor: actor }));
+        } catch (error) {
+          if (error instanceof WorkSessionConflictError) {
+            const [person] = await tx.select({ name: users.displayName }).from(orgMemberships)
+              .innerJoin(users, eq(users.id, orgMemberships.userId)).where(eq(orgMemberships.id, member.id));
+            throw new WorkSessionConflictError(`${person?.name ?? "所选员工"}在该时段已有工时，请核对已有记录。本次补录未保存任何记录。`);
+          }
+          throw error;
+        }
+      }
+      return sessions;
+    });
+  }
 
   async recommendProjectNodes(
     actor: WorkActor,
@@ -837,9 +907,11 @@ export class WorkSessionService {
     actor: WorkActor,
     input: CreateWorkSessionInput,
     requestMeta: { requestId?: string; userAgent?: string } = {},
-    options: { recordKind?: WorkRecordKind } = {},
+    options: { recordKind?: WorkRecordKind; administrativeActor?: WorkBackfillActor } = {},
   ) {
     const recordKind = options.recordKind ?? "fact";
+    const operator = options.administrativeActor ?? actor;
+    const administrative = Boolean(options.administrativeActor);
     await lockWorkMember(db, actor);
     if (input.source === "timer") {
       throw new WorkSessionValidationError(
@@ -869,7 +941,7 @@ export class WorkSessionService {
     // preview before confirming it. It may therefore restore historical facts
     // from a verified archive, whereas ordinary manual backfill stays bounded
     // by the member's active expectation profile.
-    if (input.source !== "import" && recordKind === "fact") await assertManualLookback(db, actor, startAt);
+    if (!administrative && input.source !== "import" && recordKind === "fact") await assertManualLookback(db, actor, startAt);
     if (recordKind === "plan") {
       assertPlanWindow(startAt, endAt);
     } else if (endAt > new Date(Date.now() + factualFutureGraceMs)) {
@@ -955,6 +1027,7 @@ export class WorkSessionService {
         visibility: recordKind === "plan" ? "private" : input.visibility,
         parallelWork: input.parallelWork,
         anomalyFlags: recordKind === "plan" ? [] : anomalyFlags,
+        ...(administrative ? { submissionStatus: "submitted" as const, approvalStatus: "approved" as const, submittedAt: new Date() } : {}),
       })
       .returning();
     if (!session) throw new Error("Failed to create work session");
@@ -989,19 +1062,21 @@ export class WorkSessionService {
     for (const [nodeId, progress] of progressUpdates) {
       await this.applyReportedProgress(db, actor, session.id, nodeId, progress, recordKind);
     }
-    const snapshot = { ...session, breaks, projectLinks };
+    const snapshot = { ...session, breaks, projectLinks,
+      ...(administrative ? { administrativeBackfill: { recordedBy: operator.membershipId, evidenceExempt: true } } : {}),
+    };
     await db.insert(workSessionVersions).values({
       workSessionId: session.id,
       version: 1,
       snapshot,
-      changeReason: recordKind === "plan" ? "plan_created" : "created",
-      changedBy: actor.membershipId,
+      changeReason: administrative ? "管理员补录（免证据，已确认）" : recordKind === "plan" ? "plan_created" : "created",
+      changedBy: operator.membershipId,
     });
     await db.insert(auditLogs).values({
       organizationId: actor.organizationId,
-      actorMembershipId: actor.membershipId,
+      actorMembershipId: operator.membershipId,
       action:
-        recordKind === "plan" ? "work_plan.created" : "work_session.created",
+        administrative ? "work_session.admin_backfilled" : recordKind === "plan" ? "work_plan.created" : "work_session.created",
       entityType: "work_session",
       entityId: session.id,
       after: snapshot,
@@ -1014,8 +1089,19 @@ export class WorkSessionService {
       entityType: "work_session",
       entityId: session.id,
       entityVersion: session.version,
-      payload: { change: recordKind === "plan" ? "plan_created" : "created" },
+      payload: { change: administrative ? "admin_backfilled" : recordKind === "plan" ? "plan_created" : "created" },
     });
+    if (administrative) {
+      const [approval] = await db.insert(approvalRequests).values({ organizationId: actor.organizationId,
+        entityType: "work_session", entityId: session.id, entityVersion: String(session.version),
+        requestedBy: operator.membershipId, assignedReviewerId: operator.membershipId,
+        status: "approved", anomalyFlags, resolvedAt: new Date(),
+      }).returning({ id: approvalRequests.id });
+      await db.insert(approvalActions).values({ approvalRequestId: approval!.id, actorMembershipId: operator.membershipId,
+        action: "management_corrected", reason: "管理员补录工时，免证据并直接确认。", afterSnapshot: snapshot,
+        metadata: { administrativeBackfill: true, targetMembershipId: actor.membershipId },
+      });
+    }
     return snapshot;
   }
 

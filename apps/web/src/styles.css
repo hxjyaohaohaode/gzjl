@@ -8715,6 +8715,17 @@ body,
 .history-range,.work-policy-notice { margin: 1rem 0; padding: 1rem; border: 1px solid var(--border); border-radius: 1rem; }
 .history-range p,.work-policy-notice p { font-size: .85rem; margin-top: .6rem; color: var(--text-muted); }
 .history-range-fields,.work-policy-grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(min(100%,13rem),1fr)); gap: .8rem; align-items: end; }
+.admin-backfill-form, .admin-backfill-fields, .admin-backfill-members { display: grid; min-width: 0; gap: 1rem; }
+.admin-backfill-fields, .admin-backfill-members { border: 0; padding: 0; margin: 0; }
+.admin-backfill-members legend { margin-bottom: .75rem; }
+.admin-backfill-time-grid, .admin-backfill-member-grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(min(100%,16rem),1fr)); gap: .8rem; }
+.admin-backfill-member { display: flex; align-items: center; gap: .65rem; padding: .75rem; border: 1px solid var(--border); border-radius: .7rem; overflow-wrap: anywhere; }
+.admin-backfill-member input { flex: 0 0 auto; width: 1.1rem; height: 1.1rem; }
+.admin-backfill-member small { display: block; color: var(--text-muted); }
+.admin-backfill-form :is(input, textarea) { max-width: 100%; min-width: 0; }
+.admin-backfill-form :is(input:not([type=checkbox]), textarea) { display: block; width: 100%; min-height: 44px; padding: .65rem .75rem; border: 1px solid var(--border); border-radius: .65rem; background: var(--surface); color: var(--text); font-size: 16px; }
+.admin-backfill-form textarea { resize: vertical; }
+.admin-backfill-success { margin-block: 1rem; padding: .8rem; border: 1px solid var(--border); border-radius: .7rem; overflow-wrap: anywhere; }
 .history-range label,.work-policy-grid label,.history-month { display: grid; gap: .4rem; min-width: 0; }
 .history-range :is(input,select),.work-policy-grid :is(input:not([type=checkbox]),select),.history-month input { min-width: 0; width: 100%; min-height: 44px; padding: .5rem .65rem; background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: .6rem; font-size: 16px; }
 .history-month { max-width: 100%; width: 22rem; }

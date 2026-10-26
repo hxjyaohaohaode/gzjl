@@ -22,6 +22,7 @@ const pages: Record<string, WorkspacePage> = {
   "/payroll/trends": { title: "薪资趋势与预测", area: "个人事务", purpose: "区分已发生事实与未来预测，查看预测区间和依据。", parent: { to: "/payroll", label: "我的薪资" } },
   "/reimbursements": { title: "我的报销", area: "个人事务", purpose: "填写申请、补充凭证，跟踪本人报销的审批与结算进度。" },
   "/approvals": { title: "工时审批", area: "管理工作", purpose: "先核对异常和证据，再批准记录或注明退回原因。" },
+  "/approvals/backfill": { title: "管理员补录", area: "管理工作", purpose: "", parent: { to: "/approvals", label: "审批" } },
   "/approvals/reimbursements": { title: "报销审批", area: "管理工作", purpose: "核对其他成员的申请与凭证，将批准金额归入开放周期。" },
   "/approvals/reimbursements/history": { title: "报销审批记录", area: "管理工作", purpose: "按归属范围回看已处理报销、审批说明与证据。", parent: { to: "/approvals/reimbursements", label: "报销审批" } },
   "/payroll-management": { title: "薪资总览", area: "管理工作", purpose: "查看团队预估与待完善事项，进入对应成员或周期处理。" },
