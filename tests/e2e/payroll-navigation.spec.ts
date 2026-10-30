@@ -204,8 +204,9 @@ test("a cycle and its batch share one card and return preserves every filter", a
   } }));
   await page.goto("/payroll-management/periods?month=2026-09&status=ready&q=九月");
   await expect(page.locator(".payroll-period-card")).toHaveCount(1);
-  await expect(page.locator(".payroll-period-card")).toContainText("批次 #2");
-  await expect(page.getByLabel("结算进度")).toContainText("核对交接");
+  await expect(page.locator(".payroll-period-card")).toContainText("待确认交接");
+  await expect(page.locator(".payroll-period-card")).toContainText("2026-09-30 23:59:59");
+  await expect(page.getByLabel("结算进度")).toHaveCount(0);
   await page.getByRole("button", { name: "核对导出预览", exact: true }).click();
   await page.reload();
   await page.getByRole("link", { name: "← 返回周期结算" }).click();
