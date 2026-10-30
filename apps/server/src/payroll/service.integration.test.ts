@@ -276,7 +276,7 @@ describe("employee payroll view and receipt acknowledgement", () => {
         hourCycle: "h23",
       }).format(new Date(after.livePreview!.period.cutoffAt)),
     ).toBe("09:30");
-    expect(after.items).toHaveLength(0);
+    expect(after.items.every((entry) => entry.period.automatic && entry.run.status !== "settled")).toBe(true);
   });
 
   it("keeps weekly rewards inside the payroll month boundary", async () => {
@@ -329,16 +329,7 @@ describe("employee payroll view and receipt acknowledgement", () => {
         rewardSeconds: 5 * 3_600,
       }],
     });
-    const overview = await service.managementOverview(ownerActor);
-    expect(overview.members.find(
-      (member) => member.membershipId === employeeMembership!.id,
-    )?.plan?.rules).toEqual([
-      expect.objectContaining({
-        type: "weekly_bonus",
-        thresholdSeconds: 108_000,
-        rewardSeconds: 18_000,
-      }),
-    ]);
+
 
     await db.insert(workSessions).values([
       {
@@ -383,6 +374,17 @@ describe("employee payroll view and receipt acknowledgement", () => {
         cutoffAt: new Date("2026-10-10T10:00:00.000Z"),
       })
       .returning();
+    const overview = await service.managementOverview(ownerActor);
+    expect(overview.members.find(
+      (member) => member.membershipId === employeeMembership!.id,
+    )?.plan?.rules).toEqual([
+      expect.objectContaining({
+        type: "weekly_bonus",
+        thresholdSeconds: 108_000,
+        rewardSeconds: 18_000,
+      }),
+    ]);
+
     const run = await service.calculate(ownerActor, period!.id);
     expect(run.calculationVersion).toBe("payroll-engine-v11-explicit-pay-period");
     const [item] = await db

@@ -207,9 +207,9 @@ test("salary export month filters both periods and their ready or settled batche
     { id: "august", name: "八月账单", startsAt: "2026-07-31T16:00:00Z", endsAt: "2026-08-31T16:00:00Z", timezone: "Asia/Shanghai", cutoffAt: "2026-09-10T10:00:00Z", status: "pending_confirmation" },
   ];
   await page.route("**/api/payroll/management", (route) => route.fulfill({ json: { members: [], periods, runs: periods.map((period, i) => ({ period, run: { id: period.id, runNumber: 1, status: i ? "ready" : "settled", createdAt: period.endsAt } })), latestItems: [], liveItems: [], liveItemIssues: [], settings: { timezone: "Asia/Shanghai", payrollCutoffDay: 10, payrollCutoffMinute: 1080 } } }));
-  await page.goto("/payroll-management/periods"); await page.getByText("新建结算周期", { exact: true }).click(); await expect(page.getByLabel("结算月份", { exact: true })).toHaveValue("2026-09");
+  await page.goto("/payroll-management/periods"); await expect(page.getByText("新建结算周期", { exact: true })).toHaveCount(0);
   await page.getByLabel("查看 / 导出指定月份", { exact: true }).fill("2026-07");
-  await expect(page.getByText("七月账单 · 批次 #1 · 已导出并锁定", { exact: true })).toBeVisible(); await expect(page.getByText("八月账单 · 批次 #1 · 可导出锁定", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "七月账单", exact: true })).toBeVisible(); await expect(page.getByRole("heading", { name: "八月账单", exact: true })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "重新导出账单", exact: true })).toBeVisible(); await expect(page.getByRole("button", { name: "核对导出预览", exact: true })).toHaveCount(0);
   await page.getByLabel("查看 / 导出指定月份", { exact: true }).fill("2026-08");
   await expect(page.getByRole("button", { name: "核对导出预览", exact: true })).toBeVisible(); await expect(page.getByRole("button", { name: "重新导出账单", exact: true })).toHaveCount(0);

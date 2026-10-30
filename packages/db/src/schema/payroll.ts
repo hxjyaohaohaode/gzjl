@@ -157,6 +157,7 @@ export const payPeriods = pgTable(
     startsAt: timestamp("starts_at", { withTimezone: true }).notNull(),
     endsAt: timestamp("ends_at", { withTimezone: true }).notNull(),
     cutoffAt: timestamp("cutoff_at", { withTimezone: true }).notNull(),
+    automatic: boolean("automatic").notNull().default(false),
     status: payPeriodStatusEnum("status").notNull().default("open"),
     settledAt: timestamp("settled_at", { withTimezone: true }),
     lockedAt: timestamp("locked_at", { withTimezone: true }),

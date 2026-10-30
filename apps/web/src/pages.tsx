@@ -7,7 +7,7 @@ import { RegionTransition } from "./workspace-transition.js";
 import { AiChatViewport } from "./ai-chat-viewport.js";
 import { AnimatePresence, motion } from "motion/react";
 import { HistoricalRangePicker, type HistoricalRange } from "./history-range.js";
-import { isSalaryMonth, previousSalaryMonth, salaryMonthForm, salaryPeriodMatchesMonth, suggestedPeriodCutoff } from "./payroll-month.js";
+import { isSalaryMonth, salaryMonthForm, salaryPeriodMatchesMonth } from "./payroll-month.js";
 import { WorkPolicyPanel } from "./submission-policy.js";
 import { aiExtraBodySchema, aiGenerationOptionsSchema, type AiGenerationOptions } from "@workbench/shared";
 import { AiDraftEditor, AiFactAnswer, CycleOverview, WorkFactContext, CitedText, type CycleOverviewData } from "./lifecycle-workbench.js";
@@ -7957,6 +7957,7 @@ type CompensationPlanType =
   | "project_based"
   | "hybrid";
 interface PayrollManagementOverview {
+  automationIssues?: Array<{ periodId: string; message: string }>;
   members: Array<{
     membershipId: string;
     displayName: string;
@@ -8046,15 +8047,6 @@ const compensationTypeLabels: Record<CompensationPlanType, string> = {
   project_based: "项目制",
   hybrid: "混合计薪",
 };
-
-function cutoffTimeValue(minutes: number): string {
-  return `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
-}
-
-function cutoffTimeMinutes(value: string): number {
-  const [hour = "0", minute = "0"] = value.split(":");
-  return Number(hour) * 60 + Number(minute);
-}
 
 function formatPayrollMoney(currency: string, amount: string): string {
   // Decimal source strings stay exact; chart-only numbers may use exponential notation.
@@ -8164,6 +8156,7 @@ export function PayrollManagementPanel({ me, section }: { me: Me; section: "over
   const chartPalette = useChartPalette();
   const management = useQuery({
     queryKey: ["payroll-management"],
+    refetchInterval: 60_000,
     queryFn: () => api<PayrollManagementOverview>("/api/payroll/management"),
   });
   const periodMonth = periodSearch.get("month") ?? "";
@@ -8196,22 +8189,6 @@ export function PayrollManagementPanel({ me, section }: { me: Me; section: "over
   };
   const filteredMembers = activeMembers.filter((member) => (!missingOnly || !member.plan)
     && `${member.displayName} ${member.membershipId} ${member.plan?.plan.name ?? ""}`.toLocaleLowerCase().includes(memberSearch.trim().toLocaleLowerCase()));
-  const [settlementMonth, setSettlementMonth] = useState(() => previousSalaryMonth());
-  const [customPeriod, setCustomPeriod] = useState(false);
-  const [periodForm, setPeriodForm] = useState(() => salaryMonthForm(previousSalaryMonth()));
-  const [cutoffDayOverride, setCutoffDayOverride] = useState<number | null>(null);
-  const cutoffDay =
-    cutoffDayOverride ?? management.data?.settings?.payrollCutoffDay ?? 10;
-  const [cutoffMinuteOverride, setCutoffMinuteOverride] = useState<number | null>(null);
-  const cutoffMinute =
-    cutoffMinuteOverride ?? management.data?.settings?.payrollCutoffMinute ?? 18 * 60;
-  const [periodCutoffTouched, setPeriodCutoffTouched] = useState(false);
-  const defaultPeriodCutoffAt = useMemo(() => {
-    return suggestedPeriodCutoff(periodForm.endsAt, cutoffDay, cutoffMinute) || periodForm.cutoffAt;
-  }, [cutoffDay, cutoffMinute, periodForm.cutoffAt, periodForm.endsAt]);
-  const effectivePeriodCutoffAt = periodCutoffTouched
-    ? periodForm.cutoffAt
-    : defaultPeriodCutoffAt;
   const currentTeamPayroll = useMemo(() => {
     const payrollMemberIds = new Set(
       activeMembers.map((member) => member.membershipId),
@@ -8353,49 +8330,9 @@ export function PayrollManagementPanel({ me, section }: { me: Me; section: "over
       await refresh();
     },
   });
-  const createPeriod = useMutation({
-    mutationFn: () =>
-      api<{ period: { id: string } }>("/api/payroll/periods", {
-        method: "POST",
-        body: {
-          name: periodForm.name,
-          timezone: management.data?.settings?.timezone ?? getOrganizationTimezone(),
-          startsAt: zonedInputToDate(periodForm.startsAt).toISOString(),
-          endsAt: zonedInputToDate(periodForm.endsAt).toISOString(),
-          cutoffAt: zonedInputToDate(effectivePeriodCutoffAt).toISOString(),
-        },
-      }),
-    onSuccess: async () => { await refresh(); setPeriodMonth(""); },
-  });
-  const saveSettings = useMutation({
-    mutationFn: () =>
-      api("/api/payroll/settings", {
-        method: "PATCH",
-        body: {
-          payrollCutoffDay: cutoffDay,
-          payrollCutoffMinute: cutoffMinute,
-        },
-      }),
-    onSuccess: refresh,
-  });
-  const calculatePeriod = useMutation({
-    mutationFn: (periodId: string) =>
-      api<{ run: { id: string } }>(`/api/pay-periods/${periodId}/calculate`, { method: "POST" }),
-    onSuccess: async (response: { run: { id: string } }) => { await refresh(); openHandoff(response.run.id); },
-  });
   const reopenRun = useMutation({
     mutationFn: (runId: string) =>
       api(`/api/payroll-runs/${runId}/reopen`, { method: "POST" }),
-    onSuccess: refresh,
-  });
-  const cancelRun = useMutation({
-    mutationFn: (runId: string) =>
-      api(`/api/payroll-runs/${runId}/cancel-calculation`, { method: "POST" }),
-    onSuccess: refresh,
-  });
-  const deletePeriod = useMutation({
-    mutationFn: (periodId: string) =>
-      api(`/api/payroll/periods/${periodId}`, { method: "DELETE" }),
     onSuccess: refresh,
   });
   const periodQuery = periodSearch.get("q") ?? "";
@@ -8419,7 +8356,7 @@ export function PayrollManagementPanel({ me, section }: { me: Me; section: "over
       {section === "periods" && <>
       <Card>
         <CardHeader>
-          <div><p className="app-page-kicker">结算控制</p><h2 className="mt-1 text-lg font-bold">薪资周期与批次</h2></div>
+          <h2 className="text-lg font-bold">月度薪资</h2>
           <Badge>{filteredPeriods.length} 个周期</Badge>
         </CardHeader>
         <CardContent>
@@ -8429,71 +8366,20 @@ export function PayrollManagementPanel({ me, section }: { me: Me; section: "over
             <label className="payroll-period-search">结算状态<select aria-label="结算状态" className={fieldClass} value={periodState} onChange={(event) => updateMemberFilter("status", event.target.value)}><option value="all">全部状态</option><option value="action">待处理</option><option value="review">需要复核</option><option value="ready">待确认交接</option><option value="settled">已锁定</option></select></label>
             <Button variant="ghost" onClick={() => setPeriodSearch(new URLSearchParams(), { replace: true })}>显示所有周期</Button>
           </div>
-          <details className="payroll-create-period" open={management.data.periods.length === 0}><summary>新建结算周期</summary>
-          <form onSubmit={(event) => { event.preventDefault(); if (!createPeriod.isPending && (customPeriod || isSalaryMonth(settlementMonth))) createPeriod.mutate(); }}><fieldset disabled={createPeriod.isPending} className="grid min-w-0 gap-4 lg:grid-cols-4">
-            <Field hint="月份仅用于快捷填入整月范围，最终以老板指定的起止时间为准，可跨月或使用其他周期。" label="结算月份"><input aria-label="结算月份" aria-invalid={!customPeriod && !isSalaryMonth(settlementMonth)} min="0100-01" max="9998-12" placeholder="YYYY-MM，例如 2026-09" className={fieldClass} required={!customPeriod} type="month" value={settlementMonth} onChange={(event) => { const month = event.target.value; setSettlementMonth(month); if (isSalaryMonth(month)) { setPeriodForm(salaryMonthForm(month)); setPeriodCutoffTouched(false); setCustomPeriod(false); } }} /></Field>
-            <Field label="周期名称"><input className={fieldClass} onChange={(event) => setPeriodForm({ ...periodForm, name: event.target.value })} required value={periodForm.name} /></Field>
-            <Field label="本周期结算截止 / 计划导出时间"><input aria-label="本周期结算截止 / 计划导出时间" className={fieldClass} onChange={(event) => { setPeriodCutoffTouched(true); setPeriodForm({ ...periodForm, cutoffAt: event.target.value }); }} required type="datetime-local" value={effectivePeriodCutoffAt} /></Field>
-            <div className="lg:col-span-4">{!customPeriod && !isSalaryMonth(settlementMonth) ? <p role="alert">请填写完整有效的结算月份，格式为 YYYY-MM，例如 2026-09。</p> : null}<p className="lifecycle-caption">结算范围：{periodForm.startsAt.replace("T", " ")}（含）至 {periodForm.endsAt.replace("T", " ")}（不含） · {getOrganizationTimezone()}。导出完整周期的工资、补贴、报销及工作提交单。</p><label className="flex items-center gap-2"><input type="checkbox" checked={customPeriod} onChange={(event) => { setCustomPeriod(event.target.checked); if (!event.target.checked && isSalaryMonth(settlementMonth)) { setPeriodForm(salaryMonthForm(settlementMonth)); setPeriodCutoffTouched(false); } }} />由老板自定义起止时间</label></div>
-            <><Field label="周期开始（含）"><input aria-label="周期开始（含）" className={fieldClass} onChange={(event) => { setCustomPeriod(true); setPeriodForm({ ...periodForm, startsAt: event.target.value }); }} required step="1" type="datetime-local" value={periodForm.startsAt} /></Field><Field hint="到这个时刻之前为止。整月填写下月 1 日 00:00，自动包含本月最后一天的全部时间。" label="周期结束（不含）"><input aria-label="周期结束（不含）" className={fieldClass} onChange={(event) => { setCustomPeriod(true); setPeriodForm({ ...periodForm, endsAt: event.target.value }); }} required step="1" type="datetime-local" value={periodForm.endsAt} /></Field></>
-            <div className="lg:col-span-4"><Button disabled={createPeriod.isPending || (!customPeriod && !isSalaryMonth(settlementMonth))} type="submit">{createPeriod.isPending ? "正在保存周期…" : "保存老板指定周期"}</Button></div>
-          </fieldset></form>
-          </details>
-          {createPeriod.isSuccess ? <p role="status">老板指定周期已保存。点击该周期的“计算并查看薪资总览”，即可下载总览和工作明细。</p> : null}
+          <p className="mb-4 text-sm text-[var(--text-muted)]">每月 1 日 00:00 至月末 23:59:59，按组织时区自动建立周期、月末后自动计算。</p>
+          {management.data.automationIssues?.map((issue) => <p key={`${issue.periodId}:${issue.message}`} role="alert">{issue.message}</p>)}
           <PayrollPeriodList periods={filteredPeriods} runs={management.data.runs} timezone={management.data.settings.timezone} canSettle={canSettle}
-            busy={calculatePeriod.isPending || deletePeriod.isPending || cancelRun.isPending || reopenRun.isPending}
-            calculatingId={calculatePeriod.isPending ? calculatePeriod.variables : undefined}
-            onCalculate={(id) => calculatePeriod.mutate(id)} onPreview={openHandoff} onDelete={(id) => deletePeriod.mutate(id)} onCancel={(id) => cancelRun.mutate(id)} onReopen={(id) => reopenRun.mutate(id)} />
-          {!filteredPeriods.length && <p className="py-5 text-sm text-[var(--text-muted)]" role="status">{management.data.periods.length ? "当前筛选没有匹配周期，可调整月份、状态或关键词。" : "暂无结算周期，请先新建结算周期。"}</p>}
-          {!canSettle && <p className="mt-4 text-sm text-[var(--text-muted)]">你可以配置周期；计算、核对和导出需要组织级薪资结算权限。</p>}
-          <ErrorMessage error={saveSettings.error ?? createPeriod.error ?? calculatePeriod.error ?? reopenRun.error ?? cancelRun.error ?? deletePeriod.error} />
+            busy={reopenRun.isPending} onPreview={openHandoff} onReopen={(id) => reopenRun.mutate(id)} />
+          {!filteredPeriods.length && <p className="py-5 text-sm text-[var(--text-muted)]" role="status">{management.data.periods.length ? "当前筛选没有匹配周期。" : "正在准备本月周期，请稍后刷新。"}</p>}
+          <ErrorMessage error={reopenRun.error} />
         </CardContent>
       </Card>
       </>}
-      {section === "settings" && <Card><CardHeader><h2 className="font-bold">默认结算时间</h2></CardHeader><CardContent>
-          <form
-            onSubmit={(event) => {
-              event.preventDefault();
-              if (!saveSettings.isPending) saveSettings.mutate();
-            }}
-          ><fieldset disabled={saveSettings.isPending} className="mb-5 flex min-w-0 flex-wrap items-end gap-3">
-            <Field hint="计划导出日期的默认值，可在每个周期中单独指定；不会限定工作统计的起止时间，实际付款由外部平台办理。" label="结算截止日（每月）">
-              <input
-                className={`${fieldClass} w-32`}
-                max="28"
-                min="1"
-                onChange={(event) => {
-                  const value = Number(event.target.value);
-                  saveSettings.reset();
-                  setCutoffDayOverride(value);
-                  setPeriodCutoffTouched(false);
-                }}
-                required
-                type="number"
-                value={cutoffDay}
-              />
-            </Field>
-            <Field hint="计划核对时间，与工作统计范围和最晚工时提交时间分别设置。" label="结算截止 / 计划导出时间">
-              <input
-                aria-label="结算截止 / 计划导出时间"
-                className={`${fieldClass} w-36`}
-                onChange={(event) => {
-                  saveSettings.reset();
-                  setCutoffMinuteOverride(cutoffTimeMinutes(event.target.value));
-                  setPeriodCutoffTouched(false);
-                }}
-                required
-                type="time"
-                value={cutoffTimeValue(cutoffMinute)}
-              />
-            </Field>
-            <Button disabled={saveSettings.isPending} size="compact" type="submit" variant="secondary">
-              {saveSettings.isPending ? "保存中…" : "保存结算截止 / 计划导出时间"}
-            </Button>
-          </fieldset></form>
-
-        {saveSettings.isSuccess && <p role="status">默认结算时间已保存，新建周期将使用此设置。</p>}
-        <ErrorMessage error={saveSettings.error} />
+      {section === "settings" && <Card><CardHeader><h2 className="font-bold">自动月度结算</h2></CardHeader><CardContent>
+        <StatusLine label="组织时区" value={management.data.settings.timezone} />
+        <StatusLine label="计薪范围" value="每月 1 日 00:00 至月末 23:59:59" />
+        <StatusLine label="工资计算" value="月末后自动计算，未结算金额随审核结果自动更新" />
+        <StatusLine label="确认交接" value="核对金额并确认后锁定" />
       </CardContent></Card>}
       {section === "overview" && activeMembers.some((member) => !member.plan) && <Card><CardHeader><h2>已加入但缺计薪方案</h2></CardHeader><CardContent><p>请在导出前补齐方案与生效日期。</p><div className="payroll-member-shortcuts">{activeMembers.filter((member) => !member.plan).map((member) => <Link key={member.membershipId} to={`/payroll-management/plans?member=${encodeURIComponent(member.membershipId)}`}>{member.displayName} · 配置方案 →</Link>)}</div><Link className="workspace-text-link" to="/payroll-management/plans?plans=missing">查看全部待配置成员 →</Link></CardContent></Card>}
       {section === "overview" && management.data?.liveItemIssues?.length ? (

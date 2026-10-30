@@ -81,7 +81,7 @@ test("uniform 168.19 subsidies survive different version dates and reconcile two
   expect(errors).toEqual([]);
 });
 
-test("independent identical subsidies stay 168.19 in a boss-defined cycle and one downloaded workbook starts with overview and work", async ({ page, browser }, testInfo) => {
+test("independent identical subsidies stay 168.19 in an automatic monthly cycle and one downloaded workbook starts with overview and work", async ({ page, browser }, testInfo) => {
   const errors: string[] = []; page.on("pageerror", (error) => errors.push(error.message));
   await page.goto("/login"); await page.getByLabel("邮箱或手机号").fill("owner@acceptance.test");
   await page.getByLabel("密码", { exact: true }).fill("Acceptance-Only-Password-2026!");
@@ -105,9 +105,9 @@ test("independent identical subsidies stay 168.19 in a boss-defined cycle and on
       expect(configured.result.version.config.subsidies).toEqual([{ name: "个人补贴", amount: "168.19", distribution: "period_end" }]);
     } finally { await context.close(); }
   }
-  const period = (await call(page.request, "POST", "/api/payroll/periods", { name: "老板指定八月独立补贴周期", timezone: "UTC",
-    startsAt: "2026-08-05T00:00:00Z", endsAt: "2026-08-25T00:00:00Z", cutoffAt: "2026-08-27T10:00:00Z",
-  })).period;
+  const management = await call(page.request, "GET", "/api/payroll/management");
+  const period = management.periods.find((entry: { name: string }) => entry.name === "2026-08 薪资");
+  expect(period?.automatic).toBe(true);
   const run = (await call(page.request, "POST", `/api/pay-periods/${period.id}/calculate`, {})).run;
   const preview = await call(page.request, "GET", `/api/payroll-runs/${run.id}/handoff`);
   const rows = preview.rows.filter((row: { membershipId: string }) => ids.includes(row.membershipId));
