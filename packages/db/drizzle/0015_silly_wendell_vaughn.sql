@@ -1,0 +1,1 @@
+ALTER TABLE "pay_periods" ADD COLUMN "automatic" boolean DEFAULT false NOT NULL;

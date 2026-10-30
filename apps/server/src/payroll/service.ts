@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import { and, asc, desc, eq, gt, inArray, isNull, lt, ne, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNull, lt, lte, ne, sql } from "drizzle-orm";
 import type { Database } from "@workbench/db";
 import {
   auditLogs,
@@ -43,6 +43,7 @@ import {
 import { lockPayrollInputs } from "./input-lock.js";
 import { effectivePlanRange, replacePlanRange } from "./plan-range.js";
 import { payrollLocalTime } from "./export-summary.js";
+import { ensureMonthlyPeriods } from "./monthly-periods.js";
 
 export const PAYROLL_CALCULATION_VERSION = "payroll-engine-v11-explicit-pay-period";
 
@@ -1272,6 +1273,7 @@ export class PayrollService {
   }
 
   async managementOverview(actor: PayrollActor) {
+    const automationIssues = await this.synchronizeMonthly(actor);
     const [members, planRows, periods, runs, organization, owner, payrollRecords] = await Promise.all([
       this.db
         .select({
@@ -1436,6 +1438,7 @@ export class PayrollService {
       liveItems,
       liveItemIssues,
       settings: normalizedOrganizationSettings,
+      automationIssues,
     };
   }
 
@@ -1740,6 +1743,7 @@ export class PayrollService {
       )
       .for("update").limit(1);
     if (!period) throw new PayrollNotFoundError();
+    if (period.automatic) throw new PayrollConflictError("自然月周期由系统维护，不能删除；未结算报销可直接加入本周期。");
     if (period.status !== "open" || period.settledAt || period.lockedAt) {
       throw new PayrollConflictError("请先撤销未锁定的计算批次；已导出锁定的周期不能删除。");
     }
@@ -1805,6 +1809,31 @@ export class PayrollService {
   }
 
   async calculate(actor: PayrollActor, payPeriodId: string) {
+    // Serialize the complete input read and save with all input writers. This
+    // also covers an idempotent retry or restoring a previously cancelled run.
+    return this.db.transaction(async (tx) => {
+      await lockPayrollInputs(tx, actor.organizationId);
+      return new PayrollService(tx as unknown as Database).calculateLocked(actor, payPeriodId);
+    });
+  }
+
+  async synchronizeMonthly(actor: PayrollActor, now = new Date()) {
+    const issues = await ensureMonthlyPeriods(this.db, actor.organizationId, now);
+    const due = await this.db.select().from(payPeriods).where(and(
+      eq(payPeriods.organizationId, actor.organizationId), lte(payPeriods.endsAt, now),
+      inArray(payPeriods.status, ["open", "pending_confirmation"]),
+    )).orderBy(asc(payPeriods.startsAt));
+    for (const period of due) {
+      try { await this.calculate(actor, period.id); }
+      catch (error) {
+        if (!(error instanceof PayrollConflictError)) throw error;
+        issues.push({ periodId: period.id, message: `${period.name}：${error.message}` });
+      }
+    }
+    return issues;
+  }
+
+  private async calculateLocked(actor: PayrollActor, payPeriodId: string) {
     const [period] = await this.db
       .select()
       .from(payPeriods)
@@ -1816,6 +1845,9 @@ export class PayrollService {
       )
       .limit(1);
     if (!period) throw new PayrollNotFoundError();
+    if (period.automatic && period.endsAt > new Date()) {
+      throw new PayrollConflictError("本月尚未结束，月末后自动计算；当前金额请查看本月薪资预估。");
+    }
     if (["settled", "locked"].includes(period.status)) {
       throw new PayrollConflictError("已结算或锁定的周期不能重新计算。")
     }
@@ -1864,7 +1896,7 @@ export class PayrollService {
         ? await this.db
             .select()
             .from(workBreaks)
-            .where(inArray(workBreaks.workSessionId, sessionIds))
+            .where(inArray(workBreaks.workSessionId, sessionIds)).orderBy(asc(workBreaks.id))
         : [];
     const breaksBySession = new Map<string, Array<typeof workBreaks.$inferSelect>>();
     for (const entry of breaks) {
@@ -1878,7 +1910,7 @@ export class PayrollService {
       .select()
       .from(rateRules)
       .where(inArray(rateRules.compensationPlanVersionId, versionIds))
-      .orderBy(rateRules.priority);
+      .orderBy(rateRules.priority, rateRules.id);
     const rulesByVersion = new Map<string, PayrollRateRule[]>();
     for (const row of rules) {
       const parsed = parseRule(row);
@@ -1895,7 +1927,7 @@ export class PayrollService {
           eq(payrollAdjustments.organizationId, actor.organizationId),
           eq(payrollAdjustments.payPeriodId, period.id),
         ),
-      );
+      ).orderBy(asc(payrollAdjustments.id));
 
     const groupedPlans = new Map<
       string,
@@ -2043,6 +2075,9 @@ export class PayrollService {
         const [currentPeriod] = await tx.select().from(payPeriods).where(eq(payPeriods.id, period.id)).for("update");
         if (!currentPeriod || ["locked", "settled"].includes(currentPeriod.status)) throw new PayrollConflictError("周期已经结算，请刷新。");
         const restoredStatus = reviewItem ? "review_required" as const : "ready" as const;
+        await tx.update(payrollRuns).set({ status: "cancelled", errorSummary: "已由最新计算替代。" }).where(and(
+          eq(payrollRuns.payPeriodId, period.id), ne(payrollRuns.id, existing.id), inArray(payrollRuns.status, ["ready", "review_required"]),
+        ));
         const [restored] = await tx
           .update(payrollRuns)
           .set({ status: restoredStatus, errorSummary: null, completedAt: new Date() })
@@ -2084,6 +2119,9 @@ export class PayrollService {
       const adjustmentSignature = (rows: typeof adjustments) => sha256([...rows].sort((a, b) => a.id.localeCompare(b.id)));
       if (adjustmentSignature(currentAdjustments) !== adjustmentSignature(adjustments))
         throw new PayrollConflictError("计算期间有报销或调整获批，请重新计算以纳入最新金额。");
+      await tx.update(payrollRuns).set({ status: "cancelled", errorSummary: "已由最新计算替代。" }).where(and(
+        eq(payrollRuns.payPeriodId, period.id), inArray(payrollRuns.status, ["ready", "review_required"]),
+      ));
       const [lastRun] = await tx
         .select({ runNumber: payrollRuns.runNumber })
         .from(payrollRuns)

@@ -120,7 +120,7 @@ export function PayrollHandoffPanel({ runId, onClose, onRecalculate, canExportWo
   useEffect(() => { panel.current?.scrollIntoView({ block: "start" }); panel.current?.focus({ preventScroll: true }); }, [runId]);
   const [confirmedHash, setConfirmedHash] = useState<string | null>(null);
   const [identities, setIdentities] = useState<Record<string, string>>({});
-  const query = useQuery({ queryKey: ["payroll-management", "handoff", runId], queryFn: () => api<HandoffPreview>(`/api/payroll-runs/${runId}/handoff`) });
+  const query = useQuery({ queryKey: ["payroll-management", "handoff", runId], refetchInterval: 60_000, queryFn: () => api<HandoffPreview>(`/api/payroll-runs/${runId}/handoff`) });
   const refresh = () => { setConfirmedHash(null); return client.invalidateQueries({ queryKey: ["payroll-management"] }); };
   const profile = useMutation({ mutationFn: (row: HandoffPreview["rows"][number]) => api(`/api/payroll/members/${row.membershipId}/external-identity`, { method: "PUT", body: { externalId: identities[row.membershipId] ?? row.externalId } }), onSuccess: refresh });
   const confirm = useMutation({ mutationFn: () => api(`/api/payroll-runs/${runId}/handoff`, { method: "POST", body: { previewHash: query.data!.previewHash, identityMatchingConfirmed: true, exceptionsAcknowledged: true } }), onSuccess: async () => { await refresh(); await client.invalidateQueries({ queryKey: ["payroll-me"] }); await client.invalidateQueries({ queryKey: ["work-sessions"] }); } });
@@ -149,8 +149,8 @@ export function PayrollHandoffPanel({ runId, onClose, onRecalculate, canExportWo
       <p className="lifecycle-caption">{query.data.period.name} · {dateLabel(query.data.period.startsAt)} 至 {dateLabel(query.data.period.endsAt)}（不含） · {query.data.period.timezone}。本平台导出薪资依据，由外部平台实际发薪。</p>
       <p>{query.data.batch && query.data.batch.manifest?.worksheetOrder?.[1] !== "周期工作记录" ? "此为历史已确认批次，完整 Excel 按确认时的原布局保存；新生成文件以薪资总览为第 1 表、周期工作记录为第 2 表。历史原文件保留不变。" : "下载为一个 Excel 文件：第 1 张“薪资总览”列出每个人本周期的工资、奖励、补贴、报销、调整及合计；第 2 张“周期工作记录”列出所选周期的工作记录。后续仅保留工资组成和报销明细。工作时间只显示本周期内的部分，Excel 和 CSV 均采用精简字段。"}</p>
       <h3 className="font-bold">老板核对：每人薪资总览 + 本周期工作明细</h3>
-      <div className="flex flex-wrap gap-3">{canExportWork ? <Button disabled={report.isPending || recalculating} onClick={() => report.mutate()}>{report.isPending ? "正在生成并校验 Excel…" : "下载薪资总览及工作明细 Excel"}</Button> : <p>完整工作明细导出需要组织全部工时查看权限。</p>}{!query.data.batch && onRecalculate ? <Button variant="secondary" disabled={report.isPending || recalculating} onClick={() => onRecalculate(query.data!.period.id)}>{recalculating ? "正在更新计算…" : "更新计算并查看"}</Button> : null}</div>
-      {!query.data.batch ? <p className="lifecycle-caption">可直接下载当前统计表，无须先锁定或配置外部人员编号。待审与待复核金额会标明；正式交接待处理事项见下方。源数据变化后请更新计算。</p> : null}
+      <div className="flex flex-wrap gap-3">{canExportWork ? <Button disabled={report.isPending || recalculating} onClick={() => report.mutate()}>{report.isPending ? "正在生成并校验 Excel…" : "下载薪资总览及工作明细 Excel"}</Button> : <p>完整工作明细导出需要组织全部工时查看权限。</p>}{!query.data.batch && onRecalculate && (query.data.run.status === "cancelled" || query.data.blockers.some((blocker) => blocker.includes("旧计算规则"))) ? <Button variant="secondary" disabled={report.isPending || recalculating} onClick={() => onRecalculate(query.data!.period.id)}>{recalculating ? "正在更新计算…" : "更新计算并查看"}</Button> : null}</div>
+      {!query.data.batch ? <p className="lifecycle-caption">可直接下载当前统计表，无须先锁定或配置外部人员编号。待审与待复核金额会标明；正式交接待处理事项见下方。源数据变化后系统自动更新计算。</p> : null}
       {report.isSuccess ? <p role="status">Excel 校验通过，已发起下载。{query.data.batch && query.data.batch.manifest?.worksheetOrder?.[1] !== "周期工作记录" ? "历史已确认文件保持原布局。" : "第 1 张为每人薪资总览，第 2 张为本周期工作记录，后续表保留各项核对明细。"}</p> : null}
       <p>缺方案 {query.data.missingPlans.length} 人 · 待审 {query.data.pending.length} 条 · 未提交/退回 {query.data.drafts.length} 条 · 异常 {query.data.anomalies.length} 条</p>
       {query.data.blockers.map((b) => <p className="lifecycle-warning" key={b}>{b}</p>)}

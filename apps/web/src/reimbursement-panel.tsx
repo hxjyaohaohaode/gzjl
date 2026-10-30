@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useInfiniteQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Link, useLocation, useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import { Button, Card, CardContent } from "@workbench/ui";
 import { api } from "./api.js";
 import { ErrorMessage, EvidencePanel, ReadOnlyEvidenceList } from "./pages.js";
@@ -117,10 +117,10 @@ export function ReimbursementPanel({ reviewOnly = false, reviewHistory = false }
               {["draft", "pending"].includes(claim.status) && <Button variant="secondary" disabled={action.isPending} onClick={() => action.mutate({ claim, action: "cancel" })}>撤回申请</Button>}
             </div>}
             {reviewOnly && !own && data?.canReview && claim.status === "pending" && <fieldset disabled={action.isPending} className="reimbursement-form" style={{ minWidth: 0 }}>
-              <label>计入薪资周期<select className={field} value={review.payPeriodId} onChange={(e) => setReviews({ ...reviews, [claim.id]: { ...review, payPeriodId: e.target.value } })}><option value="">请选择开放周期</option>{data.periods.map((period) => <option key={period.id} value={period.id}>{period.name}</option>)}</select></label>
+              <label>计入薪资周期<select className={field} value={review.payPeriodId} onChange={(e) => setReviews({ ...reviews, [claim.id]: { ...review, payPeriodId: e.target.value } })}><option value="">请选择未结算周期</option>{data.periods.map((period) => <option key={period.id} value={period.id}>{period.name}</option>)}</select></label>
               <label>审批说明<input className={field} placeholder="驳回时必填" maxLength={2000} value={review.note} onChange={(e) => setReviews({ ...reviews, [claim.id]: { ...review, note: e.target.value } })} /></label>
               <div className="reimbursement-actions"><Button disabled={action.isPending || !review.payPeriodId} onClick={() => action.mutate({ claim, action: "approve" })}>批准并计入薪资</Button><Button variant="secondary" disabled={action.isPending || !review.note.trim()} onClick={() => action.mutate({ claim, action: "reject" })}>驳回申请</Button></div>
-              {!data.periods.length && <p>暂无开放周期，请由有配置权限的管理员在<Link to="/payroll-management/periods" className="workspace-text-link">周期结算</Link>创建周期或取消未结算的计算批次。</p>}
+              {!data.periods.length && <p>暂无可用的未结算周期，请刷新重试。</p>}
             </fieldset>}
           </div>}
         </article>;

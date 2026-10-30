@@ -6,6 +6,7 @@ import type { AuthContext } from "../auth/service.js";
 import { PayrollConflictError, PayrollNotFoundError } from "./service.js";
 import { lockPayrollInputs } from "./input-lock.js";
 import { effectivePlanRange } from "./plan-range.js";
+import { ensureMonthlyPeriods } from "./monthly-periods.js";
 
 export const canReviewReimbursements = (actor: AuthContext) =>
   hasPermission(actor.grants, "payroll.settle", { scopeKind: "organization" });
@@ -15,6 +16,7 @@ export class ReimbursementService {
 
   async list(actor: AuthContext, input: { from?: string | undefined; to?: string | undefined; pendingOnly?: boolean | undefined; ownOnly?: boolean | undefined; reviewedOnly?: boolean | undefined; id?: string | undefined; before?: string | undefined; limit?: number | undefined } = {}) {
     const reviewer = canReviewReimbursements(actor) && !input.ownOnly;
+    if (reviewer) await ensureMonthlyPeriods(this.db, actor.organizationId);
     const [organization] = await this.db.select({ timezone: organizations.timezone }).from(organizations).where(eq(organizations.id, actor.organizationId));
     const timezone = organization?.timezone ?? "Asia/Shanghai";
     const parts = new Intl.DateTimeFormat("en-CA", { timeZone: timezone, year: "numeric", month: "2-digit" }).formatToParts(new Date());
@@ -46,7 +48,7 @@ export class ReimbursementService {
         beforeAt && beforeId ? or(lt(reimbursementRequests.createdAt, new Date(beforeAt)), and(eq(reimbursementRequests.createdAt, new Date(beforeAt)), lt(reimbursementRequests.id, beforeId))) : undefined))
       .orderBy(desc(reimbursementRequests.createdAt), desc(reimbursementRequests.id)).limit(limit + 1);
     const periods = reviewer ? await this.db.select().from(payPeriods)
-      .where(and(eq(payPeriods.organizationId, actor.organizationId), eq(payPeriods.status, "open")))
+      .where(and(eq(payPeriods.organizationId, actor.organizationId), inArray(payPeriods.status, ["open", "pending_confirmation"])))
       .orderBy(desc(payPeriods.startsAt)) : [];
     const page = items.slice(0, limit), last = page.at(-1)?.request;
     return { items: page.map(({ request, ...details }) => ({ ...request, ...details })), periods, canReview: reviewer, membershipId: actor.membershipId,
@@ -91,13 +93,13 @@ export class ReimbursementService {
           throw new PayrollConflictError("还有文件未上传完成，请完成上传或移除后提交。");
       }
       if (input.action === "approve") {
-        if (!input.payPeriodId) throw new PayrollConflictError("请选择计入的开放薪资周期。");
+        if (!input.payPeriodId) throw new PayrollConflictError("请选择计入的未结算薪资周期。");
         const [period] = await tx.select().from(payPeriods).where(and(eq(payPeriods.id, input.payPeriodId),
           eq(payPeriods.organizationId, actor.organizationId))).for("update");
-        if (!period || period.status !== "open") throw new PayrollConflictError("周期正在计算或已结算，请先取消计算或选择其他开放周期。");
+        if (!period || !["open", "pending_confirmation"].includes(period.status)) throw new PayrollConflictError("周期正在处理或已结算，请选择其他未结算周期。");
         const [activeRun] = await tx.select({ id: payrollRuns.id }).from(payrollRuns)
-          .where(and(eq(payrollRuns.payPeriodId, period.id), inArray(payrollRuns.status, ["queued", "calculating", "ready", "review_required", "settled"])));
-        if (activeRun) throw new PayrollConflictError("该周期已有计算批次，请取消批次后再纳入报销。");
+          .where(and(eq(payrollRuns.payPeriodId, period.id), inArray(payrollRuns.status, ["queued", "calculating", "settled"])));
+        if (activeRun) throw new PayrollConflictError("周期正在处理或已结算，请刷新后选择未结算周期。");
         const [plan] = await tx.select({ currency: compensationPlans.currency }).from(compensationPlans)
           .innerJoin(compensationPlanVersions, eq(compensationPlanVersions.compensationPlanId, compensationPlans.id))
           .where(and(eq(compensationPlans.organizationId, actor.organizationId),
@@ -108,6 +110,11 @@ export class ReimbursementService {
           payPeriodId: period.id, amount: request.amount, currency: request.currency,
           reason: `报销：${request.title}`, sourceEntityType: "reimbursement", sourceEntityId: id,
           createdBy: request.membershipId, approvedBy: actor.membershipId, approvedAt: new Date() });
+        // Invalidate inside the same transaction: stale files can never be
+        // confirmed between approval and the next automatic calculation.
+        await tx.update(payrollRuns).set({ status: "cancelled", errorSummary: "新增获批报销，等待自动更新计算。" })
+          .where(and(eq(payrollRuns.payPeriodId, period.id), inArray(payrollRuns.status, ["ready", "review_required"])));
+        await tx.update(payPeriods).set({ status: "open", updatedAt: new Date() }).where(eq(payPeriods.id, period.id));
       }
       const status = { submit: "pending", cancel: "cancelled", approve: "approved", reject: "rejected" }[input.action] as typeof request.status;
       const [updated] = await tx.update(reimbursementRequests).set({ status, version: sql`${reimbursementRequests.version} + 1`, updatedAt: new Date(),

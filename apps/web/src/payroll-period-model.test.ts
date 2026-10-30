@@ -16,3 +16,15 @@ it("uses the authoritative lock, and distinguishes review, ready and failed stat
   expect(settlementState(period, { ...run, status: "ready" })).toBe("ready");
   expect(settlementState(period, { ...run, status: "failed" })).toBe("failed");
 });
+it("selects a restored snapshot by completion time without exposing an older stale run", () => {
+  const restored = { id: "restored", runNumber: 1, status: "ready", completedAt: "2026-10-03T00:00:00Z" };
+  const latest = latestPeriodRuns([
+    { period, run: restored },
+    { period, run: { id: "superseded", runNumber: 2, status: "cancelled", completedAt: "2026-10-02T00:00:00Z" } },
+  ]).get(period.id);
+  expect(latest).toEqual(restored);
+});
+it("shows the current month as accruing until its exclusive end boundary", () => {
+  expect(settlementState({ ...period, endsAt: new Date(Date.now() + 60_000).toISOString() })).toBe("accruing");
+  expect(settlementState({ ...period, endsAt: new Date(Date.now() - 60_000).toISOString() })).toBe("open");
+});

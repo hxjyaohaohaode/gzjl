@@ -745,7 +745,7 @@ test("password controls expose values only on explicit user action", async ({
   await expect(password).toHaveAttribute("type", "password");
 });
 
-test("Owner can configure a versioned hourly plan and create a pay period", async ({
+test("Owner can configure a versioned plan while calendar periods stay automatic", async ({
   page,
 }) => {
   await mockAuthenticatedWorkspace(page);
@@ -869,50 +869,14 @@ test("Owner can configure a versioned hourly plan and create a pay period", asyn
   ]);
 
   await page.getByRole("navigation", { name: "薪资管理导航" }).getByRole("link", { name: "结算设置", exact: true }).click();
-  await expect(page.getByLabel("结算截止日（每月）")).toHaveValue("15");
-  await expect(page.getByLabel("结算截止 / 计划导出时间", { exact: true })).toHaveValue("18:00");
-  await page.getByLabel("结算截止 / 计划导出时间", { exact: true }).fill("09:30");
-  await page.getByRole("button", { name: "保存结算截止 / 计划导出时间" }).click();
-  await expect.poll(() => settingsPayload).toEqual({
-    payrollCutoffDay: 15,
-    payrollCutoffMinute: 570,
-  });
+  await expect(page.getByRole("heading", { name: "自动月度结算" })).toBeVisible();
+  await expect(page.getByLabel("结算截止日（每月）")).toHaveCount(0);
+  expect(settingsPayload).toBeNull();
   await page.getByRole("navigation", { name: "薪资管理导航" }).getByRole("link", { name: "周期结算", exact: true }).click();
-  await page.getByRole("button", { name: "保存老板指定周期" }).click();
-  await expect.poll(() => periodPayload).not.toBeNull();
-  expect(periodPayload).toMatchObject({ timezone: "Asia/Shanghai" });
-  expect(
-    new Intl.DateTimeFormat("en-CA", {
-      timeZone: "Asia/Shanghai",
-      day: "2-digit",
-    }).format(new Date(String(periodPayload?.cutoffAt))),
-  ).toBe("15");
-  expect(
-    new Intl.DateTimeFormat("en-CA", {
-      timeZone: "Asia/Shanghai",
-      hour: "2-digit",
-      minute: "2-digit",
-      hourCycle: "h23",
-    }).format(new Date(String(periodPayload?.cutoffAt))),
-  ).toBe("09:30");
-  await page.getByLabel("结算月份", { exact: true }).fill("2028-02");
-  await expect(page.getByText(/2028-02-01 00:00:00.*2028-03-01 00:00:00/)).toBeVisible();
-  await page.getByRole("button", { name: "保存老板指定周期" }).click();
-  await expect.poll(() => periodPayload?.startsAt).toBe("2028-01-31T16:00:00.000Z");
-  expect(periodPayload?.endsAt).toBe("2028-02-29T16:00:00.000Z");
-  expect(periodPayload?.cutoffAt).toBe("2028-03-15T01:30:00.000Z");
-  const monthInput = page.getByLabel("结算月份", { exact: true });
-  await monthInput.evaluate((element) => { (element as HTMLInputElement).type = "text"; });
-  await monthInput.fill("2026-"); await expect(page.getByRole("button", { name: "保存老板指定周期" })).toBeDisabled();
-  await expect(page.getByText("请填写完整有效的结算月份，格式为 YYYY-MM，例如 2026-09。", { exact: true })).toBeVisible();
-  await monthInput.fill("2026-09"); await expect(page.getByRole("button", { name: "保存老板指定周期" })).toBeEnabled();
-  await page.getByLabel("周期开始（含）", { exact: true }).fill("2026-09-20T06:30:15");
-  await page.getByLabel("周期结束（不含）", { exact: true }).fill("2026-10-19T23:30:45");
-  await expect(page.getByRole("checkbox", { name: "由老板自定义起止时间" })).toBeChecked();
-  await page.getByRole("button", { name: "保存老板指定周期" }).click();
-  await expect.poll(() => periodPayload?.startsAt).toBe("2026-09-19T22:30:15.000Z");
-  expect(periodPayload?.endsAt).toBe("2026-10-19T15:30:45.000Z");
-  expect(periodPayload?.cutoffAt).toBe("2026-11-15T01:30:00.000Z");
+  await expect(page.getByRole("button", { name: "保存老板指定周期" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "计算并查看薪资总览" })).toHaveCount(0);
+  await expect(page.getByText(/每月 1 日 00:00 至月末 23:59:59/)).toBeVisible();
+  expect(periodPayload).toBeNull();
 });
 
 for (const distribution of [undefined, "daily", "prorated"]) {
@@ -968,10 +932,10 @@ test("Owner payroll keeps settlement controls visible when one live estimate has
   await page.getByRole("navigation", { name: "薪资管理导航" }).getByRole("link", { name: "成员方案", exact: true }).click();
   await expect(page.getByRole("heading", { name: "成员薪资方案" })).toBeVisible();
   await page.getByRole("navigation", { name: "薪资管理导航" }).getByRole("link", { name: "周期结算", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "薪资周期与批次" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "月度薪资" })).toBeVisible();
 });
 
-test("Owner can undo an unexported calculation and remove an accidental period", async ({
+test("Owner cannot accidentally cancel calculations or delete automatic periods", async ({
   page,
 }) => {
   await mockAuthenticatedWorkspace(page);
@@ -1027,15 +991,12 @@ test("Owner can undo an unexported calculation and remove an accidental period",
   await page.getByRole("button", { name: "登录", exact: true }).click();
   await expect(page).not.toHaveURL(/\/login(?:[?#].*)?$/);
   await page.goto("/payroll-management/periods");
-  await expect(page.locator(".payroll-period-card[data-settlement-state=ready]")).toContainText("核对金额和人员编号，确认后锁定并保留原文件");
-  page.once("dialog", (dialog) => dialog.accept());
-  await page.getByRole("button", { name: "撤销本次计算" }).click();
-  await expect(page.getByRole("button", { name: "撤销误建周期" })).toBeVisible();
-  page.once("dialog", (dialog) => dialog.accept());
-  await page.getByRole("button", { name: "撤销误建周期" }).click();
-  await expect(page.getByText("2026 年 9 月", { exact: true })).toHaveCount(0);
-  expect(cancelled).toBe(true);
-  expect(deleted).toBe(true);
+  await expect(page.locator(".payroll-period-card[data-settlement-state=ready]")).toContainText("待确认交接");
+  await expect(page.getByRole("button", { name: "核对导出预览" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "撤销本次计算" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "撤销误建周期" })).toHaveCount(0);
+  expect(cancelled).toBe(false);
+  expect(deleted).toBe(false);
 });
 
 test("personal payroll renders reconciled totals, daily pay, period trend, and components", async ({

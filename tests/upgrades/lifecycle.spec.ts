@@ -30,7 +30,7 @@ test("long content, evidence queue, restoration, contextual approval and exact h
     await login(member, "deep@acceptance.test");
     const me = await call(member.request, "GET", "/api/me");
     await owner.goto("/organization/work-policy");
-    await owner.getByLabel("最多补录多少天前的工作").fill("7");
+    await owner.getByLabel("最多补录多少天前的工作").fill("366");
     await owner.getByRole("button", { name: "保存提交与补录规则" }).click();
     await expect(owner.getByText("规则已生效。", { exact: true })).toBeVisible();
     expect((await call(owner.request, "GET", "/api/work-policy")).version).toBe(1);
@@ -38,12 +38,15 @@ test("long content, evidence queue, restoration, contextual approval and exact h
     expect((await member.request.put("/api/work-policy", { headers: { "x-csrf-token": csrf }, data: { manualEntryLookbackDays: 366, expectedVersion: 1 } })).status()).toBe(403);
     await expect(member.getByText("当前没有生效的计薪方案", { exact: false })).toBeVisible();
     await owner.goto("/payroll-management"); await expect(owner.getByRole("heading", { name: "已加入但缺计薪方案" })).toBeVisible();
-    await call(owner.request, "PUT", `/api/payroll/members/${me.user.membershipId}/plan`, { name: "验收时薪", type: "hourly", baseAmount: "100.00", effectiveFrom: new Date(Date.now() - 7 * 86400_000).toISOString(), rules: [] });
+    const currentMonth = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit" }).format(new Date());
+    const [year, month] = currentMonth.split("-").map(Number);
+    const previousWork = new Date(Date.UTC(year!, month! - 2, 15, 1));
+    await call(owner.request, "PUT", `/api/payroll/members/${me.user.membershipId}/plan`, { name: "验收时薪", type: "hourly", baseAmount: "100.00", effectiveFrom: new Date(previousWork.getTime() - 86400_000).toISOString(), rules: [] });
     const createdProject = await call(owner.request, "POST", "/api/projects", { key: "DEEP", name: "手机项目名称包含长内容和多个交付节点".repeat(4), description: "项目背景与完整交付要求\n".repeat(150) });
     await call(member.request, "POST", `/api/projects/${createdProject.project.id}/members/self`, {});
     const node = (await call(owner.request, "POST", `/api/projects/${createdProject.project.id}/nodes`, { branchId: createdProject.branch.id, parentId: createdProject.root.id, title: "长任务名称与明确交付范围".repeat(7), type: "task", progressMode: "manual", sortOrder: 1 })).node;
     const text = "交付内容、阻塞与下一步需要完整可见。\n".repeat(220);
-    const startAt = new Date(Date.now() - 3_600_000).toISOString(); const endAt = new Date(Date.now() - 10_000).toISOString();
+    const startAt = previousWork.toISOString(); const endAt = new Date(previousWork.getTime() + 3_590_000).toISOString();
     const input = { source: "manual", content: text, result: "完成的事实结果\n".repeat(50), blockers: "依赖尚未确定\n".repeat(30), nextStep: "需要项目负责人确认后续节点", startAt, endAt, timezone: "Asia/Shanghai", visibility: "project_visible", primaryProjectNodeId: node.id, projectNodeIds: [node.id], breaks: [] };
     const { session } = await call(member.request, "POST", "/api/work-sessions", input);
     await member.goto(`/work?record=${session.id}&version=${session.version}`);
@@ -66,19 +69,12 @@ test("long content, evidence queue, restoration, contextual approval and exact h
     await expect(owner.getByText("审核依据与历次退回原因", { exact: true })).toBeVisible();
     await expect(owner.getByText("提交人：同名成员与多附件长文本验收", { exact: true })).toBeVisible();
     await expect(owner.getByText("图片证据.png", { exact: true }).first()).toBeVisible();
-    // A boss-defined partial cycle must be usable through the actual form.
     await owner.goto("/payroll-management/periods");
-    // Native datetime-local values omit zero seconds. Preserve nonzero seconds
-    // while using the browser's canonical format at a minute boundary.
-    const localInput = (date: Date) => new Intl.DateTimeFormat("sv-SE", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" }).format(date).replace(" ", "T").replace(/:00$/, "");
-    await owner.getByLabel("周期名称", { exact: true }).fill("老板指定非自然月交接验收");
-    await owner.getByLabel("周期开始（含）", { exact: true }).fill(localInput(new Date(Date.now() - 86400_000)));
-    await owner.getByLabel("周期结束（不含）", { exact: true }).fill(localInput(new Date(Date.now() - 1000)));
-    const createdResponse = owner.waitForResponse((r) => r.url().endsWith("/api/payroll/periods") && r.request().method() === "POST");
-    await owner.getByRole("button", { name: "保存老板指定周期", exact: true }).click();
-    const period = (await (await createdResponse).json()).period;
-    expect(period).toBeTruthy();
-    await owner.getByRole("button", { name: "计算并查看薪资总览", exact: true }).click();
+    await expect(owner.getByRole("heading", { name: "月度薪资", exact: true })).toBeVisible();
+    const automated = await call(owner.request, "GET", "/api/payroll/management");
+    const period = automated.periods.find((item: { startsAt: string; endsAt: string }) => Date.parse(item.startsAt) <= previousWork.getTime() && Date.parse(item.endsAt) > previousWork.getTime());
+    expect(period.automatic).toBe(true);
+    await owner.getByRole("button", { name: "核对导出预览", exact: true }).click();
     await expect(owner.getByRole("heading", { name: "老板核对：每人薪资总览 + 本周期工作明细" })).toBeVisible();
     await expect(owner).toHaveURL(/\/payroll-management\/runs\//);
     await expect(owner.getByRole("button", { name: "确认导出并锁定", exact: true })).toBeDisabled();
@@ -101,7 +97,9 @@ test("long content, evidence queue, restoration, contextual approval and exact h
     await owner.getByRole("button", { name: "批准", exact: true }).click();
     await expect.poll(async () => (await call(owner.request, "GET", `/api/work-facts/${session.id}`)).session.approvalStatus).toBe("approved");
 
-    const { run } = await call(owner.request, "POST", `/api/pay-periods/${period.id}/calculate`); expect(run.status).toBe("ready");
+    const refreshed = await call(owner.request, "GET", "/api/payroll/management");
+    const { run } = refreshed.runs.find((entry: { period: { id: string }; run: { status: string } }) => entry.period.id === period.id && entry.run.status === "ready");
+    expect(run.status).toBe("ready");
     expect((await owner.request.get(`/api/payroll-runs/${run.id}/finance-export.csv`)).status()).toBe(409);
     await owner.goto(`/projects/${createdProject.project.id}?node=${createdProject.root.id}`);
     await expect(owner.locator(".project-node-inspector")).toBeVisible();

@@ -84,10 +84,9 @@ test("management navigation separates overview, plans, periods and settings on r
   await expect(page.getByLabel("结算截止日（每月）")).toHaveCount(0);
   await page.screenshot({ path: testInfo.outputPath("member-plans.png"), fullPage: true });
   await nav.getByRole("link", { name: "周期结算", exact: true }).click();
-  await expect(page.getByRole("button", { name: "计算并查看薪资总览" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "计算并查看薪资总览" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "保存老板指定周期" })).toBeHidden();
-  await page.getByText("新建结算周期", { exact: true }).click();
-  await expect(page.getByLabel("结算月份", { exact: true })).toBeVisible();
+  await expect(page.getByText("新建结算周期", { exact: true })).toHaveCount(0);
   await page.getByLabel("查看 / 导出指定月份", { exact: true }).fill("2026-09");
   await page.reload();
   await expect(nav.getByRole("link", { name: "周期结算", exact: true })).toHaveAttribute("aria-current", "page");
@@ -95,8 +94,8 @@ test("management navigation separates overview, plans, periods and settings on r
   await expect(page.getByLabel("基础时薪")).toHaveCount(0);
   await page.screenshot({ path: testInfo.outputPath("periods.png"), fullPage: true });
   await nav.getByRole("link", { name: "结算设置", exact: true }).click();
-  await expect(page.getByLabel("结算截止日（每月）")).toBeVisible();
-  await expect(page.getByRole("heading", { name: "薪资周期与批次" })).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "自动月度结算" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "月度薪资" })).toHaveCount(0);
   await expect(page.locator(".work-policy-panel, .reimbursement-panel")).toHaveCount(0);
   await page.goBack();
   await expect(page.getByLabel("查看 / 导出指定月份", { exact: true })).toHaveValue("2026-09");
@@ -137,10 +136,10 @@ test("legacy handoff links open a dedicated preview and return to the period lis
   await page.goto("/payroll?handoff=run-one");
   await expect(page).toHaveURL(/\/payroll-management\/runs\/run-one$/);
   await expect(page.getByRole("heading", { name: "薪资交接 · 预检与逐行预览" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "薪资周期与批次" })).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "月度薪资" })).toHaveCount(0);
   expect(requests.some(({ pathname }) => ["/api/payroll/me", "/api/payroll/management", "/api/reimbursements"].includes(pathname))).toBe(false);
   await page.getByRole("link", { name: "← 返回周期结算" }).click();
-  await expect(page.getByRole("heading", { name: "薪资周期与批次" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "月度薪资" })).toBeVisible();
 });
 
 test("expense-only reviewers can access their queue without requesting work approvals", async ({ page }) => {
@@ -170,9 +169,9 @@ test("members and scoped payroll grants cannot mount organization management or 
 test("plan administrators without settlement permission cannot start a calculation", async ({ page }) => {
   await workspace(page, ["payroll.configure"], false);
   await page.goto("/payroll-management/periods");
-  await expect(page.getByRole("button", { name: "计算并查看薪资总览" })).toBeDisabled();
-  await page.getByText("新建结算周期", { exact: true }).click();
-  await expect(page.getByRole("button", { name: "保存老板指定周期" })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "计算并查看薪资总览" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "保存老板指定周期" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "核对导出预览" })).toHaveCount(0);
 });
 
 test("plan drafts survive member and page switches with deep links and explicit discard", async ({ page }, testInfo) => {
@@ -237,29 +236,19 @@ test("a late plan save only clears its submitted member even when drafts have eq
   await expect(page.getByLabel("基础时薪", { exact: true })).toHaveValue("");
 });
 
-test("shared operation feedback follows failure and keeps editable values", async ({ page }) => {
-  await workspace(page);
-  let release!: () => void;
-  const responseGate = new Promise<void>((resolve) => { release = resolve; });
-  await page.route("**/api/payroll/settings", async (route) => { await responseGate; await route.fulfill({ status: 409, json: { error: "conflict", message: "结算设置已变化，请重新核对。" } }); });
+test("automatic calendar settings cannot be changed accidentally", async ({ page }) => {
+  const requests = await workspace(page);
   await page.goto("/payroll-management/settings");
-  await page.getByLabel("结算截止日（每月）", { exact: true }).fill("12");
-  const save = page.getByRole("button", { name: "保存结算截止 / 计划导出时间", exact: true });
-  await save.click();
-  await expect(page.locator(".workspace-operation")).toContainText("正在处理 1 项操作");
-  await expect(page.getByLabel("结算截止日（每月）", { exact: true })).toBeDisabled();
-  await expect(page.locator("form[data-operation-state=pending]")).toHaveCount(1);
-  release();
-  await expect(page.getByRole("alert")).toContainText("结算设置已变化");
-  await expect(page.getByLabel("结算截止日（每月）", { exact: true })).toHaveValue("12");
-  await expect(page.getByLabel("结算截止日（每月）", { exact: true })).toBeEnabled();
-  await expect(page.locator(".workspace-operation")).toContainText("操作未完成");
+  await expect(page.getByRole("heading", { name: "自动月度结算" })).toBeVisible();
+  await expect(page.getByText("每月 1 日 00:00 至月末 23:59:59", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("结算截止日（每月）")).toHaveCount(0);
+  expect(requests.some(({ pathname }) => pathname === "/api/payroll/settings")).toBe(false);
 });
 
 test("dynamic controls are traced and motion preferences follow the system", async ({ page }, testInfo) => {
   await workspace(page);
   await page.goto("/payroll-management/periods");
-  await page.getByText("新建结算周期", { exact: true }).click();
+  await expect(page.getByRole("heading", { name: "月度薪资" })).toBeVisible();
   const missing = () => page.evaluate(() => [...document.querySelectorAll('button,a[href],input:not([type=hidden]),select,textarea,summary')].filter((element) => !element.hasAttribute("data-interaction-id")).length);
   await expect.poll(missing).toBe(0);
   await page.getByRole("button", { name: "外观设置", exact: true }).click();

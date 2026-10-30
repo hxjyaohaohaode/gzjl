@@ -128,22 +128,13 @@ test("real API, database and file bytes connect the employee and management work
 
     // Reimbursements must travel through evidence and approval without adding work.
     const management = await call(owner.request, "GET", "/api/payroll/management");
-    const period = management.periods[0] ?? (await call(owner.request, "POST", "/api/payroll/periods", {
-      name: "隔离验收薪资周期", timezone: "Asia/Shanghai",
-      startsAt: new Date(Date.now() - 6 * 86400_000).toISOString(),
-      endsAt: new Date(Date.now() + 86400_000).toISOString(), cutoffAt: new Date(Date.now() + 86400_000).toISOString(),
-    })).period;
+    const period = management.periods.find((item: { automatic: boolean; startsAt: string; endsAt: string }) => item.automatic && Date.parse(item.startsAt) <= Date.now() && Date.parse(item.endsAt) > Date.now());
+    expect(period).toBeTruthy();
     await employee.goto("/reimbursements");
     await owner.goto("/payroll-management/periods");
-    // Wait for management data to render before temporarily exercising the
-    // browser's text fallback. React's initial data commit restores input.type.
-    await expect(owner.getByRole("heading", { name: "薪资周期与批次", exact: true })).toBeVisible();
-    await owner.getByText("新建结算周期", { exact: true }).click();
-    const monthInput = owner.getByLabel("结算月份", { exact: true });
-    const savedMonth = await monthInput.inputValue();
-    await monthInput.evaluate((element) => { (element as HTMLInputElement).type = "text"; });
-    await monthInput.fill("2026-"); await expect(owner.getByRole("button", { name: "保存老板指定周期" })).toBeDisabled();
-    await monthInput.fill(savedMonth); await expect(owner.getByRole("button", { name: "保存老板指定周期" })).toBeEnabled();
+    await expect(owner.getByRole("heading", { name: "月度薪资", exact: true })).toBeVisible();
+    await expect(owner.getByText("新建结算周期", { exact: true })).toHaveCount(0);
+    await expect(owner.getByRole("button", { name: "计算并查看薪资总览" })).toHaveCount(0);
     await employee.getByRole("button", { name: "申请报销", exact: true }).click();
     await employee.getByLabel("报销事项", { exact: true }).fill(`交通报销${suffix}`);
     await employee.getByLabel("发生日期").fill(new Date().toISOString().slice(0, 10));
@@ -165,11 +156,12 @@ test("real API, database and file bytes connect the employee and management work
     await employee.reload();
     await expect(employee.locator(".reimbursement-summary")).toContainText("已批准");
     expect((await call(employee.request, "GET", "/api/work-sessions?limit=100")).items).toHaveLength(records.length);
-    const { run } = await call(owner.request, "POST", `/api/pay-periods/${period.id}/calculate`);
-    expect(["ready", "review_required"]).toContain(run.status);
+    const calculateCsrf = (await (await owner.request.get("/api/auth/csrf")).json()).csrfToken;
+    const premature = await owner.request.post(`/api/pay-periods/${period.id}/calculate`, { headers: { "x-csrf-token": calculateCsrf } });
+    expect(premature.status()).toBe(409);
+    expect((await premature.json()).message).toContain("尚未结束");
     const calculated = await call(employee.request, "GET", "/api/payroll/me");
     expect(JSON.stringify(calculated)).toContain("128.35");
-    await call(owner.request, "POST", `/api/payroll-runs/${run.id}/cancel-calculation`);
 
     // Exercise every timer transition through the UI against persisted state.
     await employee.goto("/work");
